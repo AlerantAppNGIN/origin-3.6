@@ -35,6 +35,19 @@ for mapfile in "$haproxy_conf_dir"/*.map; do
   sort -r "$mapfile" -o "$mapfile"
 done
 
+#creating dir for the stats result files:
+mkdir -p /var/lib/haproxy/stats
+
+#deleting old stats files not removed by the monitortool:
+find /var/lib/haproxy/stats -mmin +5 -exec rm -f {} \;
+
+#creating a new stats file for the 'to be restarted' haproxy process:
+now=$(date +"%Y-%m-%d-%H-%M-%S-%N")
+touch /var/lib/haproxy/stats/$ROUTER_SERVICE_NAME.stat.results.$now.log
+
+#persisting the stats of the 'to be restarted' haproxy process:
+echo "show stat" | socat /var/lib/haproxy/run/haproxy.sock stdio > /var/lib/haproxy/stats/$ROUTER_SERVICE_NAME.stat.results.$now.log
+
 old_pids=$(ps -A -opid,args | grep haproxy | egrep -v -e 'grep|reload-haproxy' | awk '{print $1}' | tr '\n' ' ')
 
 DROP_SYN_DURING_RESTART=1
