@@ -39,7 +39,7 @@ done
 mkdir -p /var/lib/haproxy/stats
 
 #deleting old stats files not removed by the monitortool:
-find /var/lib/haproxy/stats -mmin +5 -exec rm -f {} \;
+find /var/lib/haproxy/stats -mmin +1 -exec rm -f {} \;
 
 #creating a new stats file for the 'to be restarted' haproxy process:
 now=$(date +"%Y-%m-%d-%H-%M-%S-%N")
