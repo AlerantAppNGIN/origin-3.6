@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"testing"
 
-	projectfake "github.com/openshift/origin/pkg/project/generated/internalclientset/fake"
+	"github.com/openshift/origin/pkg/client/testclient"
 )
 
 // TestRequestProjectDefaultFlags ensures that flags default values are set.
@@ -46,7 +46,7 @@ func TestRequestProjectDefaultFlags(t *testing.T) {
 
 // DISABLE_TestRequestProjectRun ensures that Run command calls the right actions.
 func DISABLE_TestRequestProjectRun(t *testing.T) {
-	client := projectfake.NewSimpleClientset()
+	client := testclient.NewSimpleFake()
 	buf := &bytes.Buffer{}
 
 	test := struct {
@@ -57,7 +57,7 @@ func DISABLE_TestRequestProjectRun(t *testing.T) {
 		opts: &NewProjectOptions{
 			Out:         buf,
 			Server:      "127.0.0.1",
-			Client:      client.Project(),
+			Client:      client,
 			Name:        "oc",
 			ProjectName: "yourproject",
 		},

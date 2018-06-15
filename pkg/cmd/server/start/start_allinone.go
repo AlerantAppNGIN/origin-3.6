@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	_ "net/http/pprof"
 	"os"
 	"path"
+	"runtime"
 	"strconv"
 	"strings"
 
@@ -16,17 +18,17 @@ import (
 	"github.com/spf13/cobra"
 
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/apiserver/pkg/util/flag"
 	"k8s.io/kubernetes/pkg/kubectl/cmd/templates"
 	kcmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
-	"k8s.io/kubernetes/pkg/master/ports"
 
-	"github.com/openshift/library-go/pkg/crypto"
 	"github.com/openshift/origin/pkg/cmd/server/admin"
-	configapi "github.com/openshift/origin/pkg/cmd/server/apis/config"
-	"github.com/openshift/origin/pkg/cmd/server/origin"
-	tsbcmd "github.com/openshift/origin/pkg/templateservicebroker/cmd/server"
+	configapi "github.com/openshift/origin/pkg/cmd/server/api"
+	"github.com/openshift/origin/pkg/cmd/server/crypto"
+	"github.com/openshift/origin/pkg/cmd/server/start/kubernetes"
+	cmdutil "github.com/openshift/origin/pkg/cmd/util"
+	tsbcmd "github.com/openshift/origin/pkg/openservicebroker/cmd/server"
+	"k8s.io/apimachinery/pkg/util/wait"
 )
 
 type AllInOneOptions struct {
@@ -63,7 +65,7 @@ var allInOneLong = templates.LongDesc(`
 	You may also pass --etcd=<address> to connect to an external etcd server.`)
 
 // NewCommandStartAllInOne provides a CLI handler for 'start' command
-func NewCommandStartAllInOne(basename string, out, errout io.Writer, stopCh <-chan struct{}) (*cobra.Command, *AllInOneOptions) {
+func NewCommandStartAllInOne(basename string, out, errout io.Writer) (*cobra.Command, *AllInOneOptions) {
 	options := &AllInOneOptions{
 		MasterOptions: &MasterOptions{
 			Output: out,
@@ -82,7 +84,7 @@ func NewCommandStartAllInOne(basename string, out, errout io.Writer, stopCh <-ch
 			kcmdutil.CheckErr(options.Complete())
 			kcmdutil.CheckErr(options.Validate(args))
 
-			origin.StartProfiler()
+			startProfiler()
 
 			if err := options.StartAllInOne(); err != nil {
 				if kerrors.IsInvalid(err) {
@@ -120,7 +122,7 @@ func NewCommandStartAllInOne(basename string, out, errout io.Writer, stopCh <-ch
 	BindImageFormatArgs(imageFormatArgs, flags, "")
 
 	startMaster, _ := NewCommandStartMaster(basename, out, errout)
-	startNode, _ := NewCommandStartNode(basename, out, errout, stopCh)
+	startNode, _ := NewCommandStartNode(basename, out, errout)
 	startNodeNetwork, _ := NewCommandStartNetwork(basename, out, errout)
 	startEtcdServer, _ := NewCommandStartEtcdServer(RecommendedStartEtcdServerName, basename, out, errout)
 	startTSBServer := tsbcmd.NewCommandStartTemplateServiceBrokerServer(out, errout, wait.NeverStop)
@@ -129,6 +131,9 @@ func NewCommandStartAllInOne(basename string, out, errout io.Writer, stopCh <-ch
 	cmds.AddCommand(startNodeNetwork)
 	cmds.AddCommand(startEtcdServer)
 	cmds.AddCommand(startTSBServer)
+
+	startKube := kubernetes.NewCommand("kubernetes", basename, out, errout)
+	cmds.AddCommand(startKube)
 
 	// autocompletion hints
 	cmds.MarkFlagFilename("write-config")
@@ -235,14 +240,6 @@ func (o *AllInOneOptions) Complete() error {
 	o.NodeArgs.NodeName = strings.ToLower(o.NodeArgs.NodeName)
 	o.NodeArgs.MasterCertDir = o.MasterOptions.MasterArgs.ConfigDir.Value()
 
-	// if the node listen argument inherits the master listen argument, specialize it now to its own value so
-	// that the kubelet can have a customizable port
-	if o.NodeArgs.ListenArg == o.MasterOptions.MasterArgs.ListenArg {
-		o.NodeArgs.ListenArg = NewDefaultListenArg()
-		o.NodeArgs.ListenArg.ListenAddr.Set(fmt.Sprintf("%s:%d", o.MasterOptions.MasterArgs.ListenArg.ListenAddr.Host, ports.KubeletPort))
-		o.NodeArgs.ListenArg.ListenAddr.Default()
-	}
-
 	// For backward compatibility of DNS queries to the master service IP, enabling node DNS
 	// continues to start the master DNS, but the container DNS server will be the node's.
 	// However, if the user has provided an override DNSAddr, we need to honor the value if
@@ -310,7 +307,7 @@ func (o AllInOneOptions) StartAllInOne() error {
 		ConfigFile: o.NodeConfigFile,
 		Output:     o.MasterOptions.Output,
 	}
-	if err := nodeOptions.RunNode(wait.NeverStop); err != nil {
+	if err := nodeOptions.RunNode(); err != nil {
 		return err
 	}
 
@@ -320,6 +317,18 @@ func (o AllInOneOptions) StartAllInOne() error {
 
 	daemon.SdNotify(false, "READY=1")
 	select {}
+}
+
+func startProfiler() {
+	if cmdutil.Env("OPENSHIFT_PROFILE", "") == "web" {
+		go func() {
+			runtime.SetBlockProfileRate(1)
+			profilePort := cmdutil.Env("OPENSHIFT_PROFILE_PORT", "6060")
+			profileHost := cmdutil.Env("OPENSHIFT_PROFILE_HOST", "127.0.0.1")
+			glog.Infof(fmt.Sprintf("Starting profiling endpoint at http://%s:%s/debug/pprof/", profileHost, profilePort))
+			glog.Fatal(http.ListenAndServe(fmt.Sprintf("%s:%s", profileHost, profilePort), nil))
+		}()
+	}
 }
 
 func (o AllInOneOptions) IsWriteConfigOnly() bool {

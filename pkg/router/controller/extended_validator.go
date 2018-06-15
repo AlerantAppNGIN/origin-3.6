@@ -2,11 +2,12 @@ package controller
 
 import (
 	"fmt"
+	"reflect"
 
 	"github.com/golang/glog"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/watch"
-	kapi "k8s.io/kubernetes/pkg/apis/core"
+	kapi "k8s.io/kubernetes/pkg/api"
 
 	routeapi "github.com/openshift/origin/pkg/route/apis/route"
 	"github.com/openshift/origin/pkg/route/apis/route/validation"
@@ -21,6 +22,9 @@ type ExtendedValidator struct {
 
 	// recorder is an interface for indicating route rejections.
 	recorder RejectionRecorder
+
+	// invalidRoutes is a map of invalid routes previously encountered.
+	invalidRoutes map[string]routeapi.Route
 }
 
 // NewExtendedValidator creates a plugin wrapper that ensures only routes that
@@ -28,8 +32,9 @@ type ExtendedValidator struct {
 // Recorder is an interface for indicating why a route was rejected.
 func NewExtendedValidator(plugin router.Plugin, recorder RejectionRecorder) *ExtendedValidator {
 	return &ExtendedValidator{
-		plugin:   plugin,
-		recorder: recorder,
+		plugin:        plugin,
+		recorder:      recorder,
+		invalidRoutes: make(map[string]routeapi.Route),
 	}
 }
 
@@ -47,6 +52,13 @@ func (p *ExtendedValidator) HandleEndpoints(eventType watch.EventType, endpoints
 func (p *ExtendedValidator) HandleRoute(eventType watch.EventType, route *routeapi.Route) error {
 	// Check if previously seen route and its Spec is unchanged.
 	routeName := routeNameKey(route)
+	old, ok := p.invalidRoutes[routeName]
+	if ok && reflect.DeepEqual(old.Spec, route.Spec) {
+		// Route spec was unchanged and it is already marked in
+		// error, we don't need to do anything more.
+		return fmt.Errorf("invalid route configuration")
+	}
+
 	if errs := validation.ExtendedValidateRoute(route); len(errs) > 0 {
 		errmsg := ""
 		for i := 0; i < len(errs); i++ {
@@ -55,7 +67,6 @@ func (p *ExtendedValidator) HandleRoute(eventType watch.EventType, route *routea
 		glog.Errorf("Skipping route %s due to invalid configuration: %s", routeName, errmsg)
 
 		p.recorder.RecordRouteRejection(route, "ExtendedValidationFailed", errmsg)
-		p.plugin.HandleRoute(watch.Deleted, route)
 		return fmt.Errorf("invalid route configuration")
 	}
 

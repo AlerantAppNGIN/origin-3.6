@@ -6,7 +6,7 @@ import (
 	"io"
 	"io/ioutil"
 
-	api "k8s.io/kubernetes/pkg/apis/core"
+	"k8s.io/kubernetes/pkg/api"
 	kcoreclient "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset/typed/core/internalversion"
 	"k8s.io/kubernetes/pkg/kubectl/cmd/templates"
 	kcmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
@@ -59,26 +59,25 @@ func NewCmdCreateSSHAuthSecret(name, fullName string, f kcmdutil.Factory, out io
 	}
 
 	cmd := &cobra.Command{
-		Use:        fmt.Sprintf("%s SECRET --ssh-privatekey=FILENAME [--ca-cert=FILENAME] [--gitconfig=FILENAME]", name),
-		Short:      "Create a new secret for SSH authentication",
-		Long:       createSSHAuthSecretLong,
-		Example:    fmt.Sprintf(createSSHAuthSecretExample, fullName, newSecretFullName, ocEditFullName),
-		Deprecated: "use oc create secret",
-		Hidden:     true,
+		Use:     fmt.Sprintf("%s SECRET --ssh-privatekey=FILENAME [--ca-cert=FILENAME] [--gitconfig=FILENAME]", name),
+		Short:   "Create a new secret for SSH authentication",
+		Long:    createSSHAuthSecretLong,
+		Example: fmt.Sprintf(createSSHAuthSecretExample, fullName, newSecretFullName, ocEditFullName),
 		Run: func(c *cobra.Command, args []string) {
 			if err := o.Complete(f, args); err != nil {
-				kcmdutil.CheckErr(kcmdutil.UsageErrorf(c, err.Error()))
+				kcmdutil.CheckErr(kcmdutil.UsageError(c, err.Error()))
 			}
 
 			if err := o.Validate(); err != nil {
-				kcmdutil.CheckErr(kcmdutil.UsageErrorf(c, err.Error()))
+				kcmdutil.CheckErr(kcmdutil.UsageError(c, err.Error()))
 			}
 
 			if len(kcmdutil.GetFlagString(c, "output")) != 0 {
 				secret, err := o.NewSSHAuthSecret()
 				kcmdutil.CheckErr(err)
 
-				kcmdutil.CheckErr(kcmdutil.PrintObject(c, secret, out))
+				mapper, _ := f.Object()
+				kcmdutil.CheckErr(f.PrintObject(c, false, mapper, secret, out))
 				return
 			}
 

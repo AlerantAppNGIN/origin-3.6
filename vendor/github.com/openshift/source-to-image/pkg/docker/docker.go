@@ -18,12 +18,12 @@ import (
 	"syscall"
 	"time"
 
-	dockertypes "github.com/docker/docker/api/types"
-	dockercontainer "github.com/docker/docker/api/types/container"
-	dockernetwork "github.com/docker/docker/api/types/network"
-	dockerapi "github.com/docker/docker/client"
 	dockermessage "github.com/docker/docker/pkg/jsonmessage"
 	dockerstdcopy "github.com/docker/docker/pkg/stdcopy"
+	dockerapi "github.com/docker/engine-api/client"
+	dockertypes "github.com/docker/engine-api/types"
+	dockercontainer "github.com/docker/engine-api/types/container"
+	dockernetwork "github.com/docker/engine-api/types/network"
 	"github.com/docker/go-connections/tlsconfig"
 	"golang.org/x/net/context"
 
@@ -50,9 +50,6 @@ const (
 	// The previous name of this label was 'io.s2i.scripts-url'. This is now
 	// deprecated.
 	ScriptsURLLabel = api.DefaultNamespace + "scripts-url"
-
-	// AssembleUserLabel is the User that will be used in the assemble process
-	AssembleUserLabel = api.DefaultNamespace + "assemble-user"
 	// DestinationLabel is the name of the Docker image LABEL that tells S2I where
 	// to place the artifacts (scripts, sources) in the builder image.
 	// The previous name of this label was 'io.s2i.destination'. This is now
@@ -142,19 +139,19 @@ type Docker interface {
 // Client contains all methods used when interacting directly with docker engine-api
 type Client interface {
 	ContainerAttach(ctx context.Context, container string, options dockertypes.ContainerAttachOptions) (dockertypes.HijackedResponse, error)
-	ContainerCommit(ctx context.Context, container string, options dockertypes.ContainerCommitOptions) (dockertypes.IDResponse, error)
-	ContainerCreate(ctx context.Context, config *dockercontainer.Config, hostConfig *dockercontainer.HostConfig, networkingConfig *dockernetwork.NetworkingConfig, containerName string) (dockercontainer.ContainerCreateCreatedBody, error)
-	ContainerInspect(ctx context.Context, container string) (dockertypes.ContainerJSON, error)
-	ContainerRemove(ctx context.Context, container string, options dockertypes.ContainerRemoveOptions) error
-	ContainerStart(ctx context.Context, container string, options dockertypes.ContainerStartOptions) error
-	ContainerKill(ctx context.Context, container, signal string) error
-	ContainerWait(ctx context.Context, container string, condition dockercontainer.WaitCondition) (<-chan dockercontainer.ContainerWaitOKBody, <-chan error)
+	ContainerCommit(ctx context.Context, container string, options dockertypes.ContainerCommitOptions) (dockertypes.ContainerCommitResponse, error)
+	ContainerCreate(ctx context.Context, config *dockercontainer.Config, hostConfig *dockercontainer.HostConfig, networkingConfig *dockernetwork.NetworkingConfig, containerName string) (dockertypes.ContainerCreateResponse, error)
+	ContainerInspect(ctx context.Context, containerID string) (dockertypes.ContainerJSON, error)
+	ContainerRemove(ctx context.Context, containerID string, options dockertypes.ContainerRemoveOptions) error
+	ContainerStart(ctx context.Context, containerID string) error
+	ContainerKill(ctx context.Context, containerID, signal string) error
+	ContainerWait(ctx context.Context, containerID string) (int, error)
 	CopyToContainer(ctx context.Context, container, path string, content io.Reader, opts dockertypes.CopyToContainerOptions) error
 	CopyFromContainer(ctx context.Context, container, srcPath string) (io.ReadCloser, dockertypes.ContainerPathStat, error)
 	ImageBuild(ctx context.Context, buildContext io.Reader, options dockertypes.ImageBuildOptions) (dockertypes.ImageBuildResponse, error)
-	ImageInspectWithRaw(ctx context.Context, image string) (dockertypes.ImageInspect, []byte, error)
+	ImageInspectWithRaw(ctx context.Context, imageID string, getSize bool) (dockertypes.ImageInspect, []byte, error)
 	ImagePull(ctx context.Context, ref string, options dockertypes.ImagePullOptions) (io.ReadCloser, error)
-	ImageRemove(ctx context.Context, image string, options dockertypes.ImageRemoveOptions) ([]dockertypes.ImageDeleteResponseItem, error)
+	ImageRemove(ctx context.Context, imageID string, options dockertypes.ImageRemoveOptions) ([]dockertypes.ImageDelete, error)
 	ServerVersion(ctx context.Context) (dockertypes.Version, error)
 }
 
@@ -167,7 +164,7 @@ type stiDocker struct {
 func (d stiDocker) InspectImage(name string) (*dockertypes.ImageInspect, error) {
 	ctx, cancel := getDefaultContext()
 	defer cancel()
-	resp, _, err := d.client.ImageInspectWithRaw(ctx, name)
+	resp, _, err := d.client.ImageInspectWithRaw(ctx, name, false)
 	if err != nil {
 		return nil, err
 	}
@@ -220,8 +217,6 @@ type RunContainerOptions struct {
 	// 2) it only gets applied when Command equals to "assemble" or "usage" script
 	// AND script is inside of the tar archive.
 	CommandExplicit []string
-	// SecurityOpt is passed through as security options to the underlying container.
-	SecurityOpt []string
 }
 
 // asDockerConfig converts a RunContainerOptions into a Config understood by the
@@ -246,7 +241,6 @@ func (rco RunContainerOptions) asDockerHostConfig() dockercontainer.HostConfig {
 		PublishAllPorts: rco.TargetImage,
 		NetworkMode:     dockercontainer.NetworkMode(rco.NetworkMode),
 		Binds:           rco.Binds,
-		SecurityOpt:     rco.SecurityOpt,
 	}
 	if rco.CGroupLimits != nil {
 		hostConfig.Resources.Memory = rco.CGroupLimits.MemoryLimitBytes
@@ -392,7 +386,7 @@ func (d *stiDocker) UploadToContainer(fs fs.FileSystem, src, dest, container str
 // If the source is a single file, then the file copied into destination (which
 // has to be full path to a file inside the container).
 func (d *stiDocker) UploadToContainerWithTarWriter(fs fs.FileSystem, src, dest, container string, makeTarWriter func(io.Writer) s2itar.Writer) error {
-	destPath := filepath.Dir(dest)
+	path := filepath.Dir(dest)
 	r, w := io.Pipe()
 	go func() {
 		tarWriter := makeTarWriter(w)
@@ -405,10 +399,10 @@ func (d *stiDocker) UploadToContainerWithTarWriter(fs fs.FileSystem, src, dest, 
 
 		w.CloseWithError(err)
 	}()
-	glog.V(3).Infof("Uploading %q to %q ...", src, destPath)
+	glog.V(3).Infof("Uploading %q to %q ...", src, path)
 	ctx, cancel := getDefaultContext()
 	defer cancel()
-	err := d.client.CopyToContainer(ctx, container, destPath, r, dockertypes.CopyToContainerOptions{})
+	err := d.client.CopyToContainer(ctx, container, path, r, dockertypes.CopyToContainerOptions{})
 	if err != nil {
 		glog.V(0).Infof("error: Uploading to container failed: %v", err)
 	}
@@ -574,8 +568,8 @@ func (d *stiDocker) PullImage(name string) (*api.Image, error) {
 				if msg.Error != nil {
 					return msg.Error
 				}
-				if msg.Progress != nil {
-					glog.V(4).Infof("pulling image %s: %s", name, msg.Progress.String())
+				if msg.ProgressMessage != "" {
+					glog.V(4).Infof("pulling image %s: %s", name, msg.ProgressMessage)
 				}
 			}
 		})
@@ -680,7 +674,7 @@ func getVariable(image *api.Image, name string) string {
 	envName := name + "="
 	for _, v := range image.Config.Env {
 		if strings.HasPrefix(v, envName) {
-			return strings.TrimSpace(v[len(envName):])
+			return strings.TrimSpace((v[len(envName):]))
 		}
 	}
 
@@ -819,7 +813,7 @@ func determineCommandBaseDir(opts RunContainerOptions, imageMetadata *api.Image,
 }
 
 // dumpContainerInfo dumps information about a running container (port/IP/etc).
-func dumpContainerInfo(container dockercontainer.ContainerCreateCreatedBody, d *stiDocker, image string) {
+func dumpContainerInfo(container dockertypes.ContainerCreateResponse, d *stiDocker, image string) {
 	ctx, cancel := getDefaultContext()
 	defer cancel()
 
@@ -1024,7 +1018,7 @@ func (d *stiDocker) RunContainer(opts RunContainerOptions) error {
 		glog.V(2).Infof("Starting container %q ...", container.ID)
 		ctx, cancel = getDefaultContext()
 		defer cancel()
-		err = d.client.ContainerStart(ctx, container.ID, dockertypes.ContainerStartOptions{})
+		err = d.client.ContainerStart(ctx, container.ID)
 		if err != nil {
 			return err
 		}
@@ -1053,20 +1047,12 @@ func (d *stiDocker) RunContainer(opts RunContainerOptions) error {
 		// Return an error if the exit code of the container is
 		// non-zero.
 		glog.V(4).Infof("Waiting for container %q to stop ...", container.ID)
-		waitC, errC := d.client.ContainerWait(context.Background(), container.ID, dockercontainer.WaitConditionNextExit)
-		select {
-		case result := <-waitC:
-			if result.StatusCode != 0 {
-				var output string
-				jsonOutput, _ := d.client.ContainerInspect(ctx, container.ID)
-				if err == nil && jsonOutput.ContainerJSONBase != nil && jsonOutput.ContainerJSONBase.State != nil {
-					state := jsonOutput.ContainerJSONBase.State
-					output = fmt.Sprintf("Status: %s, Error: %s, OOMKilled: %v, Dead: %v", state.Status, state.Error, state.OOMKilled, state.Dead)
-				}
-				return s2ierr.NewContainerError(container.ID, int(result.StatusCode), output)
-			}
-		case err := <-errC:
+		exitCode, err := d.client.ContainerWait(context.Background(), container.ID)
+		if err != nil {
 			return fmt.Errorf("waiting for container %q to stop: %v", container.ID, err)
+		}
+		if exitCode != 0 {
+			return s2ierr.NewContainerError(container.ID, exitCode, "")
 		}
 
 		// OnStart must be done before we move on.
@@ -1136,7 +1122,6 @@ func (d *stiDocker) BuildImage(opts BuildImageOptions) error {
 		NoCache:        true,
 		SuppressOutput: false,
 		Remove:         true,
-		ForceRemove:    true,
 	}
 	if opts.CGroupLimits != nil {
 		dockerOpts.Memory = opts.CGroupLimits.MemoryLimitBytes

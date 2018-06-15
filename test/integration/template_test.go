@@ -6,15 +6,14 @@ import (
 	"path/filepath"
 	"testing"
 
-	"k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/kubernetes/pkg/api/legacyscheme"
+	kapi "k8s.io/kubernetes/pkg/api"
+	"k8s.io/kubernetes/pkg/api/v1"
 
+	"github.com/openshift/origin/pkg/client"
 	templateapi "github.com/openshift/origin/pkg/template/apis/template"
-	"github.com/openshift/origin/pkg/template/client/internalversion"
-	templateclient "github.com/openshift/origin/pkg/template/generated/internalclientset"
 	testutil "github.com/openshift/origin/test/util"
 	testserver "github.com/openshift/origin/test/util/server"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -33,6 +32,10 @@ func TestTemplate(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		config.GroupVersion = &version
+		c, err := client.New(config)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
 
 		template := &templateapi.Template{
 			Parameters: []templateapi.Parameter{
@@ -57,8 +60,7 @@ func TestTemplate(t *testing.T) {
 		}
 		templateapi.AddObjectsToTemplate(template, templateObjects, v1.SchemeGroupVersion)
 
-		templateProcessor := internalversion.NewTemplateProcessorClient(templateclient.NewForConfigOrDie(config).Template().RESTClient(), "default")
-		obj, err := templateProcessor.Process(template)
+		obj, err := c.TemplateConfigs("default").Create(template)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -123,19 +125,18 @@ func TestTemplateTransformationFromConfig(t *testing.T) {
 	}
 	defer testserver.CleanupMasterEtcd(t, masterConfig)
 
-	clusterAdminClientConfig, err := testutil.GetClusterAdminClientConfig(clusterAdminKubeConfig)
+	clusterAdminClient, err := testutil.GetClusterAdminClient(clusterAdminKubeConfig)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
 	walkJSONFiles("../templates/fixtures", func(name, path string, data []byte) {
-		template, err := runtime.Decode(legacyscheme.Codecs.UniversalDecoder(), data)
+		template, err := runtime.Decode(kapi.Codecs.UniversalDecoder(), data)
 		if err != nil {
 			t.Errorf("%q: unexpected error: %v", path, err)
 			return
 		}
-		templateProcessor := internalversion.NewTemplateProcessorClient(templateclient.NewForConfigOrDie(clusterAdminClientConfig).Template().RESTClient(), "default")
-		config, err := templateProcessor.Process(template.(*templateapi.Template))
+		config, err := clusterAdminClient.TemplateConfigs("default").Create(template.(*templateapi.Template))
 		if err != nil {
 			t.Errorf("%q: unexpected error: %v", path, err)
 			return

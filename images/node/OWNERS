@@ -3,12 +3,15 @@ reviewers:
   - sdodson
   - smarterclayton
   - stevekuznetsov
+  - tdawson
   - dcbw
   - rootfs
   - pravisankar
+  - kargakis
   - jsafrane
 approvers:
   - sdodson
   - smarterclayton
   - stevekuznetsov
+  - tdawson
   - dcbw

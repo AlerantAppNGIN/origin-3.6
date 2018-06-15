@@ -11,8 +11,8 @@ import (
 
 	g "github.com/onsi/ginkgo"
 	o "github.com/onsi/gomega"
-	"k8s.io/kubernetes/pkg/volume/emptydirquota"
 
+	"github.com/openshift/origin/pkg/volume/emptydir"
 	exutil "github.com/openshift/origin/test/extended/util"
 )
 
@@ -58,7 +58,7 @@ func lookupFSGroup(oc *exutil.CLI, project string) (int, error) {
 func lookupXFSQuota(oc *exutil.CLI, fsGroup int, volDir string) (int, error) {
 
 	// First lookup the filesystem device the volumeDir resides on:
-	fsDevice, err := emptydirquota.GetFSDevice(volDir)
+	fsDevice, err := emptydir.GetFSDevice(volDir)
 	if err != nil {
 		return 0, err
 	}
@@ -124,7 +124,7 @@ var _ = g.Describe("[Conformance][volumes] Test local storage quota", func() {
 
 	g.Describe("FSGroup local storage quota [local]", func() {
 		g.It("should be applied to XFS filesystem when a pod is created", func() {
-
+			oc.SetOutputDir(exutil.TestContext.OutputDir)
 			project := oc.Namespace()
 
 			// Verify volDir is on XFS, if not this test can't pass:

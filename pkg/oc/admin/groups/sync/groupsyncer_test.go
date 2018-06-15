@@ -12,11 +12,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgotesting "k8s.io/client-go/testing"
+	kapi "k8s.io/kubernetes/pkg/api"
 
-	"github.com/openshift/origin/pkg/oauthserver/ldaputil"
+	"github.com/openshift/origin/pkg/auth/ldaputil"
+	"github.com/openshift/origin/pkg/client/testclient"
 	"github.com/openshift/origin/pkg/oc/admin/groups/sync/interfaces"
 	userapi "github.com/openshift/origin/pkg/user/apis/user"
-	userfakeclient "github.com/openshift/origin/pkg/user/generated/internalclientset/fake"
 )
 
 func TestMakeOpenShiftGroup(t *testing.T) {
@@ -100,8 +101,8 @@ func TestMakeOpenShiftGroup(t *testing.T) {
 	}
 
 	for name, tc := range tcs {
-		fakeClient := userfakeclient.NewSimpleClientset(tc.startingGroups...)
-		syncer.GroupClient = fakeClient.User().Groups()
+		fakeClient := testclient.NewSimpleFake(tc.startingGroups...)
+		syncer.GroupClient = fakeClient.Groups()
 
 		actualGroup, err := syncer.makeOpenShiftGroup(tc.ldapGroupUID, tc.usernames)
 		if err != nil && len(tc.expectedErr) == 0 {
@@ -230,7 +231,7 @@ func TestMissingLDAPGroupUIDMapping(t *testing.T) {
 	checkClientForGroups(tc, newDefaultOpenShiftGroups(testGroupSyncer.Host), t)
 }
 
-func checkClientForGroups(tc *userfakeclient.Clientset, expectedGroups []*userapi.Group, t *testing.T) {
+func checkClientForGroups(tc *testclient.Fake, expectedGroups []*userapi.Group, t *testing.T) {
 	actualGroups := extractActualGroups(tc)
 
 	for _, expectedGroup := range expectedGroups {
@@ -242,7 +243,8 @@ func checkClientForGroups(tc *userfakeclient.Clientset, expectedGroups []*userap
 
 func groupExists(haystack []*userapi.Group, needle *userapi.Group) bool {
 	for _, actual := range haystack {
-		actualGroup := actual.DeepCopy()
+		t, _ := kapi.Scheme.DeepCopy(actual)
+		actualGroup := t.(*userapi.Group)
 		delete(actualGroup.Annotations, ldaputil.LDAPSyncTimeAnnotation)
 
 		if reflect.DeepEqual(needle, actualGroup) {
@@ -253,7 +255,7 @@ func groupExists(haystack []*userapi.Group, needle *userapi.Group) bool {
 	return false
 }
 
-func extractActualGroups(tc *userfakeclient.Clientset) []*userapi.Group {
+func extractActualGroups(tc *testclient.Fake) []*userapi.Group {
 	ret := []*userapi.Group{}
 	for _, genericAction := range tc.Actions() {
 		switch action := genericAction.(type) {
@@ -312,8 +314,8 @@ func newDefaultOpenShiftGroups(host string) []*userapi.Group {
 
 }
 
-func newTestSyncer() (*LDAPGroupSyncer, *userfakeclient.Clientset) {
-	tc := userfakeclient.NewSimpleClientset()
+func newTestSyncer() (*LDAPGroupSyncer, *testclient.Fake) {
+	tc := testclient.NewSimpleFake()
 	tc.PrependReactor("create", "groups", func(action clientgotesting.Action) (handled bool, ret runtime.Object, err error) {
 		createAction := action.(clientgotesting.CreateAction)
 		return true, createAction.GetObject(), nil
@@ -328,7 +330,7 @@ func newTestSyncer() (*LDAPGroupSyncer, *userfakeclient.Clientset) {
 		GroupMemberExtractor: newTestMemberExtractor(),
 		UserNameMapper:       newTestUserNameMapper(),
 		GroupNameMapper:      newTestGroupNameMapper(),
-		GroupClient:          tc.User().Groups(),
+		GroupClient:          tc.Groups(),
 		Host:                 newTestHost(),
 		Out:                  ioutil.Discard,
 		Err:                  ioutil.Discard,

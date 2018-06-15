@@ -4,9 +4,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	kruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/sets"
-	kapi "k8s.io/kubernetes/pkg/apis/core"
+	kapi "k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/apis/rbac"
-	rbacapi "k8s.io/kubernetes/pkg/apis/rbac"
 )
 
 // Authorization is calculated against
@@ -41,9 +40,9 @@ const (
 )
 
 // DiscoveryRule is a rule that allows a client to discover the API resources available on this server
-var DiscoveryRule = rbac.PolicyRule{
-	Verbs: []string{"get"},
-	NonResourceURLs: []string{
+var DiscoveryRule = PolicyRule{
+	Verbs: sets.NewString("get"),
+	NonResourceURLs: sets.NewString(
 		// Server version checking
 		"/version", "/version/*",
 
@@ -51,14 +50,20 @@ var DiscoveryRule = rbac.PolicyRule{
 		"/api", "/api/*",
 		"/apis", "/apis/*",
 		"/oapi", "/oapi/*",
-		"/openapi/v2",
-		"/swaggerapi", "/swaggerapi/*", "/swagger.json", "/swagger-2.0.0.pb-v1",
+		"/swaggerapi", "/swaggerapi/*", "/swagger.json",
 		"/osapi", "/osapi/", // these cannot be removed until we can drop support for pre 3.1 clients
 		"/.well-known", "/.well-known/*",
 
 		// we intentionally allow all to here
 		"/",
-	},
+	),
+}
+
+// The Kubernetes Rbac version
+// TODO make this the authoritative rule
+var RbacDiscoveryRule = rbac.PolicyRule{
+	Verbs:           DiscoveryRule.Verbs.List(),
+	NonResourceURLs: DiscoveryRule.NonResourceURLs.List(),
 }
 
 // PolicyRule holds information that describes a policy rule, but does not contain information
@@ -82,15 +87,12 @@ type PolicyRule struct {
 	NonResourceURLs sets.String
 }
 
-// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
-
 // IsPersonalSubjectAccessReview is a marker for PolicyRule.AttributeRestrictions that denotes that subjectaccessreviews on self should be allowed
 type IsPersonalSubjectAccessReview struct {
 	metav1.TypeMeta
 }
 
 // +genclient
-// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 
 // Role is a logical grouping of PolicyRules that can be referenced as a unit by RoleBindings.
 type Role struct {
@@ -103,7 +105,6 @@ type Role struct {
 }
 
 // +genclient
-// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 
 // RoleBinding references a Role, but not contain it.  It can reference any Role in the same namespace or in the global namespace.
 // It adds who information via Users and Groups and namespace information by which namespace it exists in.  RoleBindings in a given
@@ -121,9 +122,42 @@ type RoleBinding struct {
 	RoleRef kapi.ObjectReference
 }
 
+type RolesByName map[string]*Role
+
 // +genclient
-// +genclient:onlyVerbs=create
-// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+
+// Policy is a object that holds all the Roles for a particular namespace.  There is at most
+// one Policy document per namespace.
+type Policy struct {
+	metav1.TypeMeta
+	metav1.ObjectMeta
+
+	// LastModified is the last time that any part of the Policy was created, updated, or deleted
+	LastModified metav1.Time
+
+	// Roles holds all the Roles held by this Policy, mapped by Role.Name
+	Roles RolesByName
+}
+
+type RoleBindingsByName map[string]*RoleBinding
+
+// +genclient
+
+// PolicyBinding is a object that holds all the RoleBindings for a particular namespace.  There is
+// one PolicyBinding document per referenced Policy namespace
+type PolicyBinding struct {
+	metav1.TypeMeta
+	// Standard object's metadata.
+	metav1.ObjectMeta
+
+	// LastModified is the last time that any part of the PolicyBinding was created, updated, or deleted
+	LastModified metav1.Time
+
+	// PolicyRef is a reference to the Policy that contains all the Roles that this PolicyBinding's RoleBindings may reference
+	PolicyRef kapi.ObjectReference
+	// RoleBindings holds all the RoleBindings held by this PolicyBinding, mapped by RoleBinding.Name
+	RoleBindings RoleBindingsByName
+}
 
 // SelfSubjectRulesReview is a resource you can create to determine which actions you can perform in a namespace
 type SelfSubjectRulesReview struct {
@@ -144,10 +178,6 @@ type SelfSubjectRulesReviewSpec struct {
 	// +k8s:conversion-gen=false
 	Scopes []string
 }
-
-// +genclient
-// +genclient:onlyVerbs=create
-// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 
 // SubjectRulesReview is a resource you can create to determine which actions another user can perform in a namespace
 type SubjectRulesReview struct {
@@ -179,8 +209,6 @@ type SubjectRulesReviewStatus struct {
 	EvaluationError string
 }
 
-// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
-
 // ResourceAccessReviewResponse describes who can perform the action
 type ResourceAccessReviewResponse struct {
 	metav1.TypeMeta
@@ -200,12 +228,6 @@ type ResourceAccessReviewResponse struct {
 	EvaluationError string
 }
 
-// +genclient
-// +genclient:nonNamespaced
-// +genclient:skipVerbs=get,list,create,update,patch,delete,deleteCollection,watch
-// +genclient:method=Create,verb=create,result=ResourceAccessReviewResponse
-// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
-
 // ResourceAccessReview is a means to request a list of which users and groups are authorized to perform the
 // action specified by spec
 type ResourceAccessReview struct {
@@ -214,8 +236,6 @@ type ResourceAccessReview struct {
 	// Action describes the action being tested
 	Action
 }
-
-// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 
 // SubjectAccessReviewResponse describes whether or not a user or group can perform an action
 type SubjectAccessReviewResponse struct {
@@ -232,12 +252,6 @@ type SubjectAccessReviewResponse struct {
 	// most common when a bound role is missing, but enough roles are still present and bound to reason about the request.
 	EvaluationError string
 }
-
-// +genclient
-// +genclient:nonNamespaced
-// +genclient:skipVerbs=get,list,create,update,patch,delete,deleteCollection,watch
-// +genclient:method=Create,verb=create,result=SubjectAccessReviewResponse
-// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 
 // SubjectAccessReview is an object for requesting information about whether a user or group can perform an action
 type SubjectAccessReview struct {
@@ -257,11 +271,6 @@ type SubjectAccessReview struct {
 	Scopes []string
 }
 
-// +genclient
-// +genclient:skipVerbs=get,list,create,update,patch,delete,deleteCollection,watch
-// +genclient:method=Create,verb=create,result=ResourceAccessReviewResponse
-// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
-
 // LocalResourceAccessReview is a means to request a list of which users and groups are authorized to perform the action specified by spec in a particular namespace
 type LocalResourceAccessReview struct {
 	metav1.TypeMeta
@@ -269,11 +278,6 @@ type LocalResourceAccessReview struct {
 	// Action describes the action being tested
 	Action
 }
-
-// +genclient
-// +genclient:skipVerbs=get,list,create,update,patch,delete,deleteCollection,watch
-// +genclient:method=Create,verb=create,result=SubjectAccessReviewResponse
-// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 
 // LocalSubjectAccessReview is an object for requesting information about whether a user or group can perform an action in a particular namespace
 type LocalSubjectAccessReview struct {
@@ -315,7 +319,25 @@ type Action struct {
 	Content kruntime.Object
 }
 
-// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+// PolicyList is a collection of Policies
+type PolicyList struct {
+	metav1.TypeMeta
+	// Standard object's metadata.
+	metav1.ListMeta
+
+	// Items is a list of policies
+	Items []Policy
+}
+
+// PolicyBindingList is a collection of PolicyBindings
+type PolicyBindingList struct {
+	metav1.TypeMeta
+	// Standard object's metadata.
+	metav1.ListMeta
+
+	// Items is a list of policyBindings
+	Items []PolicyBinding
+}
 
 // RoleBindingList is a collection of RoleBindings
 type RoleBindingList struct {
@@ -326,8 +348,6 @@ type RoleBindingList struct {
 	// Items is a list of roleBindings
 	Items []RoleBinding
 }
-
-// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 
 // RoleList is a collection of Roles
 type RoleList struct {
@@ -341,7 +361,6 @@ type RoleList struct {
 
 // +genclient
 // +genclient:nonNamespaced
-// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 
 // ClusterRole is a logical grouping of PolicyRules that can be referenced as a unit by ClusterRoleBindings.
 type ClusterRole struct {
@@ -351,16 +370,10 @@ type ClusterRole struct {
 
 	// Rules holds all the PolicyRules for this ClusterRole
 	Rules []PolicyRule
-
-	// AggregationRule is an optional field that describes how to build the Rules for this ClusterRole.
-	// If AggregationRule is set, then the Rules are controller managed and direct changes to Rules will be
-	// stomped by the controller.
-	AggregationRule *rbacapi.AggregationRule
 }
 
 // +genclient
 // +genclient:nonNamespaced
-// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 
 // ClusterRoleBinding references a ClusterRole, but not contain it.  It can reference any ClusterRole in the same namespace or in the global namespace.
 // It adds who information via Users and Groups and namespace information by which namespace it exists in.  ClusterRoleBindings in a given
@@ -379,7 +392,65 @@ type ClusterRoleBinding struct {
 	RoleRef kapi.ObjectReference
 }
 
-// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+type ClusterRolesByName map[string]*ClusterRole
+
+// +genclient
+// +genclient:nonNamespaced
+
+// ClusterPolicy is a object that holds all the ClusterRoles for a particular namespace.  There is at most
+// one ClusterPolicy document per namespace.
+type ClusterPolicy struct {
+	metav1.TypeMeta
+	// Standard object's metadata.
+	metav1.ObjectMeta
+
+	// LastModified is the last time that any part of the ClusterPolicy was created, updated, or deleted
+	LastModified metav1.Time
+
+	// Roles holds all the ClusterRoles held by this ClusterPolicy, mapped by Role.Name
+	Roles ClusterRolesByName
+}
+
+type ClusterRoleBindingsByName map[string]*ClusterRoleBinding
+
+// +genclient
+// +genclient:nonNamespaced
+
+// ClusterPolicyBinding is a object that holds all the ClusterRoleBindings for a particular namespace.  There is
+// one ClusterPolicyBinding document per referenced ClusterPolicy namespace
+type ClusterPolicyBinding struct {
+	metav1.TypeMeta
+	// Standard object's metadata.
+	metav1.ObjectMeta
+
+	// LastModified is the last time that any part of the ClusterPolicyBinding was created, updated, or deleted
+	LastModified metav1.Time
+
+	// ClusterPolicyRef is a reference to the ClusterPolicy that contains all the ClusterRoles that this ClusterPolicyBinding's RoleBindings may reference
+	PolicyRef kapi.ObjectReference
+	// RoleBindings holds all the RoleBindings held by this ClusterPolicyBinding, mapped by RoleBinding.Name
+	RoleBindings ClusterRoleBindingsByName
+}
+
+// ClusterPolicyList is a collection of ClusterPolicies
+type ClusterPolicyList struct {
+	metav1.TypeMeta
+	// Standard object's metadata.
+	metav1.ListMeta
+
+	// Items is a list of ClusterPolicies
+	Items []ClusterPolicy
+}
+
+// ClusterPolicyBindingList is a collection of ClusterPolicyBindings
+type ClusterPolicyBindingList struct {
+	metav1.TypeMeta
+	// Standard object's metadata.
+	metav1.ListMeta
+
+	// Items is a list of ClusterPolicyBindings
+	Items []ClusterPolicyBinding
+}
 
 // ClusterRoleBindingList is a collection of ClusterRoleBindings
 type ClusterRoleBindingList struct {
@@ -391,8 +462,6 @@ type ClusterRoleBindingList struct {
 	Items []ClusterRoleBinding
 }
 
-// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
-
 // ClusterRoleList is a collection of ClusterRoles
 type ClusterRoleList struct {
 	metav1.TypeMeta
@@ -402,9 +471,6 @@ type ClusterRoleList struct {
 	// Items is a list of ClusterRoles
 	Items []ClusterRole
 }
-
-// +genclient
-// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 
 // RoleBindingRestriction is an object that can be matched against a subject
 // (user, group, or service account) to determine whether rolebindings on that
@@ -433,8 +499,6 @@ type RoleBindingRestrictionSpec struct {
 	// ServiceAccountRestriction matches against service-account subjects.
 	ServiceAccountRestriction *ServiceAccountRestriction
 }
-
-// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 
 // RoleBindingRestrictionList is a collection of RoleBindingRestriction objects.
 type RoleBindingRestrictionList struct {

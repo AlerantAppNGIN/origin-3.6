@@ -10,19 +10,16 @@ import (
 	kapierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/sets"
-	"k8s.io/apiserver/pkg/admission"
-	"k8s.io/apiserver/pkg/admission/initializer"
+	admission "k8s.io/apiserver/pkg/admission"
 	"k8s.io/apiserver/pkg/authorization/authorizer"
-	kapi "k8s.io/kubernetes/pkg/apis/core"
+	kapi "k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/apis/extensions"
-	"k8s.io/kubernetes/pkg/auth/nodeidentifier"
 
 	"github.com/openshift/origin/pkg/api/meta"
-	configlatest "github.com/openshift/origin/pkg/cmd/server/apis/config/latest"
-	"github.com/openshift/origin/pkg/scheduler/admission/apis/podnodeconstraints"
+	oadmission "github.com/openshift/origin/pkg/cmd/server/admission"
+	configlatest "github.com/openshift/origin/pkg/cmd/server/api/latest"
+	"github.com/openshift/origin/pkg/scheduler/admission/podnodeconstraints/api"
 )
-
-const PluginName = "PodNodeConstraints"
 
 // kindsToIgnore is a list of kinds that contain a PodSpec that
 // we choose not to handle in this plugin
@@ -31,27 +28,26 @@ var kindsToIgnore = []schema.GroupKind{
 }
 
 func Register(plugins *admission.Plugins) {
-	plugins.Register(PluginName,
+	plugins.Register("PodNodeConstraints",
 		func(config io.Reader) (admission.Interface, error) {
 			pluginConfig, err := readConfig(config)
 			if err != nil {
 				return nil, err
 			}
 			if pluginConfig == nil {
-				glog.Infof("Admission plugin %q is not configured so it will be disabled.", PluginName)
+				glog.Infof("Admission plugin %q is not configured so it will be disabled.", "PodNodeConstraints")
 				return nil, nil
 			}
-			return NewPodNodeConstraints(pluginConfig, nodeidentifier.NewDefaultNodeIdentifier()), nil
+			return NewPodNodeConstraints(pluginConfig), nil
 		})
 }
 
 // NewPodNodeConstraints creates a new admission plugin to prevent objects that contain pod templates
 // from containing node bindings by name or selector based on role permissions.
-func NewPodNodeConstraints(config *podnodeconstraints.PodNodeConstraintsConfig, nodeIdentifier nodeidentifier.NodeIdentifier) admission.Interface {
+func NewPodNodeConstraints(config *api.PodNodeConstraintsConfig) admission.Interface {
 	plugin := podNodeConstraints{
-		config:         config,
-		Handler:        admission.NewHandler(admission.Create, admission.Update),
-		nodeIdentifier: nodeIdentifier,
+		config:  config,
+		Handler: admission.NewHandler(admission.Create, admission.Update),
 	}
 	if config != nil {
 		plugin.selectorLabelBlacklist = sets.NewString(config.NodeSelectorLabelBlacklist...)
@@ -63,9 +59,8 @@ func NewPodNodeConstraints(config *podnodeconstraints.PodNodeConstraintsConfig, 
 type podNodeConstraints struct {
 	*admission.Handler
 	selectorLabelBlacklist sets.String
-	config                 *podnodeconstraints.PodNodeConstraintsConfig
+	config                 *api.PodNodeConstraintsConfig
 	authorizer             authorizer.Authorizer
-	nodeIdentifier         nodeidentifier.NodeIdentifier
 }
 
 func shouldCheckResource(resource schema.GroupResource, kind schema.GroupKind) (bool, error) {
@@ -84,9 +79,9 @@ func shouldCheckResource(resource schema.GroupResource, kind schema.GroupKind) (
 	return true, nil
 }
 
-var _ = initializer.WantsAuthorizer(&podNodeConstraints{})
+var _ = oadmission.WantsAuthorizer(&podNodeConstraints{})
 
-func readConfig(reader io.Reader) (*podnodeconstraints.PodNodeConstraintsConfig, error) {
+func readConfig(reader io.Reader) (*api.PodNodeConstraintsConfig, error) {
 	if reader == nil || reflect.ValueOf(reader).IsNil() {
 		return nil, nil
 	}
@@ -97,7 +92,7 @@ func readConfig(reader io.Reader) (*podnodeconstraints.PodNodeConstraintsConfig,
 	if obj == nil {
 		return nil, nil
 	}
-	config, ok := obj.(*podnodeconstraints.PodNodeConstraintsConfig)
+	config, ok := obj.(*api.PodNodeConstraintsConfig)
 	if !ok {
 		return nil, fmt.Errorf("unexpected config object: %#v", obj)
 	}
@@ -140,12 +135,6 @@ func (o *podNodeConstraints) getPodSpec(attr admission.Attributes) (kapi.PodSpec
 
 // validate PodSpec if NodeName or NodeSelector are specified
 func (o *podNodeConstraints) admitPodSpec(attr admission.Attributes, ps kapi.PodSpec) error {
-	// a node creating a mirror pod that targets itself is allowed
-	// see the NodeRestriction plugin for further details
-	if o.isNodeSelfTargetWithMirrorPod(attr, ps.NodeName) {
-		return nil
-	}
-
 	matchingLabels := []string{}
 	// nodeSelector blacklist filter
 	for nodeSelectorLabel := range ps.NodeSelector {
@@ -177,12 +166,9 @@ func (o *podNodeConstraints) SetAuthorizer(a authorizer.Authorizer) {
 	o.authorizer = a
 }
 
-func (o *podNodeConstraints) ValidateInitialization() error {
+func (o *podNodeConstraints) Validate() error {
 	if o.authorizer == nil {
-		return fmt.Errorf("%s requires an authorizer", PluginName)
-	}
-	if o.nodeIdentifier == nil {
-		return fmt.Errorf("%s requires a node identifier", PluginName)
+		return fmt.Errorf("PodNodeConstraints needs an Openshift Authorizer")
 	}
 	return nil
 }
@@ -201,28 +187,6 @@ func (o *podNodeConstraints) checkPodsBindAccess(attr admission.Attributes) (boo
 	if attr.GetResource().GroupResource() == kapi.Resource("pods") {
 		authzAttr.Name = attr.GetName()
 	}
-	authorized, _, err := o.authorizer.Authorize(authzAttr)
-	return authorized == authorizer.DecisionAllow, err
-}
-
-func (o *podNodeConstraints) isNodeSelfTargetWithMirrorPod(attr admission.Attributes, nodeName string) bool {
-	// make sure we are actually trying to target a node
-	if len(nodeName) == 0 {
-		return false
-	}
-	// this check specifically requires the object to be pod (unlike the other checks where we want any pod spec)
-	pod, ok := attr.GetObject().(*kapi.Pod)
-	if !ok {
-		return false
-	}
-	// note that anyone can create a mirror pod, but they are not privileged in any way
-	// they are actually highly constrained since they cannot reference secrets
-	// nodes can only create and delete them, and they will delete any "orphaned" mirror pods
-	if _, isMirrorPod := pod.Annotations[kapi.MirrorPodAnnotationKey]; !isMirrorPod {
-		return false
-	}
-	// we are targeting a node with a mirror pod
-	// confirm the user is a node that is targeting itself
-	actualNodeName, isNode := o.nodeIdentifier.NodeIdentity(attr.GetUserInfo())
-	return isNode && actualNodeName == nodeName
+	allow, _, err := o.authorizer.Authorize(authzAttr)
+	return allow, err
 }

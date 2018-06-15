@@ -196,11 +196,7 @@ func MinimumUint(path, in string, data, min uint64, exclusive bool) *errors.Vali
 
 // MultipleOf validates if the provided number is a multiple of the factor
 func MultipleOf(path, in string, data, factor float64) *errors.Validation {
-	mult := data / factor
-	if factor < 1 {
-		mult = 1 / factor * data
-	}
-	if !swag.IsFloat64AJSONInteger(mult) {
+	if !swag.IsFloat64AJSONInteger(data / factor) {
 		return errors.NotMultipleOf(path, in, factor)
 	}
 	return nil

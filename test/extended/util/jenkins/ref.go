@@ -16,10 +16,9 @@ import (
 	g "github.com/onsi/ginkgo"
 	o "github.com/onsi/gomega"
 
-	kapiv1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
-	e2e "k8s.io/kubernetes/test/e2e/framework"
+	kapiv1 "k8s.io/kubernetes/pkg/api/v1"
 
 	buildapi "github.com/openshift/origin/pkg/build/apis/build"
 	exutil "github.com/openshift/origin/test/extended/util"
@@ -56,6 +55,11 @@ type Definition struct {
 	Class   string   `xml:"class,attr"`
 	Plugin  string   `xml:"plugin,attr"`
 	Script  string   `xml:"script"`
+}
+
+// ginkgolog creates simple entry in the GinkgoWriter.
+func ginkgolog(format string, a ...interface{}) {
+	fmt.Fprintf(g.GinkgoWriter, format+"\n", a...)
 }
 
 // NewRef creates a jenkins reference from an OC client
@@ -95,7 +99,7 @@ func (j *JenkinsRef) BuildURI(resourcePathFormat string, a ...interface{}) strin
 // Returns a response body and status code or an error.
 func (j *JenkinsRef) GetResource(resourcePathFormat string, a ...interface{}) (string, int, error) {
 	uri := j.BuildURI(resourcePathFormat, a...)
-	e2e.Logf("Retrieving Jenkins resource: %q", uri)
+	ginkgolog("Retrieving Jenkins resource: %q", uri)
 	req, err := http.NewRequest("GET", uri, nil)
 	if err != nil {
 		return "", 0, fmt.Errorf("Unable to build request for uri %q: %v", uri, err)
@@ -140,7 +144,7 @@ func (j *JenkinsRef) Post(reqBody io.Reader, resourcePathFormat, contentType str
 	req.Header.Set("Authorization", "Bearer "+j.token)
 
 	client := &http.Client{}
-	e2e.Logf("Posting to Jenkins resource: %q", uri)
+	ginkgolog("Posting to Jenkins resource: %q", uri)
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", 0, fmt.Errorf("Error posting request to %q: %v", uri, err)
@@ -171,7 +175,7 @@ func (j *JenkinsRef) GetResourceWithStatus(validStatusList []int, timeout time.D
 	err := wait.Poll(10*time.Second, timeout, func() (bool, error) {
 		body, status, err := j.GetResource(resourcePathFormat, a...)
 		if err != nil {
-			e2e.Logf("Error accessing resource: %v", err)
+			ginkgolog("Error accessing resource: %v", err)
 			return false, nil
 		}
 		var found bool
@@ -182,7 +186,7 @@ func (j *JenkinsRef) GetResourceWithStatus(validStatusList []int, timeout time.D
 			}
 		}
 		if !found {
-			e2e.Logf("Expected http status [%v] during GET by recevied [%v] for %s with body %s", validStatusList, status, resourcePathFormat, body)
+			ginkgolog("Expected http status [%v] during GET by recevied [%v]", validStatusList, status)
 			return false, nil
 		}
 		retBody = body
@@ -214,7 +218,7 @@ func (j *JenkinsRef) WaitForContent(verificationRegEx string, verificationStatus
 				matchingContent = content
 				return true, nil
 			} else {
-				e2e.Logf("Content did not match verification regex %q:\n %v", verificationRegEx, content)
+				ginkgolog("Content did not match verification regex %q:\n %v", verificationRegEx, content)
 				return false, nil
 			}
 		} else {
@@ -265,7 +269,7 @@ func (j *JenkinsRef) StartJob(jobName string) *JobMon {
 		jobName:         jobName,
 	}
 
-	e2e.Logf("Current timestamp for [%s]: %q", jobName, jmon.lastBuildNumber)
+	ginkgolog("Current timestamp for [%s]: %q", jobName, jmon.lastBuildNumber)
 	g.By(fmt.Sprintf("Starting jenkins job: %s", jobName))
 	_, status, err := j.PostXML(nil, "job/%s/build?delay=0sec", jobName)
 	o.ExpectWithOffset(1, err).NotTo(o.HaveOccurred())
@@ -314,42 +318,13 @@ func (j *JenkinsRef) BuildDSLJob(namespace string, scriptLines ...string) (strin
 		},
 	}
 	output, err := xml.MarshalIndent(fd, "  ", "    ")
-	e2e.Logf("Formulated DSL Project XML:\n%s\n\n", output)
+	ginkgolog("Formulated DSL Project XML:\n%s\n\n", output)
 	return string(output), err
 }
 
 // GetJobConsoleLogs returns the console logs of a particular buildNumber.
 func (j *JenkinsRef) GetJobConsoleLogs(jobName, buildNumber string) (string, error) {
 	return j.WaitForContent("", 200, 10*time.Minute, "job/%s/%s/consoleText", jobName, buildNumber)
-}
-
-// GetJobConsoleLogsAndMatchViaBuildResult leverages various information in the BuildResult and
-// returns the corresponding console logs, as well as look for matching string
-func (j *JenkinsRef) GetJobConsoleLogsAndMatchViaBuildResult(br *exutil.BuildResult, match string) (string, error) {
-	if br == nil {
-		return "", fmt.Errorf("passed in nil BuildResult")
-	}
-	if br.Build == nil {
-		if br.Oc == nil {
-			return "", fmt.Errorf("BuildResult oc should have been set up during BuildResult construction")
-		}
-		var err error // interestingly, removing this line and using := on the next got a compile error
-		br.Build, err = br.Oc.BuildClient().Build().Builds(br.Oc.Namespace()).Get(br.BuildName, metav1.GetOptions{})
-		if err != nil {
-			return "", err
-		}
-	}
-	bldURI := br.Build.Annotations[buildapi.BuildJenkinsLogURLAnnotation]
-	if len(bldURI) > 0 {
-		// need to strip the route host...WaitForContent will prepend the svc ip:port we need to use in ext tests
-		url, err := url.Parse(bldURI)
-		if err != nil {
-			return "", err
-		}
-		bldURI = strings.Trim(url.Path, "/")
-		return j.WaitForContent(match, 200, 10*time.Minute, bldURI)
-	}
-	return "", fmt.Errorf("build %#v is missing the build uri annontation", br.Build)
 }
 
 // GetLastJobConsoleLogs returns the last build associated with a Jenkins job.
@@ -385,15 +360,19 @@ func SetupSnapshotImage(envVarName, localImageName, snapshotImageStream string, 
 		g.By("Creating a snapshot Jenkins imagestream and overridding the default Jenkins imagestream")
 		o.Expect(snapshotImagePresent).To(o.BeTrue())
 
-		e2e.Logf("\n\nIMPORTANT: You are testing a local jenkins snapshot image.")
-		e2e.Logf("In order to target the official image stream, you must unset %s before running extended tests.\n\n", envVarName)
+		ginkgolog("")
+		ginkgolog("")
+		ginkgolog("IMPORTANT: You are testing a local jenkins snapshot image.")
+		ginkgolog("In order to target the official image stream, you must unset %s before running extended tests.", envVarName)
+		ginkgolog("")
+		ginkgolog("")
 
 		// Create an imagestream based on the Jenkins' plugin PR-Testing image (https://github.com/openshift/jenkins-plugin/blob/master/PR-Testing/README).
 		err = oc.Run("new-build").Args("-D", fmt.Sprintf("FROM %s", localImageName), "--to", snapshotImageStream).Execute()
 		o.Expect(err).NotTo(o.HaveOccurred())
 
 		g.By("waiting for build to finish")
-		err = exutil.WaitForABuild(oc.BuildClient().Build().Builds(oc.Namespace()), snapshotImageStream+"-1", exutil.CheckBuildSuccess, exutil.CheckBuildFailed, exutil.CheckBuildCancelled)
+		err = exutil.WaitForABuild(oc.Client().Builds(oc.Namespace()), snapshotImageStream+"-1", exutil.CheckBuildSuccessFn, exutil.CheckBuildFailedFn, exutil.CheckBuildCancelledFn)
 		if err != nil {
 			exutil.DumpBuildLogs(snapshotImageStream, oc)
 		}
@@ -405,8 +384,12 @@ func SetupSnapshotImage(envVarName, localImageName, snapshotImageStream string, 
 
 	} else {
 		if snapshotImagePresent {
-			e2e.Logf("\n\nIMPORTANT: You have a local OpenShift jenkins snapshot image, but it is not being used for testing.")
-			e2e.Logf("In order to target your local image, you must set %s to some value before running extended tests.\n\n", envVarName)
+			ginkgolog("")
+			ginkgolog("")
+			ginkgolog("IMPORTANT: You have a local OpenShift jenkins snapshot image, but it is not being used for testing.")
+			ginkgolog("In order to target your local image, you must set %s to some value before running extended tests.", envVarName)
+			ginkgolog("")
+			ginkgolog("")
 		}
 	}
 
@@ -441,7 +424,7 @@ func ProcessLogURLAnnotations(oc *exutil.CLI, t *exutil.BuildResult) (*url.URL, 
 func DumpLogs(oc *exutil.CLI, t *exutil.BuildResult) (string, error) {
 	var err error
 	if t.Build == nil {
-		t.Build, err = oc.BuildClient().Build().Builds(oc.Namespace()).Get(t.BuildName, metav1.GetOptions{})
+		t.Build, err = oc.Client().Builds(oc.Namespace()).Get(t.BuildName, metav1.GetOptions{})
 		if err != nil {
 			return "", fmt.Errorf("cannot retrieve build %s: %v", t.BuildName, err)
 		}

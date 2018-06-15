@@ -15,8 +15,6 @@ type OvsFlow struct {
 	Cookie   string
 	Fields   []OvsField
 	Actions  []OvsField
-
-	ptype ParseType
 }
 
 type OvsField struct {
@@ -30,12 +28,12 @@ const (
 	maxPriority     = 65535
 )
 
-type ParseType string
+type ParseCmd string
 
 const (
-	ParseForAdd    ParseType = "add"
-	ParseForFilter ParseType = "filter"
-	ParseForDump   ParseType = "dump"
+	ParseForAdd    ParseCmd = "add-flow"
+	ParseForDelete ParseCmd = "del-flows"
+	ParseForDump   ParseCmd = "dump-flows"
 )
 
 func fieldSet(parsed *OvsFlow, field string) bool {
@@ -47,9 +45,9 @@ func fieldSet(parsed *OvsFlow, field string) bool {
 	return false
 }
 
-func checkNotAllowedField(flow string, parsed *OvsFlow, field string, ptype ParseType) error {
+func checkNotAllowedField(flow string, parsed *OvsFlow, field string, cmd ParseCmd) error {
 	if fieldSet(parsed, field) {
-		return fmt.Errorf("bad flow %q (field %q not allowed in %s)", flow, field, ptype)
+		return fmt.Errorf("bad flow %q (field %q not allowed in %s)", flow, field, cmd)
 	}
 	return nil
 }
@@ -152,7 +150,7 @@ func (of *OvsFlow) NoteHasPrefix(prefix string) bool {
 	return ok && strings.HasPrefix(strings.ToLower(note.Value), strings.ToLower(prefix))
 }
 
-func ParseFlow(ptype ParseType, flow string, args ...interface{}) (*OvsFlow, error) {
+func ParseFlow(cmd ParseCmd, flow string, args ...interface{}) (*OvsFlow, error) {
 	if len(args) > 0 {
 		flow = fmt.Sprintf(flow, args...)
 	}
@@ -163,13 +161,15 @@ func ParseFlow(ptype ParseType, flow string, args ...interface{}) (*OvsFlow, err
 	// commas, whitespace, and equals signs (but if it is present, it must be the
 	// last field specified).
 
+	actions := ""
+
 	parsed := &OvsFlow{
-		Table:    -1,
-		Priority: -1,
+		Table:    0,
+		Priority: defaultPriority,
 		Fields:   make([]OvsField, 0),
 		Actions:  make([]OvsField, 0),
 		Created:  time.Now(),
-		ptype:    ptype,
+		Cookie:   "0",
 	}
 	flow = strings.Trim(flow, " ")
 	origFlow := flow
@@ -219,11 +219,7 @@ func ParseFlow(ptype ParseType, flow string, args ...interface{}) (*OvsFlow, err
 			}
 			parsed.Priority = priority
 		case "actions":
-			var err error
-			parsed.Actions, err = parseActions(value)
-			if err != nil {
-				return nil, err
-			}
+			actions = value
 		case "cookie":
 			parsed.Cookie = value
 		default:
@@ -235,36 +231,35 @@ func ParseFlow(ptype ParseType, flow string, args ...interface{}) (*OvsFlow, err
 		}
 		flow = flow[end:]
 	}
-	flow = origFlow
 
-	// Sanity-checking and defaults
-	switch ptype {
-	case ParseForAdd:
-		if err := checkNotAllowedField(flow, parsed, "out_port", ptype); err != nil {
+	if actions != "" {
+		var err error
+		parsed.Actions, err = parseActions(actions)
+		if err != nil {
 			return nil, err
 		}
-		if err := checkNotAllowedField(flow, parsed, "out_group", ptype); err != nil {
+	}
+
+	// Sanity-checking
+	switch cmd {
+	case ParseForDump:
+		fallthrough
+	case ParseForAdd:
+		if err := checkNotAllowedField(flow, parsed, "out_port", cmd); err != nil {
+			return nil, err
+		}
+		if err := checkNotAllowedField(flow, parsed, "out_group", cmd); err != nil {
 			return nil, err
 		}
 
 		if len(parsed.Actions) == 0 {
 			return nil, fmt.Errorf("bad flow %q (empty actions)", flow)
 		}
-
-		if parsed.Table == -1 {
-			parsed.Table = 0
+	case ParseForDelete:
+		if err := checkNotAllowedField(flow, parsed, "priority", cmd); err != nil {
+			return nil, err
 		}
-		if parsed.Priority == -1 {
-			parsed.Priority = defaultPriority
-		}
-		if parsed.Cookie == "" {
-			parsed.Cookie = "0"
-		} else if strings.Contains(parsed.Cookie, "/") {
-			return nil, fmt.Errorf("bad flow %q (cookie must be 'value', not 'value/mask')", flow)
-		}
-
-	case ParseForFilter:
-		if err := checkNotAllowedField(flow, parsed, "priority", ptype); err != nil {
+		if err := checkNotAllowedField(flow, parsed, "actions", cmd); err != nil {
 			return nil, err
 		}
 		if err := checkUnimplementedField(flow, parsed, "out_port"); err != nil {
@@ -272,14 +267,6 @@ func ParseFlow(ptype ParseType, flow string, args ...interface{}) (*OvsFlow, err
 		}
 		if err := checkUnimplementedField(flow, parsed, "out_group"); err != nil {
 			return nil, err
-		}
-
-		if parsed.Cookie != "" && !strings.Contains(parsed.Cookie, "/") {
-			return nil, fmt.Errorf("bad flow %q (cookie must be 'value/mask', not just 'value')", flow)
-		}
-
-		if len(parsed.Actions) != 0 {
-			return nil, fmt.Errorf("bad flow %q (field %q not allowed in %s)", flow, "actions", ptype)
 		}
 	}
 
@@ -306,26 +293,21 @@ func ParseFlow(ptype ParseType, flow string, args ...interface{}) (*OvsFlow, err
 	return parsed, nil
 }
 
-// flowMatches tests if flow matches match. If match.ptype is ParseForAdd, then the table,
-// priority, and all fields much match. If it is ParseForFilter, then any fields specified in
-// match must match, but there can be additional fields in flow that are not in match.
-func FlowMatches(flow, match *OvsFlow) bool {
-	if match.ptype == ParseForAdd || match.Table != -1 {
-		if flow.Table != match.Table {
-			return false
-		}
+// flowMatches tests if flow matches match. If exact is true, then the table, priority,
+// and all fields much match. If exact is false, then the table and any fields specified
+// in match must match, but priority is not checked, and there can be additional fields
+// in flow that are not in match.
+func FlowMatches(flow, match *OvsFlow, exact bool) bool {
+	if flow.Table != match.Table && (exact || match.Table != 0) {
+		return false
 	}
-	if match.ptype == ParseForAdd || match.Priority != -1 {
-		if flow.Priority != match.Priority {
-			return false
-		}
+	if exact && flow.Priority != match.Priority {
+		return false
 	}
-	if match.ptype == ParseForAdd || match.Cookie != "" {
-		if !fieldMatches(flow.Cookie, match.Cookie, match.ptype) {
-			return false
-		}
+	if exact && len(flow.Fields) != len(match.Fields) {
+		return false
 	}
-	if match.ptype == ParseForAdd && len(flow.Fields) != len(match.Fields) {
+	if match.Cookie != "" && !fieldMatches(flow.Cookie, match.Cookie, exact) {
 		return false
 	}
 	for _, matchField := range match.Fields {
@@ -336,18 +318,18 @@ func FlowMatches(flow, match *OvsFlow) bool {
 				break
 			}
 		}
-		if flowValue == nil || !fieldMatches(*flowValue, matchField.Value, match.ptype) {
+		if flowValue == nil || !fieldMatches(*flowValue, matchField.Value, exact) {
 			return false
 		}
 	}
 	return true
 }
 
-func fieldMatches(val, match string, ptype ParseType) bool {
+func fieldMatches(val, match string, exact bool) bool {
 	if val == match {
 		return true
 	}
-	if ptype == ParseForAdd {
+	if exact {
 		return false
 	}
 
@@ -367,33 +349,4 @@ func fieldMatches(val, match string, ptype ParseType) bool {
 	}
 
 	return false
-}
-
-func ParseExternalIDs(externalIDs string) (map[string]string, error) {
-	ids := make(map[string]string, 1)
-	// Output from "find" and "list" will have braces, but input to "set" won't
-	if externalIDs[0] == '{' && externalIDs[len(externalIDs)-1] == '}' {
-		externalIDs = externalIDs[1 : len(externalIDs)-1]
-	}
-	for _, id := range strings.Split(externalIDs, ",") {
-		parsed := strings.Split(strings.TrimSpace(id), "=")
-		if len(parsed) != 2 {
-			return nil, fmt.Errorf("could not parse external-id %q", id)
-		}
-		key := parsed[0]
-		value := parsed[1]
-		if unquoted, err := strconv.Unquote(value); err == nil {
-			value = unquoted
-		}
-		ids[key] = value
-	}
-	return ids, nil
-}
-
-func UnparseExternalIDs(externalIDs map[string]string) string {
-	ids := []string{}
-	for key, value := range externalIDs {
-		ids = append(ids, key+"="+strconv.Quote(value))
-	}
-	return "{" + strings.Join(ids, ",") + "}"
 }

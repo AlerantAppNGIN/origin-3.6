@@ -18,7 +18,7 @@ import (
 	exutil "github.com/openshift/origin/test/extended/util"
 )
 
-var _ = g.Describe("[Conformance][Area:Networking][Feature:Router]", func() {
+var _ = g.Describe("[Conformance][networking][router] router headers", func() {
 	defer g.GinkgoRecover()
 	var (
 		configPath = exutil.FixturePath("testdata", "router-http-echo-server.yaml")
@@ -46,7 +46,7 @@ var _ = g.Describe("[Conformance][Area:Networking][Feature:Router]", func() {
 				// if g.CurrentGinkgoTestDescription().Failed
 				dumpRouterHeadersLogs(oc, g.CurrentGinkgoTestDescription().FullTestText)
 			}()
-
+			oc.SetOutputDir(exutil.TestContext.OutputDir)
 			ns := oc.KubeFramework().Namespace.Name
 			execPodName := exutil.CreateExecPodOrFail(oc.AdminKubeClient().Core(), ns, "execpod")
 			defer func() { oc.AdminKubeClient().Core().Pods(ns).Delete(execPodName, metav1.NewDeleteOptions(1)) }()

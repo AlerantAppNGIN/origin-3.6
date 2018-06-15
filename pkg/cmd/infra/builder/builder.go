@@ -9,8 +9,7 @@ import (
 	kcmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
 
 	"github.com/openshift/origin/pkg/build/builder/cmd"
-	cmdversion "github.com/openshift/origin/pkg/cmd/version"
-	"github.com/openshift/origin/pkg/version"
+	ocmd "github.com/openshift/origin/pkg/oc/cli/cmd"
 )
 
 var (
@@ -57,7 +56,7 @@ func NewCommandS2IBuilder(name string) *cobra.Command {
 		},
 	}
 
-	cmd.AddCommand(cmdversion.NewCmdVersion(name, version.Get(), os.Stdout))
+	cmd.AddCommand(ocmd.NewCmdVersion(name, nil, os.Stdout, ocmd.VersionOptions{}))
 	return cmd
 }
 
@@ -72,7 +71,7 @@ func NewCommandDockerBuilder(name string) *cobra.Command {
 			kcmdutil.CheckErr(err)
 		},
 	}
-	cmd.AddCommand(cmdversion.NewCmdVersion(name, version.Get(), os.Stdout))
+	cmd.AddCommand(ocmd.NewCmdVersion(name, nil, os.Stdout, ocmd.VersionOptions{}))
 	return cmd
 }
 
@@ -88,7 +87,7 @@ func NewCommandGitClone(name string) *cobra.Command {
 			kcmdutil.CheckErr(err)
 		},
 	}
-	cmd.AddCommand(cmdversion.NewCmdVersion(name, version.Get(), os.Stdout))
+	cmd.AddCommand(ocmd.NewCmdVersion(name, nil, os.Stdout, ocmd.VersionOptions{}))
 	return cmd
 }
 
@@ -102,7 +101,7 @@ func NewCommandManageDockerfile(name string) *cobra.Command {
 			kcmdutil.CheckErr(err)
 		},
 	}
-	cmd.AddCommand(cmdversion.NewCmdVersion(name, version.Get(), os.Stdout))
+	cmd.AddCommand(ocmd.NewCmdVersion(name, nil, os.Stdout, ocmd.VersionOptions{}))
 	return cmd
 }
 
@@ -116,6 +115,6 @@ func NewCommandExtractImageContent(name string) *cobra.Command {
 			kcmdutil.CheckErr(err)
 		},
 	}
-	cmd.AddCommand(cmdversion.NewCmdVersion(name, version.Get(), os.Stdout))
+	cmd.AddCommand(ocmd.NewCmdVersion(name, nil, os.Stdout, ocmd.VersionOptions{}))
 	return cmd
 }

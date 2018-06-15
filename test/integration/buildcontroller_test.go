@@ -10,20 +10,19 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/wait"
 	utilwait "k8s.io/apimachinery/pkg/util/wait"
-	kinformers "k8s.io/client-go/informers"
-	kclientsetexternal "k8s.io/client-go/kubernetes"
 	restclient "k8s.io/client-go/rest"
 	kctrlmgr "k8s.io/kubernetes/cmd/kube-controller-manager/app"
 	cmapp "k8s.io/kubernetes/cmd/kube-controller-manager/app/options"
-	kapi "k8s.io/kubernetes/pkg/apis/core"
+	kapi "k8s.io/kubernetes/pkg/api"
 	kclientset "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset"
+	kinformers "k8s.io/kubernetes/pkg/client/informers/informers_generated/externalversions"
 	"k8s.io/kubernetes/pkg/controller"
 
-	buildtypedclient "github.com/openshift/origin/pkg/build/generated/internalclientset/typed/build/internalversion"
-	origincontrollers "github.com/openshift/origin/pkg/cmd/openshift-controller-manager/controller"
+	"github.com/openshift/origin/pkg/client"
 	"github.com/openshift/origin/pkg/cmd/server/bootstrappolicy"
 	"github.com/openshift/origin/pkg/cmd/server/origin"
-	imagetypedclient "github.com/openshift/origin/pkg/image/generated/internalclientset/typed/image/internalversion"
+	origincontrollers "github.com/openshift/origin/pkg/cmd/server/origin/controller"
+	"github.com/openshift/origin/pkg/cmd/server/start"
 	"github.com/openshift/origin/test/common/build"
 	testutil "github.com/openshift/origin/test/util"
 	testserver "github.com/openshift/origin/test/util/server"
@@ -39,58 +38,57 @@ type controllerCount struct {
 // transition happens and that only a single pod is created during a set period of time.
 func TestConcurrentBuildControllers(t *testing.T) {
 	// Start a master with multiple BuildControllers
-	buildClient, _, kClient, fn := setupBuildControllerTest(controllerCount{BuildControllers: 5}, t)
+	osClient, kClient, fn := setupBuildControllerTest(controllerCount{BuildControllers: 5}, t)
 	defer fn()
-	build.RunBuildControllerTest(t, buildClient, kClient)
+	build.RunBuildControllerTest(t, osClient, kClient)
 }
 
 // TestConcurrentBuildControllersPodSync tests the lifecycle of a build pod when running multiple controllers.
 func TestConcurrentBuildControllersPodSync(t *testing.T) {
 	// Start a master with multiple BuildControllers
-	buildClient, _, kClient, fn := setupBuildControllerTest(controllerCount{BuildControllers: 5}, t)
+	osClient, kClient, fn := setupBuildControllerTest(controllerCount{BuildControllers: 5}, t)
 	defer fn()
-	build.RunBuildControllerPodSyncTest(t, buildClient, kClient)
+	build.RunBuildControllerPodSyncTest(t, osClient, kClient)
 }
 
 func TestConcurrentBuildImageChangeTriggerControllers(t *testing.T) {
-	testutil.SetAdditionalAllowedRegistries("registry:8080")
 	// Start a master with multiple ImageChangeTrigger controllers
-	buildClient, imageClient, _, fn := setupBuildControllerTest(controllerCount{ImageChangeControllers: 5}, t)
+	osClient, _, fn := setupBuildControllerTest(controllerCount{ImageChangeControllers: 5}, t)
 	defer fn()
-	build.RunImageChangeTriggerTest(t, buildClient, imageClient)
+	build.RunImageChangeTriggerTest(t, osClient)
 }
 
 func TestBuildDeleteController(t *testing.T) {
-	buildClient, _, kClient, fn := setupBuildControllerTest(controllerCount{}, t)
+	osClient, kClient, fn := setupBuildControllerTest(controllerCount{}, t)
 	defer fn()
-	build.RunBuildDeleteTest(t, buildClient, kClient)
+	build.RunBuildDeleteTest(t, osClient, kClient)
 }
 
 func TestBuildRunningPodDeleteController(t *testing.T) {
-	buildClient, _, kClient, fn := setupBuildControllerTest(controllerCount{}, t)
+	osClient, kClient, fn := setupBuildControllerTest(controllerCount{}, t)
 	defer fn()
-	build.RunBuildRunningPodDeleteTest(t, buildClient, kClient)
+	build.RunBuildRunningPodDeleteTest(t, osClient, kClient)
 }
 
 func TestBuildCompletePodDeleteController(t *testing.T) {
-	buildClient, _, kClient, fn := setupBuildControllerTest(controllerCount{}, t)
+	osClient, kClient, fn := setupBuildControllerTest(controllerCount{}, t)
 	defer fn()
-	build.RunBuildCompletePodDeleteTest(t, buildClient, kClient)
+	build.RunBuildCompletePodDeleteTest(t, osClient, kClient)
 }
 
 func TestConcurrentBuildConfigControllers(t *testing.T) {
-	buildClient, _, _, fn := setupBuildControllerTest(controllerCount{ConfigChangeControllers: 5}, t)
+	osClient, kClient, fn := setupBuildControllerTest(controllerCount{ConfigChangeControllers: 5}, t)
 	defer fn()
-	build.RunBuildConfigChangeControllerTest(t, buildClient)
+	build.RunBuildConfigChangeControllerTest(t, osClient, kClient)
 }
 
-func setupBuildControllerTest(counts controllerCount, t *testing.T) (buildtypedclient.BuildInterface, imagetypedclient.ImageInterface, kclientset.Interface, func()) {
+func setupBuildControllerTest(counts controllerCount, t *testing.T) (*client.Client, kclientset.Interface, func()) {
 	master, clusterAdminKubeConfig, err := testserver.StartTestMaster()
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	clusterAdminClientConfig, err := testutil.GetClusterAdminClientConfig(clusterAdminKubeConfig)
+	clusterAdminClient, err := testutil.GetClusterAdminClient(clusterAdminKubeConfig)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,23 +108,26 @@ func setupBuildControllerTest(counts controllerCount, t *testing.T) (buildtypedc
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	informers, err := origin.NewInformers(clusterAdminClientConfig)
+	informers, err := start.NewInformers(*master)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	externalKubeClient := kclientsetexternal.NewForConfigOrDie(clusterAdminClientConfig)
+	openshiftConfig, err := origin.BuildMasterConfig(*master, informers)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// this test wants to duplicate the controllers, so it needs to duplicate the wiring.
 	// TODO have this simply start the particular controller it wants multiple times
-	controllerManagerOptions := cmapp.NewKubeControllerManagerOptions()
+	controllerManagerOptions := cmapp.NewCMServer()
 	rootClientBuilder := controller.SimpleControllerClientBuilder{
-		ClientConfig: clusterAdminClientConfig,
+		ClientConfig: &openshiftConfig.PrivilegedLoopbackClientConfig,
 	}
 	saClientBuilder := controller.SAControllerClientBuilder{
-		ClientConfig:         restclient.AnonymousClientConfig(clusterAdminClientConfig),
-		CoreClient:           externalKubeClient.Core(),
-		AuthenticationClient: externalKubeClient.Authentication(),
+		ClientConfig:         restclient.AnonymousClientConfig(&openshiftConfig.PrivilegedLoopbackClientConfig),
+		CoreClient:           openshiftConfig.PrivilegedLoopbackKubernetesClientsetExternal.Core(),
+		AuthenticationClient: openshiftConfig.PrivilegedLoopbackKubernetesClientsetExternal.Authentication(),
 		Namespace:            "kube-system",
 	}
 	availableResources, err := kctrlmgr.GetAvailableResources(rootClientBuilder)
@@ -158,20 +159,22 @@ func setupBuildControllerTest(counts controllerCount, t *testing.T) (buildtypedc
 				informers.GetExternalKubeInformers(),
 			},
 		},
-		ComponentConfig:    controllerManagerOptions.Generic.ComponentConfig,
+		Options:            *controllerManagerOptions,
 		AvailableResources: availableResources,
 		Stop:               wait.NeverStop,
 	}
 	openshiftControllerContext := origincontrollers.ControllerContext{
+		KubeControllerContext: controllerContext,
 		ClientBuilder: origincontrollers.OpenshiftControllerClientBuilder{
 			ControllerClientBuilder: controller.SAControllerClientBuilder{
-				ClientConfig:         restclient.AnonymousClientConfig(clusterAdminClientConfig),
-				CoreClient:           externalKubeClient.Core(),
-				AuthenticationClient: externalKubeClient.Authentication(),
+				ClientConfig:         restclient.AnonymousClientConfig(&openshiftConfig.PrivilegedLoopbackClientConfig),
+				CoreClient:           openshiftConfig.PrivilegedLoopbackKubernetesClientsetExternal.Core(),
+				AuthenticationClient: openshiftConfig.PrivilegedLoopbackKubernetesClientsetExternal.Authentication(),
 				Namespace:            bootstrappolicy.DefaultOpenShiftInfraNamespace,
 			},
 		},
 		ExternalKubeInformers: informers.GetExternalKubeInformers(),
+		InternalKubeInformers: informers.GetInternalKubeInformers(),
 		AppInformers:          informers.GetAppInformers(),
 		BuildInformers:        informers.GetBuildInformers(),
 		ImageInformers:        informers.GetImageInformers(),
@@ -179,30 +182,36 @@ func setupBuildControllerTest(counts controllerCount, t *testing.T) (buildtypedc
 		Stop:                  controllerContext.Stop,
 	}
 
+	openshiftControllerConfig, err := origincontrollers.BuildOpenshiftControllerConfig(*master)
+	if err != nil {
+		t.Fatal(err)
+	}
+	openshiftControllerInitializers, err := openshiftControllerConfig.GetControllerInitializers()
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	for i := 0; i < counts.BuildControllers; i++ {
-		_, err := origincontrollers.ControllerInitializers["openshift.io/build"](openshiftControllerContext)
+		_, err := openshiftControllerInitializers["openshift.io/build"](openshiftControllerContext)
 		if err != nil {
 			t.Fatal(err)
 		}
 	}
 	for i := 0; i < counts.ImageChangeControllers; i++ {
-		_, err := origincontrollers.ControllerInitializers["openshift.io/image-trigger"](openshiftControllerContext)
+		_, err := openshiftControllerInitializers["openshift.io/image-trigger"](openshiftControllerContext)
 		if err != nil {
 			t.Fatal(err)
 		}
 	}
 	for i := 0; i < counts.ConfigChangeControllers; i++ {
-		_, err := origincontrollers.ControllerInitializers["openshift.io/build-config-change"](openshiftControllerContext)
+		_, err := openshiftControllerInitializers["openshift.io/build-config-change"](openshiftControllerContext)
 		if err != nil {
 			t.Fatal(err)
 		}
 	}
-	return buildtypedclient.NewForConfigOrDie(clusterAdminClientConfig),
-		imagetypedclient.NewForConfigOrDie(clusterAdminClientConfig),
-		clusterAdminKubeClientset,
-		func() {
-			testserver.CleanupMasterEtcd(t, master)
-		}
+	return clusterAdminClient, clusterAdminKubeClientset, func() {
+		testserver.CleanupMasterEtcd(t, master)
+	}
 }
 
 type GenericResourceInformer interface {

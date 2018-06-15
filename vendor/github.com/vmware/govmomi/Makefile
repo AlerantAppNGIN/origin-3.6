@@ -11,19 +11,13 @@ goimports:
 
 govet:
 	@echo checking go vet...
-	@go tool vet -structtags=false -methods=false $$(find . -mindepth 1 -maxdepth 1 -type d -not -name vendor)
+	@go tool vet -structtags=false -methods=false .
+
+test:
+	go test -v $(TEST_OPTS) ./...
 
 install:
-	go install -v github.com/vmware/govmomi/govc
-	go install -v github.com/vmware/govmomi/vcsim
-
-go-test:
-	go test -race -v $(TEST_OPTS) ./...
-
-govc-test: install
-	(cd govc/test && ./vendor/github.com/sstephenson/bats/libexec/bats -t .)
-
-test: go-test govc-test
+	go install github.com/vmware/govmomi/govc
 
 doc: install
 	./govc/usage.sh > ./govc/USAGE.md

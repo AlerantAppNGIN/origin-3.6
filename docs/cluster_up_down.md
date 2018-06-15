@@ -2,39 +2,30 @@
 
 - [Overview](#overview)
 - [Getting Started](#getting-started)
-  - [Prerequisities](#prerequisites)
   - [Linux](#linux)
   - [MacOS with Docker for Mac](#macos-with-docker-for-mac)
-  - [Mac OS X with Docker Machine](#mac-os-x-with-docker-machine)
+  - [Mac OS X with Docker Toolbox](#mac-os-x-with-docker-toolbox)
   - [Windows with Docker for Windows](#windows-with-docker-for-windows)
-  - [Windows with Docker Machine](#windows-with-docker-machine)
+  - [Windows with Docker Toolbox](#windows-with-docker-toolbox)
 - [Persistent Volumes](#persistent-volumes)
 - [Using a Proxy](#using-a-proxy)
 - [Installing Metrics](#installing-metrics)
 - [Installing Logging Aggregation](#installing-logging-aggregation)
 - [Installing the Service Catalog](#installing-the-service-catalog)
 - [Administrator Access](#administrator-access)
+- [Docker Machine](#docker-machine)
 - [Configuration](#configuration)
 - [Etcd Data](#etcd-data)
 - [Routing](#routing)
 - [Specifying Images to Use](#specifying-images-to-use)
 - [Accessing the OpenShift Registry Directly](#accessing-the-openshift-registry-directly)
 
-## Prerequisites
+## Pre-requisites
 
 | NOTE |
 | ---- |
 | This command was released with the 1.3+ version of oc client tools, so you must be using version 1.3+ or newer for this command to work. |
 
-To run an OpenShift cluster locally, you must have a compatible version of Docker installed in your environment.
-OpenShift officially supports the following versions of Docker:
-
-| OpenShift Version | Docker Version |
-| ----------------- | -------------- |
-| 3.9 | 1.13 |
-| 3.6-3.7 | 1.12 |
-| 1.4-1.5 | 1.12 |
-| 1.3 | 1.10 |
 
 ## Overview
 
@@ -55,12 +46,11 @@ a URL to access the management console for your cluster.
 | The default Firewalld configuration on Fedora blocks access to ports needed by containers running on an OpenShift cluster. Make sure you grant access to these ports. See step 3 below. |
 | Check that `sysctl net.ipv4.ip_forward` is set to 1. |
 
-1. Install Docker with your platform's package manager. Consult the [compatibility table](#prerequisites) to select a supported version of Docker.
+1. Install Docker with your platform's package manager.
 2. Configure the Docker daemon with an insecure registry parameter of `172.30.0.0/16`
-   - In RHEL and Fedora, edit the `/etc/containers/registries.conf` file and add the following lines:
+   - In RHEL and Fedora, edit the `/etc/sysconfig/docker` file and add or uncomment the following line:
      ```
-     [registries.insecure]
-     registries = ['172.30.0.0/16']
+     INSECURE_REGISTRY='--insecure-registry 172.30.0.0/16'
      ```
      or edit the `/etc/docker/daemon.json` file and add the following:
      ```json
@@ -121,12 +111,7 @@ $ oc cluster down
 
 ### MacOS with Docker for Mac
 
-> `oc cluster up` with Docker for Mac does not work with versions 3.7.1 and earlier.
-  We recommend using [Mac OS X with Docker Machine](#mac-os-x-with-docker-machine) with these versions of the openshift cli.
-  See [issue #17570](https://github.com/openshift/origin/issues/17570).
-
-1. Install [Docker for Mac](https://docs.docker.com/docker-for-mac/release-notes/) making sure you meet the [prerequisites](https://docs.docker.com/docker-for-mac/#/what-to-know-before-you-install) 
-and download a [compatible version of Docker](#prerequisites).
+1. Install [Docker for Mac](https://docs.docker.com/docker-for-mac/) making sure you meet the [prerequisites](https://docs.docker.com/docker-for-mac/#/what-to-know-before-you-install).
 2. Once Docker is running, add an insecure registry of `172.30.0.0/16`:
    - From the Docker menu in the toolbar, select `Preferences...`
    - Click on `Daemon` in the preferences dialog (note: on some older versions of Docker for Mac this is under `Advanced`)
@@ -147,7 +132,7 @@ and download a [compatible version of Docker](#prerequisites).
    Download the Mac OS `oc` binary from [openshift-origin-client-tools-VERSION-mac.zip](https://github.com/openshift/origin/releases) and place it in your path.
 
    > Please be aware that the 'oc cluster' set of commands are only available in the 1.3+ or newer releases.
-  
+
 3. Open Terminal and run
    ```
    $ oc cluster up
@@ -158,12 +143,10 @@ To stop your cluster, run:
 $ oc cluster down
 ```
 
-### Mac OS X with Docker Machine
+### Mac OS X with Docker Toolbox
 
-1. Install [Docker for Mac](https://docs.docker.com/docker-for-mac/release-notes/) making sure you meet the [prerequisites](https://docs.docker.com/docker-for-mac/#/what-to-know-before-you-install) 
-and download a [compatible version of Docker](#prerequisites).
-2. Install [VirtualBox for OSX Hosts](https://www.virtualbox.org/wiki/Downloads)
-3. Install the oc binary using homebrew with: `brew install openshift-cli`
+1. Install [Docker Toolbox](https://www.docker.com/products/docker-toolbox) and ensure that it is functional.
+2. Install the oc binary using homebrew with: `brew install openshift-cli`
 
    OR
 
@@ -171,14 +154,27 @@ and download a [compatible version of Docker](#prerequisites).
 
    > Please be aware that the 'oc cluster' set of commands are only available in the 1.3+ or newer releases.
 
-4. Create a new docker machine named `openshift` with appropriate resource constraints. See [Getting Started with Docker Machine](https://docs.docker.com/machine/get-started/#create-a-machine) for instructions.
-5. Open Terminal and run
+3. Open Terminal and run
    ```
-   $ docker-machine create openshift
-   $ docker-machine start openshift
+   $ oc cluster up --create-machine
    ```
 
-To start/stop OpenShift cluster:
+A Docker machine named `openshift` will be created using the VirtualBox driver and the OpenShift cluster
+will be started on it.
+
+To stop the cluster, run:
+
+```
+$ oc cluster down --docker-machine=openshift
+```
+
+To create a machine with a different name, specify the `--docker-machine` argument with `--create-machine`:
+
+```
+$ oc cluster up --create-machine --docker-machine=mymachine
+```
+
+Once the machine has been created, the `--create-machine` argument is no longer needed. To start/stop OpenShift again, either:
 
 * Setup the Docker environment for the machine you wish to use, and then run `oc cluster up` and `oc cluster down`:
 
@@ -191,10 +187,21 @@ To start/stop OpenShift cluster:
   $ oc cluster down
   ```
 
+  OR
+
+* Specify the Docker machine name as an argument to `oc cluster up` and `oc cluster down`:
+
+  ```
+  $ oc cluster up --docker-machine=openshift
+
+  ...
+
+  $ oc cluster down --docker-machine=openshift
+  ```
+
 ### Windows with Docker for Windows
 
-1. Install [Docker for Windows](https://docs.docker.com/docker-for-windows/relase-notes/) making sure you meet the [prerequisites](https://docs.docker.com/docker-for-windows/#/what-to-know-before-you-install)
-and download a [compatible version of Docker](#prerequisites).
+1. Install [Docker for Windows](https://docs.docker.com/docker-for-windows/) making sure you meet the [prerequisites](https://docs.docker.com/docker-for-windows/#/what-to-know-before-you-install).
 2. Once Docker is running, add an insecure registry of `172.30.0.0/16`:
    - Right click on the Docker icon in the notification area and select `Settings...`
    - Click on `Docker Daemon` in the settings dialog
@@ -221,23 +228,35 @@ To stop the cluster, run:
 C:\> oc cluster down
 ```
 
-### Windows with Docker Machine
+### Windows with Docker Toolbox
 
-1. Install [Docker for Windows](https://docs.docker.com/docker-for-windows/release-notes/) making sure you meet the [prerequisites](https://docs.docker.com/docker-for-windows/#/what-to-know-before-you-install)
-and download a [compatible version of Docker](#prerequisites).
-2. Review the [prerequisite instructions](https://docs.docker.com/machine/get-started/#prerequisite-information) to set up Docker Machine on Windows.
-3. Download the Windows `oc.exe` binary from [openshift-origin-client-tools-VERSION-windows.zip](https://github.com/openshift/origin/releases) and place it in your path.
+1. Install [Docker Toolbox](https://www.docker.com/products/docker-toolbox) and ensure that it is functional.
+2. Download the Windows `oc.exe` binary from [openshift-origin-client-tools-VERSION-windows.zip](https://github.com/openshift/origin/releases) and place it in your path.
 
    > Please be aware that the 'oc cluster' set of commands are only available in the 1.3+ or newer releases.
-4. Create a new docker machine named `openshift` with appropriate resource constraints. See [Getting Started with Docker Machine](https://docs.docker.com/machine/get-started/#create-a-machine) for instructions.
-5. Open a Command window as Administrator (for most drivers, docker-machine on Windows requires administrator privileges)
+
+3. Open a Command window as Administrator (for most drivers, docker-machine on Windows requires administrator privileges)
    and run:
    ```
-   C:\> docker-machine create openshift
-   C:\> docker-machine start openshift
+   C:\> oc cluster up --create-machine
    ```
 
-To start/stop OpenShift cluster:
+A Docker machine named `openshift` will be created using the VirtualBox driver and the OpenShift cluster
+will be started on it.
+
+To stop the cluster, run:
+
+```
+C:\> oc cluster down --docker-machine=openshift
+```
+
+To create a machine with a different name, specify the `--docker-machine` argument with `--create-machine`:
+
+```
+C:\> oc cluster up --create-machine --docker-machine=mymachine
+```
+
+Once the machine has been created, the `--create-machine` argument is no longer needed. To start/stop OpenShift again, either:
 
 * Setup the Docker environment for the machine you wish to use, and then run `oc cluster up` and `oc cluster down`:
   ```
@@ -247,6 +266,16 @@ To start/stop OpenShift cluster:
   ...
 
   C:\> oc cluster down
+  ```
+
+* Specify the Docker machine name as an argument to `oc cluster up` and `oc cluster down`:
+
+  ```
+  C:\> oc cluster up --docker-machine=openshift
+
+  ...
+
+  C:\> oc cluster down --docker-machine=openshift
   ```
 
 ## Persistent Volumes
@@ -337,6 +366,30 @@ To return to the regular `developer` user, login as that user:
 oc login -u developer
 ```
 
+## Docker Machine
+
+By default, when `--create-machine` is used to create a new Docker machine, the `oc cluster up` command will use the
+VirtualBox driver. In order to use a different driver, you must create the Docker machine beforehand
+and either specify its name with the `--docker-machine` argument, or set its environment using the `docker-machine env`
+command. When creating a Docker machine manually, you must specify the `--engine-insecure-registry` argument with the
+value expected by OpenShift.
+
+Following are examples of creating a new Docker machine in OS X using the [xhyve](https://github.com/zchee/docker-machine-driver-xhyve) driver,
+and in Windows, using the [hyper-v](https://docs.docker.com/machine/drivers/hyper-v/) driver.
+
+OS X:
+```
+$ docker-machine create --driver xhyve --engine-insecure-registry 172.30.0.0/16 mymachine
+```
+
+Windows (running a command window as Administrator):
+```
+C:\> docker-machine create --driver hyperv --engine-insecure-registry 172.30.0.0/16 mymachine
+```
+
+When the `--docker-machine` argument is specified on `oc cluster up`, the machine's environment does not need to be configured
+on the current shell. Also if the machine exists but is not started, `oc cluster up` will attempt to start it.
+
 ## Configuration
 
 `oc cluster up` creates its configuration by default in `/var/lib/origin/openshift.local.config` on the Docker host.
@@ -369,13 +422,21 @@ To use a different suffix, specify it with `--routing-suffix`.
 By default `oc cluster up` uses `openshift/origin:[released-version]` as its OpenShift image (where [released-version]
 corresponds to the release of the `oc` client) and `openshift-origin-${component}:[released-version]` for
 other images created by the OpenShift cluster (registry, router, builders, etc). It is possible to use a different set of
-images by specifying the image prefix.
+images by specifying the version and/or the image prefix.
+
+To use a different version of Origin, specify the --version argument. In the following example, images named
+openshift/origin:v1.1.6, openshift/origin-router:v1.1.6, etc. will be used for your cluster.
+```
+oc cluster up --version=v1.1.6
+```
 
 To use images from a different registry or with a different namespace, use the --image argument.  In the following example,
 myregistry.example.com/ose/origin:latest, myregistry.example.com/ose/origin-router:latest, etc. will be used for your cluster.
 ```
 oc cluster up --image=myregistry.example.com/ose/origin
 ```
+
+Both --version and --image may be combined to specify the image name prefix and tag for the images to use.
 
 ## Accessing the OpenShift Registry Directly
 

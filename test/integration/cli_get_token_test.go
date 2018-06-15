@@ -5,10 +5,10 @@ import (
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/rest"
 
-	"github.com/openshift/origin/pkg/oc/util/tokencmd"
-	userclient "github.com/openshift/origin/pkg/user/generated/internalclientset/typed/user/internalversion"
+	"github.com/openshift/origin/pkg/client"
+	"github.com/openshift/origin/pkg/cmd/util/clientcmd"
+	"github.com/openshift/origin/pkg/cmd/util/tokencmd"
 	testutil "github.com/openshift/origin/test/util"
 	testserver "github.com/openshift/origin/test/util/server"
 )
@@ -24,9 +24,9 @@ func TestCLIGetToken(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	anonymousConfig := rest.AnonymousClientConfig(clusterAdminClientConfig)
+	anonymousConfig := clientcmd.AnonymousClientConfig(clusterAdminClientConfig)
 	reader := bytes.NewBufferString("user\npass")
-	accessToken, err := tokencmd.RequestToken(anonymousConfig, reader, "", "")
+	accessToken, err := tokencmd.RequestToken(&anonymousConfig, reader, "", "")
 	if err != nil {
 		t.Errorf("Unexpected error: %v", err)
 	}
@@ -34,10 +34,14 @@ func TestCLIGetToken(t *testing.T) {
 		t.Error("Expected accessToken, but did not get one")
 	}
 
-	clientConfig := rest.AnonymousClientConfig(clusterAdminClientConfig)
+	clientConfig := clientcmd.AnonymousClientConfig(clusterAdminClientConfig)
 	clientConfig.BearerToken = accessToken
+	osClient, err := client.New(&clientConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
 
-	user, err := userclient.NewForConfigOrDie(clientConfig).Users().Get("~", metav1.GetOptions{})
+	user, err := osClient.Users().Get("~", metav1.GetOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}

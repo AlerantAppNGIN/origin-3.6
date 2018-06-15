@@ -8,17 +8,16 @@ import (
 	"github.com/google/gofuzz"
 
 	"k8s.io/apimachinery/pkg/api/meta"
-	"k8s.io/apimachinery/pkg/api/testing/fuzzer"
+	apitesting "k8s.io/apimachinery/pkg/api/testing"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	apirequest "k8s.io/apiserver/pkg/endpoints/request"
-	"k8s.io/kubernetes/pkg/api/legacyscheme"
-	kapitesting "k8s.io/kubernetes/pkg/api/testing"
+	kapi "k8s.io/kubernetes/pkg/api"
 
 	imageapi "github.com/openshift/origin/pkg/image/apis/image"
 )
 
 func fuzzImageSignature(t *testing.T, signature *imageapi.ImageSignature, seed int64) *imageapi.ImageSignature {
-	f := fuzzer.FuzzerFor(kapitesting.FuzzerFuncs, rand.NewSource(seed), legacyscheme.Codecs)
+	f := apitesting.FuzzerFor(apitesting.GenericFuzzerFuncs(t, kapi.Codecs), rand.NewSource(seed))
 	f.Funcs(
 		func(j *imageapi.ImageSignature, c fuzz.Continue) {
 			c.FuzzNoCustom(j)

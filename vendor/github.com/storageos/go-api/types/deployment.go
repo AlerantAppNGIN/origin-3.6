@@ -18,10 +18,6 @@ type Deployment struct {
 	// Read Only: true
 	Controller string `json:"controller"`
 
-	// Controller name
-	// Read Only: true
-	ControllerName string `json:"controllerName"`
-
 	// Health
 	// Read Only: true
 	Health string `json:"health"`

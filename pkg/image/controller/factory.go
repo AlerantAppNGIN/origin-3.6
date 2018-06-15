@@ -7,8 +7,8 @@ import (
 	"k8s.io/client-go/util/flowcontrol"
 	"k8s.io/client-go/util/workqueue"
 
-	imageinformer "github.com/openshift/origin/pkg/image/generated/informers/internalversion/image/internalversion"
-	imageclient "github.com/openshift/origin/pkg/image/generated/internalclientset"
+	"github.com/openshift/origin/pkg/client"
+	imageinternalversion "github.com/openshift/origin/pkg/image/generated/informers/internalversion/image/internalversion"
 )
 
 // ImageStreamControllerOptions represents a configuration for the scheduled image stream
@@ -61,15 +61,14 @@ func (opts ScheduledImageStreamControllerOptions) GetRateLimiter() flowcontrol.R
 }
 
 // NewImageStreamController returns a new image stream import controller.
-func NewImageStreamController(client imageclient.Interface, informer imageinformer.ImageStreamInformer) *ImageStreamController {
+func NewImageStreamController(namespacer client.ImageStreamsNamespacer, informer imageinternalversion.ImageStreamInformer) *ImageStreamController {
 	controller := &ImageStreamController{
 		queue: workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter()),
 
-		client:       client.Image(),
+		isNamespacer: namespacer,
 		lister:       informer.Lister(),
 		listerSynced: informer.Informer().HasSynced,
 	}
-	controller.syncHandler = controller.syncImageStream
 
 	informer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc:    controller.addImageStream,
@@ -81,18 +80,18 @@ func NewImageStreamController(client imageclient.Interface, informer imageinform
 
 // NewScheduledImageStreamController returns a new scheduled image stream import
 // controller.
-func NewScheduledImageStreamController(client imageclient.Interface, informer imageinformer.ImageStreamInformer, opts ScheduledImageStreamControllerOptions) *ScheduledImageStreamController {
+func NewScheduledImageStreamController(namespacer client.ImageStreamsNamespacer, informer imageinternalversion.ImageStreamInformer, opts ScheduledImageStreamControllerOptions) *ScheduledImageStreamController {
 	bucketLimiter := flowcontrol.NewTokenBucketRateLimiter(opts.BucketsToQPS(), 1)
 
 	controller := &ScheduledImageStreamController{
 		enabled:      opts.Enabled,
 		rateLimiter:  opts.GetRateLimiter(),
-		client:       client.Image(),
+		isNamespacer: namespacer,
 		lister:       informer.Lister(),
 		listerSynced: informer.Informer().HasSynced,
 	}
 
-	controller.scheduler = newScheduler(opts.Buckets(), bucketLimiter, controller.syncTimed)
+	controller.scheduler = NewScheduler(opts.Buckets(), bucketLimiter, controller.syncTimed)
 
 	informer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc:    controller.addImageStream,

@@ -13,10 +13,9 @@ import (
 	kcmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
 	kprinters "k8s.io/kubernetes/pkg/printers"
 
-	"github.com/openshift/origin/pkg/oc/cli/util/clientcmd"
+	"github.com/openshift/origin/pkg/client"
+	"github.com/openshift/origin/pkg/cmd/util/clientcmd"
 	userapi "github.com/openshift/origin/pkg/user/apis/user"
-	userclientinternal "github.com/openshift/origin/pkg/user/generated/internalclientset"
-	usertypedclient "github.com/openshift/origin/pkg/user/generated/internalclientset/typed/user/internalversion"
 )
 
 const NewGroupRecommendedName = "new"
@@ -39,7 +38,7 @@ var (
 )
 
 type NewGroupOptions struct {
-	GroupClient usertypedclient.GroupInterface
+	GroupClient client.GroupInterface
 
 	Group string
 	Users []string
@@ -58,7 +57,7 @@ func NewCmdNewGroup(name, fullName string, f *clientcmd.Factory, out io.Writer) 
 		Example: fmt.Sprintf(newExample, fullName),
 		Run: func(cmd *cobra.Command, args []string) {
 			if err := options.Complete(f, cmd, args); err != nil {
-				kcmdutil.CheckErr(kcmdutil.UsageErrorf(cmd, err.Error()))
+				kcmdutil.CheckErr(kcmdutil.UsageError(cmd, err.Error()))
 			}
 			kcmdutil.CheckErr(options.Validate())
 			kcmdutil.CheckErr(options.AddGroup())
@@ -80,18 +79,14 @@ func (o *NewGroupOptions) Complete(f *clientcmd.Factory, cmd *cobra.Command, arg
 		o.Users = append(o.Users, args[1:]...)
 	}
 
-	clientConfig, err := f.ClientConfig()
-	if err != nil {
-		return err
-	}
-	userClient, err := userclientinternal.NewForConfig(clientConfig)
+	osClient, _, err := f.Clients()
 	if err != nil {
 		return err
 	}
 
-	o.GroupClient = userClient.User().Groups()
+	o.GroupClient = osClient.Groups()
 
-	printer, err := kcmdutil.PrinterForOptions(kcmdutil.ExtractCmdPrintOptions(cmd, false))
+	printer, err := f.PrinterForCommand(cmd, true, nil, kprinters.PrintOptions{})
 	if err != nil {
 		return err
 	}
@@ -100,7 +95,8 @@ func (o *NewGroupOptions) Complete(f *clientcmd.Factory, cmd *cobra.Command, arg
 		o.Printer = printer.PrintObj
 	} else {
 		o.Printer = func(obj runtime.Object, out io.Writer) error {
-			return kcmdutil.PrintObject(cmd, obj, out)
+			mapper, _ := f.Object()
+			return f.PrintObject(cmd, true, mapper, obj, out)
 		}
 	}
 

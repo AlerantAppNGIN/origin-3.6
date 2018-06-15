@@ -10,10 +10,9 @@ import (
 	"k8s.io/kubernetes/pkg/kubectl/cmd/templates"
 	kcmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
 
-	"github.com/openshift/origin/pkg/oc/cli/util/clientcmd"
+	osclient "github.com/openshift/origin/pkg/client"
+	"github.com/openshift/origin/pkg/cmd/util/clientcmd"
 	userapi "github.com/openshift/origin/pkg/user/apis/user"
-	userclientinternal "github.com/openshift/origin/pkg/user/generated/internalclientset"
-	userclient "github.com/openshift/origin/pkg/user/generated/internalclientset/typed/user/internalversion"
 )
 
 const WhoAmIRecommendedCommandName = "whoami"
@@ -26,7 +25,7 @@ var whoamiLong = templates.LongDesc(`
 	user context.`)
 
 type WhoAmIOptions struct {
-	UserInterface userclient.UserResourceInterface
+	UserInterface osclient.UserInterface
 
 	Out io.Writer
 }
@@ -62,7 +61,7 @@ func (o WhoAmIOptions) WhoAmI() (*userapi.User, error) {
 
 func RunWhoAmI(f *clientcmd.Factory, out io.Writer, cmd *cobra.Command, args []string, o *WhoAmIOptions) error {
 	if kcmdutil.GetFlagBool(cmd, "show-token") {
-		cfg, err := f.ClientConfig()
+		cfg, err := f.OpenShiftClientConfig().ClientConfig()
 		if err != nil {
 			return err
 		}
@@ -73,7 +72,7 @@ func RunWhoAmI(f *clientcmd.Factory, out io.Writer, cmd *cobra.Command, args []s
 		return nil
 	}
 	if kcmdutil.GetFlagBool(cmd, "show-context") {
-		cfg, err := f.RawConfig()
+		cfg, err := f.OpenShiftClientConfig().RawConfig()
 		if err != nil {
 			return err
 		}
@@ -84,7 +83,7 @@ func RunWhoAmI(f *clientcmd.Factory, out io.Writer, cmd *cobra.Command, args []s
 		return nil
 	}
 	if kcmdutil.GetFlagBool(cmd, "show-server") {
-		cfg, err := f.ClientConfig()
+		cfg, err := f.OpenShiftClientConfig().ClientConfig()
 		if err != nil {
 			return err
 		}
@@ -92,16 +91,12 @@ func RunWhoAmI(f *clientcmd.Factory, out io.Writer, cmd *cobra.Command, args []s
 		return nil
 	}
 
-	clientConfig, err := f.ClientConfig()
-	if err != nil {
-		return err
-	}
-	client, err := userclientinternal.NewForConfig(clientConfig)
+	client, _, err := f.Clients()
 	if err != nil {
 		return err
 	}
 
-	o.UserInterface = client.User().Users()
+	o.UserInterface = client.Users()
 	o.Out = out
 
 	_, err = o.WhoAmI()

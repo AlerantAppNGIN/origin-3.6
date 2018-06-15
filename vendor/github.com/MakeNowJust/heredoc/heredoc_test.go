@@ -1,12 +1,14 @@
-// Copyright (c) 2014-2017 TSUYUSATO Kitsune
+// Copyright (c) 2014 TSUYUSATO Kitsune
 // This software is released under the MIT License.
 // http://opensource.org/licenses/mit-license.php
 
-package heredoc
+package heredoc_test
 
 import (
 	"testing"
 )
+
+import "github.com/MakeNowJust/heredoc"
 
 type testCase struct {
 	raw, expect string
@@ -25,7 +27,7 @@ var tests = []testCase{
 			
 		Bar
 		`,
-		"Foo\n\t\nBar\n"}, // Second line contains two tabs.
+		"Foo\n\t\nBar\n"},
 	{`
 		Foo
 			Bar
@@ -42,7 +44,7 @@ var tests = []testCase{
 
 func TestDoc(t *testing.T) {
 	for i, test := range tests {
-		result := Doc(test.raw)
+		result := heredoc.Doc(test.raw)
 		if result != test.expect {
 			t.Errorf("tests[%d] failed: expected=> %#v, result=> %#v", i, test.expect, result)
 		}
@@ -50,7 +52,8 @@ func TestDoc(t *testing.T) {
 }
 
 func TestDocf(t *testing.T) {
-	tc := `
+	// test case
+	str := `
 		int: %3d
 		string: %s
 	`
@@ -58,7 +61,7 @@ func TestDocf(t *testing.T) {
 	s := "Hello"
 	expect := "int:  42\nstring: Hello\n"
 
-	result := Docf(tc, i, s)
+	result := heredoc.Docf(str, i, s)
 	if result != expect {
 		t.Errorf("test failed: expected=> %#v, result=> %#v", expect, result)
 	}

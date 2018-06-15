@@ -5,15 +5,12 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
-	clientgotesting "k8s.io/client-go/testing"
-	"k8s.io/kubernetes/pkg/api/legacyscheme"
+	kapi "k8s.io/kubernetes/pkg/api"
 
 	buildapi "github.com/openshift/origin/pkg/build/apis/build"
-	buildfake "github.com/openshift/origin/pkg/build/generated/internalclientset/fake"
+	"github.com/openshift/origin/pkg/client/testclient"
 )
 
 // TestCancelBuildDefaultFlags ensures that flags default values are set.
@@ -139,31 +136,15 @@ func TestCancelBuildRun(t *testing.T) {
 				Name:      build.Name,
 			},
 		}
-		client := buildfake.NewSimpleClientset(build, stubbedBuildRequest)
-		client.PrependReactor("update", "builds", func(action clientgotesting.Action) (handled bool, ret runtime.Object, err error) {
-			updateAction := action.(clientgotesting.UpdateActionImpl)
-			obj := updateAction.GetObject()
-			build := obj.(*buildapi.Build)
-			if build.Status.Cancelled == true {
-				build.Status.Phase = buildapi.BuildPhaseCancelled
-			}
-			return false, build, nil
-		})
-		client.PrependReactor("create", "builds", func(action clientgotesting.Action) (handled bool, ret runtime.Object, err error) {
-			if action.GetSubresource() != "clone" {
-				return false, nil, nil
-			}
-			return true, build, nil
-		})
+		client := testclient.NewSimpleFake(build, stubbedBuildRequest)
+		buildClient := NewFakeTestBuilds(client, test.opts.Namespace)
 
-		test.opts.timeout = 1 * time.Second
 		test.opts.Client = client
-		test.opts.BuildClient = client.Build().Builds(test.opts.Namespace)
+		test.opts.BuildClient = buildClient
 		test.opts.ReportError = func(err error) {
 			test.opts.HasError = true
-			t.Logf("got error: %v", err)
 		}
-		test.opts.Mapper = legacyscheme.Registry.RESTMapper()
+		test.opts.Mapper = kapi.Registry.RESTMapper()
 		test.opts.BuildNames = []string{"ruby-ex"}
 		test.opts.States = []string{"new", "pending", "running"}
 
@@ -171,7 +152,7 @@ func TestCancelBuildRun(t *testing.T) {
 			t.Fatalf("%s: error mismatch: expected %v, got %v", testName, test.expectedErr, err)
 		}
 
-		got := test.opts.Client.(*buildfake.Clientset).Actions()
+		got := test.opts.Client.(*testclient.Fake).Actions()
 		if len(test.expectedActions) != len(got) {
 			t.Fatalf("%s: action length mismatch: expected %d, got %d", testName, len(test.expectedActions), len(got))
 		}
@@ -183,6 +164,41 @@ func TestCancelBuildRun(t *testing.T) {
 		}
 	}
 
+}
+
+type FakeTestBuilds struct {
+	*testclient.FakeBuilds
+	Obj *buildapi.Build
+}
+
+func NewFakeTestBuilds(c *testclient.Fake, ns string) *FakeTestBuilds {
+	f := FakeTestBuilds{
+		FakeBuilds: &testclient.FakeBuilds{
+			Fake:      c,
+			Namespace: ns,
+		},
+	}
+
+	return &f
+}
+
+func (c *FakeTestBuilds) Get(name string, options metav1.GetOptions) (*buildapi.Build, error) {
+	obj, err := c.FakeBuilds.Get(name, options)
+	if c.Obj == nil {
+		c.Obj = obj
+	}
+
+	return c.Obj, err
+}
+
+func (c *FakeTestBuilds) Update(inObj *buildapi.Build) (*buildapi.Build, error) {
+	_, err := c.FakeBuilds.Update(inObj)
+	if inObj.Status.Cancelled == true {
+		inObj.Status.Phase = buildapi.BuildPhaseCancelled
+	}
+
+	c.Obj = inObj
+	return c.Obj, err
 }
 
 func genBuild(phase buildapi.BuildPhase) *buildapi.Build {

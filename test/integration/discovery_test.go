@@ -7,7 +7,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/sets"
 
-	configapi "github.com/openshift/origin/pkg/cmd/server/apis/config"
+	configapi "github.com/openshift/origin/pkg/cmd/server/api"
 	testutil "github.com/openshift/origin/test/util"
 	testserver "github.com/openshift/origin/test/util/server"
 )

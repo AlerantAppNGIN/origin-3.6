@@ -6,8 +6,6 @@ import (
 	"reflect"
 	"testing"
 
-	"k8s.io/apimachinery/pkg/util/diff"
-
 	"github.com/openshift/origin/tools/junitreport/pkg/api"
 	"github.com/openshift/origin/tools/junitreport/pkg/builder/nested"
 )
@@ -26,17 +24,24 @@ func TestNestedParse(t *testing.T) {
 			expectedSuites: &api.TestSuites{
 				Suites: []*api.TestSuite{
 					{
-						Name:     "package/name",
+						Name:     "package",
 						NumTests: 2,
 						Duration: 0.16,
-						TestCases: []*api.TestCase{
+						Children: []*api.TestSuite{
 							{
-								Name:     "TestOne",
-								Duration: 0.06,
-							},
-							{
-								Name:     "TestTwo",
-								Duration: 0.1,
+								Name:     "package/name",
+								NumTests: 2,
+								Duration: 0.16,
+								TestCases: []*api.TestCase{
+									{
+										Name:     "TestOne",
+										Duration: 0.06,
+									},
+									{
+										Name:     "TestTwo",
+										Duration: 0.1,
+									},
+								},
 							},
 						},
 					},
@@ -73,21 +78,34 @@ func TestNestedParse(t *testing.T) {
 			expectedSuites: &api.TestSuites{
 				Suites: []*api.TestSuite{
 					{
-						Name:      "package/name",
+						Name:      "package",
 						NumTests:  2,
 						NumFailed: 1,
 						Duration:  0.15,
-						TestCases: []*api.TestCase{
+						Children: []*api.TestSuite{
 							{
-								Name:     "TestOne",
-								Duration: 0.02,
-								FailureOutput: &api.FailureOutput{
-									Output: "file_test.go:11: Error message\nfile_test.go:11: Longer\nerror\nmessage.\n",
+								Name:      "package/name",
+								NumTests:  2,
+								NumFailed: 1,
+								Duration:  0.15,
+								TestCases: []*api.TestCase{
+									{
+										Name:     "TestOne",
+										Duration: 0.02,
+										FailureOutput: &api.FailureOutput{
+											Output: `=== RUN TestOne
+--- FAIL: TestOne (0.02 seconds)
+	file_test.go:11: Error message
+	file_test.go:11: Longer
+		error
+		message.`,
+										},
+									},
+									{
+										Name:     "TestTwo",
+										Duration: 0.13,
+									},
 								},
-							},
-							{
-								Name:     "TestTwo",
-								Duration: 0.13,
 							},
 						},
 					},
@@ -100,21 +118,31 @@ func TestNestedParse(t *testing.T) {
 			expectedSuites: &api.TestSuites{
 				Suites: []*api.TestSuite{
 					{
-						Name:       "package/name",
+						Name:       "package",
 						NumTests:   2,
 						NumSkipped: 1,
 						Duration:   0.15,
-						TestCases: []*api.TestCase{
+						Children: []*api.TestSuite{
 							{
-								Name:     "TestOne",
-								Duration: 0.02,
-								SkipMessage: &api.SkipMessage{
-									Message: "file_test.go:11: Skip message\n",
+								Name:       "package/name",
+								NumTests:   2,
+								NumSkipped: 1,
+								Duration:   0.15,
+								TestCases: []*api.TestCase{
+									{
+										Name:     "TestOne",
+										Duration: 0.02,
+										SkipMessage: &api.SkipMessage{
+											Message: `=== RUN TestOne
+--- SKIP: TestOne (0.02 seconds)
+	file_test.go:11: Skip message`,
+										},
+									},
+									{
+										Name:     "TestTwo",
+										Duration: 0.13,
+									},
 								},
-							},
-							{
-								Name:     "TestTwo",
-								Duration: 0.13,
 							},
 						},
 					},
@@ -127,17 +155,24 @@ func TestNestedParse(t *testing.T) {
 			expectedSuites: &api.TestSuites{
 				Suites: []*api.TestSuite{
 					{
-						Name:     "package/name",
+						Name:     "package",
 						NumTests: 2,
 						Duration: 0.16,
-						TestCases: []*api.TestCase{
+						Children: []*api.TestSuite{
 							{
-								Name:     "TestOne",
-								Duration: 0.06,
-							},
-							{
-								Name:     "TestTwo",
-								Duration: 0.1,
+								Name:     "package/name",
+								NumTests: 2,
+								Duration: 0.16,
+								TestCases: []*api.TestCase{
+									{
+										Name:     "TestOne",
+										Duration: 0.06,
+									},
+									{
+										Name:     "TestTwo",
+										Duration: 0.1,
+									},
+								},
 							},
 						},
 					},
@@ -150,36 +185,49 @@ func TestNestedParse(t *testing.T) {
 			expectedSuites: &api.TestSuites{
 				Suites: []*api.TestSuite{
 					{
-						Name:     "package/name1",
-						NumTests: 2,
-						Duration: 0.16,
-						TestCases: []*api.TestCase{
-							{
-								Name:     "TestOne",
-								Duration: 0.06,
-							},
-							{
-								Name:     "TestTwo",
-								Duration: 0.1,
-							},
-						},
-					},
-					{
-						Name:      "package/name2",
-						NumTests:  2,
-						Duration:  0.15,
+						Name:      "package",
+						NumTests:  4,
 						NumFailed: 1,
-						TestCases: []*api.TestCase{
+						Duration:  0.31,
+						Children: []*api.TestSuite{
 							{
-								Name:     "TestOne",
-								Duration: 0.02,
-								FailureOutput: &api.FailureOutput{
-									Output: "file_test.go:11: Error message\nfile_test.go:11: Longer\nerror\nmessage.\n",
+								Name:     "package/name1",
+								NumTests: 2,
+								Duration: 0.16,
+								TestCases: []*api.TestCase{
+									{
+										Name:     "TestOne",
+										Duration: 0.06,
+									},
+									{
+										Name:     "TestTwo",
+										Duration: 0.1,
+									},
 								},
 							},
 							{
-								Name:     "TestTwo",
-								Duration: 0.13,
+								Name:      "package/name2",
+								NumTests:  2,
+								Duration:  0.15,
+								NumFailed: 1,
+								TestCases: []*api.TestCase{
+									{
+										Name:     "TestOne",
+										Duration: 0.02,
+										FailureOutput: &api.FailureOutput{
+											Output: `=== RUN TestOne
+--- FAIL: TestOne (0.02 seconds)
+	file_test.go:11: Error message
+	file_test.go:11: Longer
+		error
+		message.`,
+										},
+									},
+									{
+										Name:     "TestTwo",
+										Duration: 0.13,
+									},
+								},
 							},
 						},
 					},
@@ -192,23 +240,30 @@ func TestNestedParse(t *testing.T) {
 			expectedSuites: &api.TestSuites{
 				Suites: []*api.TestSuite{
 					{
-						Name:     "package/name",
+						Name:     "package",
 						NumTests: 2,
 						Duration: 0.16,
-						Properties: []*api.TestSuiteProperty{
+						Children: []*api.TestSuite{
 							{
-								Name:  "coverage.statements.pct",
-								Value: "13.37",
-							},
-						},
-						TestCases: []*api.TestCase{
-							{
-								Name:     "TestOne",
-								Duration: 0.06,
-							},
-							{
-								Name:     "TestTwo",
-								Duration: 0.1,
+								Name:     "package/name",
+								NumTests: 2,
+								Duration: 0.16,
+								Properties: []*api.TestSuiteProperty{
+									{
+										Name:  "coverage.statements.pct",
+										Value: "13.37",
+									},
+								},
+								TestCases: []*api.TestCase{
+									{
+										Name:     "TestOne",
+										Duration: 0.06,
+									},
+									{
+										Name:     "TestTwo",
+										Duration: 0.1,
+									},
+								},
 							},
 						},
 					},
@@ -221,23 +276,30 @@ func TestNestedParse(t *testing.T) {
 			expectedSuites: &api.TestSuites{
 				Suites: []*api.TestSuite{
 					{
-						Name:     "package/name",
+						Name:     "package",
 						NumTests: 2,
 						Duration: 0.16,
-						Properties: []*api.TestSuiteProperty{
+						Children: []*api.TestSuite{
 							{
-								Name:  "coverage.statements.pct",
-								Value: "10.0",
-							},
-						},
-						TestCases: []*api.TestCase{
-							{
-								Name:     "TestOne",
-								Duration: 0.06,
-							},
-							{
-								Name:     "TestTwo",
-								Duration: 0.1,
+								Name:     "package/name",
+								NumTests: 2,
+								Duration: 0.16,
+								Properties: []*api.TestSuiteProperty{
+									{
+										Name:  "coverage.statements.pct",
+										Value: "10.0",
+									},
+								},
+								TestCases: []*api.TestCase{
+									{
+										Name:     "TestOne",
+										Duration: 0.06,
+									},
+									{
+										Name:     "TestTwo",
+										Duration: 0.1,
+									},
+								},
 							},
 						},
 					},
@@ -250,17 +312,24 @@ func TestNestedParse(t *testing.T) {
 			expectedSuites: &api.TestSuites{
 				Suites: []*api.TestSuite{
 					{
-						Name:     "package/name",
+						Name:     "package",
 						NumTests: 2,
 						Duration: 0.05,
-						TestCases: []*api.TestCase{
+						Children: []*api.TestSuite{
 							{
-								Name:     "TestOne",
-								Duration: 0.02,
-							},
-							{
-								Name:     "TestTwo",
-								Duration: 0.03,
+								Name:     "package/name",
+								NumTests: 2,
+								Duration: 0.05,
+								TestCases: []*api.TestCase{
+									{
+										Name:     "TestOne",
+										Duration: 0.02,
+									},
+									{
+										Name:     "TestTwo",
+										Duration: 0.03,
+									},
+								},
 							},
 						},
 					},
@@ -268,62 +337,90 @@ func TestNestedParse(t *testing.T) {
 			},
 		},
 		{
-			name:     "nested",
+			name:     "nested ",
 			testFile: "9.txt",
 			expectedSuites: &api.TestSuites{
 				Suites: []*api.TestSuite{
 					{
-						Name:       "package/name",
-						NumTests:   2,
-						NumFailed:  0,
-						NumSkipped: 0,
-						Duration:   0.05,
-						TestCases: []*api.TestCase{
-							{
-								Name:     "TestOne",
-								Duration: 0.02,
-							},
-							{
-								Name:     "TestTwo",
-								Duration: 0.03,
-							},
-						},
-					},
-					{
-						Name:       "package/name/nested",
-						NumTests:   2,
+						Name:       "package",
+						NumTests:   6,
 						NumFailed:  1,
 						NumSkipped: 1,
-						Duration:   0.05,
-						TestCases: []*api.TestCase{
+						Duration:   0.4,
+						Children: []*api.TestSuite{
 							{
-								Name:     "TestOne",
-								Duration: 0.02,
-								FailureOutput: &api.FailureOutput{
-									Output: "file_test.go:11: Error message\nfile_test.go:11: Longer\nerror\nmessage.\n",
+								Name:       "package/name",
+								NumTests:   4,
+								NumFailed:  1,
+								NumSkipped: 1,
+								Duration:   0.1,
+								TestCases: []*api.TestCase{
+									{
+										Name:     "TestOne",
+										Duration: 0.02,
+									},
+									{
+										Name:     "TestTwo",
+										Duration: 0.03,
+									},
+								},
+								Children: []*api.TestSuite{
+
+									{
+										Name:       "package/name/nested",
+										NumTests:   2,
+										NumFailed:  1,
+										NumSkipped: 1,
+										Duration:   0.05,
+										TestCases: []*api.TestCase{
+											{
+												Name:     "TestOne",
+												Duration: 0.02,
+												FailureOutput: &api.FailureOutput{
+													Output: `=== RUN   TestOne
+--- FAIL: TestOne (0.02 seconds)
+	file_test.go:11: Error message
+	file_test.go:11: Longer
+		error
+		message.`,
+												},
+											},
+											{
+												Name:     "TestTwo",
+												Duration: 0.03,
+												SkipMessage: &api.SkipMessage{
+													Message: `=== RUN   TestTwo
+--- SKIP: TestTwo (0.03 seconds)
+	file_test.go:11: Skip message
+PASS`, // we include this line greedily even though it does not belong to the test
+												},
+											},
+										},
+									},
 								},
 							},
 							{
-								Name:     "TestTwo",
-								Duration: 0.03,
-								SkipMessage: &api.SkipMessage{
-									Message: "file_test.go:11: Skip message\n",
+								Name:     "package/other",
+								NumTests: 2,
+								Duration: 0.3,
+								Children: []*api.TestSuite{
+
+									{
+										Name:     "package/other/nested",
+										NumTests: 2,
+										Duration: 0.3,
+										TestCases: []*api.TestCase{
+											{
+												Name:     "TestOne",
+												Duration: 0.1,
+											},
+											{
+												Name:     "TestTwo",
+												Duration: 0.2,
+											},
+										},
+									},
 								},
-							},
-						},
-					},
-					{
-						Name:     "package/other/nested",
-						NumTests: 2,
-						Duration: 0.3,
-						TestCases: []*api.TestCase{
-							{
-								Name:     "TestOne",
-								Duration: 0.1,
-							},
-							{
-								Name:     "TestTwo",
-								Duration: 0.2,
 							},
 						},
 					},
@@ -336,17 +433,24 @@ func TestNestedParse(t *testing.T) {
 			expectedSuites: &api.TestSuites{
 				Suites: []*api.TestSuite{
 					{
-						Name:     "package/name",
+						Name:     "package",
 						NumTests: 2,
 						Duration: 2.16,
-						TestCases: []*api.TestCase{
+						Children: []*api.TestSuite{
 							{
-								Name:     "TestOne",
-								Duration: 0.06,
-							},
-							{
-								Name:     "TestTwo",
-								Duration: 0.1,
+								Name:     "package/name",
+								NumTests: 2,
+								Duration: 2.16,
+								TestCases: []*api.TestCase{
+									{
+										Name:     "TestOne",
+										Duration: 0.06,
+									},
+									{
+										Name:     "TestTwo",
+										Duration: 0.1,
+									},
+								},
 							},
 						},
 					},
@@ -359,156 +463,31 @@ func TestNestedParse(t *testing.T) {
 			expectedSuites: &api.TestSuites{
 				Suites: []*api.TestSuite{
 					{
-						Name:     "package/name",
+						Name:     "package",
 						NumTests: 2,
 						Duration: 0.16,
-						Properties: []*api.TestSuiteProperty{
+						Children: []*api.TestSuite{
 							{
-								Name:  "coverage.statements.pct",
-								Value: "10.0",
-							},
-						},
-						TestCases: []*api.TestCase{
-							{
-								Name:     "TestOne",
-								Duration: 0.06,
-							},
-							{
-								Name:     "TestTwo",
-								Duration: 0.1,
-							},
-						},
-					},
-				},
-			},
-		},
-		{
-			name:     "nested tests with inline output",
-			testFile: "14.txt",
-			expectedSuites: &api.TestSuites{
-				Suites: []*api.TestSuite{
-					{
-						Name:      "parser/gotest",
-						NumTests:  4,
-						NumFailed: 2,
-						Duration:  0.019,
-						TestCases: []*api.TestCase{
-							{
-								Name: "TestSubTestWithFailures",
-								FailureOutput: &api.FailureOutput{
-									Output: "",
+								Name:     "package/name",
+								NumTests: 2,
+								Duration: 0.16,
+								Properties: []*api.TestSuiteProperty{
+									{
+										Name:  "coverage.statements.pct",
+										Value: "10.0",
+									},
+								},
+								TestCases: []*api.TestCase{
+									{
+										Name:     "TestOne",
+										Duration: 0.06,
+									},
+									{
+										Name:     "TestTwo",
+										Duration: 0.1,
+									},
 								},
 							},
-							{
-								Name: "TestSubTestWithFailures/subtest-pass-1",
-							},
-							{
-								Name: "TestSubTestWithFailures/subtest-pass-2",
-							},
-							{
-								Name:      "TestSubTestWithFailures/subtest-fail-1",
-								SystemOut: "text line\n",
-								FailureOutput: &api.FailureOutput{
-									Output: "data_parser_test.go:14: log line\ndata_parser_test.go:14: failed\n",
-								},
-							},
-						},
-					},
-				},
-			},
-		},
-		{
-			name:     "multi-suite nested output with coverage",
-			testFile: "15.txt",
-			expectedSuites: &api.TestSuites{
-				Suites: []*api.TestSuite{
-					{
-						Name:      "parser/gotest",
-						NumTests:  4,
-						NumFailed: 2,
-						Duration:  0.019,
-						TestCases: []*api.TestCase{
-							{
-								Name: "TestSubTestWithFailures",
-								FailureOutput: &api.FailureOutput{
-									Output: "",
-								},
-							},
-							{
-								Name: "TestSubTestWithFailures/subtest-pass-1",
-							},
-							{
-								Name: "TestSubTestWithFailures/subtest-pass-2",
-							},
-							{
-								Name:      "TestSubTestWithFailures/subtest-fail-1",
-								SystemOut: "text line\n",
-								FailureOutput: &api.FailureOutput{
-									Output: "data_parser_test.go:14: log line\ndata_parser_test.go:14: failed\n",
-								},
-							},
-						},
-					},
-					{
-						Name:       "github.com/openshift/origin/tools/junitreport/pkg/parser/gotest/example",
-						NumTests:   19,
-						NumFailed:  9,
-						Duration:   0.006,
-						Properties: []*api.TestSuiteProperty{{Name: "coverage.statements.pct", Value: "0.0"}},
-						TestCases: []*api.TestCase{
-							{
-								Name:          "TestSubTestWithFailures",
-								FailureOutput: &api.FailureOutput{},
-							},
-							{Name: "TestSubTestWithFailures/subtest-pass-1"},
-							{Name: "TestSubTestWithFailures/subtest-pass-2"},
-							{
-								Name:      "TestSubTestWithFailures/subtest-fail-1",
-								SystemOut: "text line\n",
-								FailureOutput: &api.FailureOutput{
-									Output: "example_test.go:11: log line\nexample_test.go:11: failed\n",
-								},
-							},
-							{
-								Name:          "TestSubTestWithFirstFailures",
-								FailureOutput: &api.FailureOutput{},
-							},
-							{
-								Name:          "TestSubTestWithFirstFailures/subtest-fail-1",
-								FailureOutput: &api.FailureOutput{Output: "example_test.go:15: log line\nexample_test.go:15: failed\n"},
-								SystemOut:     "text line\n",
-							},
-							{Name: "TestSubTestWithFirstFailures/subtest-pass-1"},
-							{Name: "TestSubTestWithFirstFailures/subtest-pass-2"},
-							{
-								Name:          "TestSubTestWithSubTestFailures",
-								FailureOutput: &api.FailureOutput{},
-							},
-							{Name: "TestSubTestWithSubTestFailures/subtest-pass-1"},
-							{Name: "TestSubTestWithSubTestFailures/subtest-pass-2"},
-							{
-								Name:          "TestSubTestWithSubTestFailures/subtest-fail-1",
-								FailureOutput: &api.FailureOutput{Output: "example_test.go:25: log line before\nexample_test.go:29: log line after\n"},
-								SystemOut:     "text line\n",
-							},
-							{Name: "TestSubTestWithSubTestFailures/subtest-fail-1/sub-subtest-pass-1"},
-							{Name: "TestSubTestWithSubTestFailures/subtest-fail-1/sub-subtest-pass-2"},
-							{
-								Name:          "TestSubTestWithSubTestFailures/subtest-fail-1/sub-subtest-fail-1",
-								FailureOutput: &api.FailureOutput{Output: "example_test.go:28: log line\nexample_test.go:28: failed\n"},
-								SystemOut:     "text line\n",
-							},
-							{
-								Name:          "TestSubTestWithMiddleFailures",
-								FailureOutput: &api.FailureOutput{},
-							},
-							{Name: "TestSubTestWithMiddleFailures/subtest-pass-1"},
-							{
-								Name:          "TestSubTestWithMiddleFailures/subtest-fail-1",
-								FailureOutput: &api.FailureOutput{Output: "example_test.go:35: log line\nexample_test.go:35: failed\n"},
-								SystemOut:     "text line\n",
-							},
-							{Name: "TestSubTestWithMiddleFailures/subtest-pass-2"},
 						},
 					},
 				},
@@ -517,23 +496,23 @@ func TestNestedParse(t *testing.T) {
 	}
 
 	for _, testCase := range testCases {
-		t.Run(testCase.name, func(t *testing.T) {
-			parser := NewParser(nested.NewTestSuitesBuilder(testCase.rootSuiteNames), false)
+		parser := NewParser(nested.NewTestSuitesBuilder(testCase.rootSuiteNames), false)
 
-			testFile := "./../../../test/gotest/testdata/" + testCase.testFile
+		testFile := "./../../../test/gotest/testdata/" + testCase.testFile
 
-			reader, err := os.Open(testFile)
-			if err != nil {
-				t.Fatalf("unexpected error opening file %q: %v", testFile, err)
-			}
-			testSuites, err := parser.Parse(bufio.NewScanner(reader))
-			if err != nil {
-				t.Fatalf("unexpected error parsing file: %v", err)
-			}
+		reader, err := os.Open(testFile)
+		if err != nil {
+			t.Errorf("%s: unexpected error opening file %q: %v", testCase.name, testFile, err)
+			continue
+		}
+		testSuites, err := parser.Parse(bufio.NewScanner(reader))
+		if err != nil {
+			t.Errorf("%s: unexpected error parsing file: %v", testCase.name, err)
+			continue
+		}
 
-			if !reflect.DeepEqual(testSuites, testCase.expectedSuites) {
-				t.Errorf("did not produce the correct test suites from file:\n %s", diff.ObjectReflectDiff(testCase.expectedSuites, testSuites))
-			}
-		})
+		if !reflect.DeepEqual(testSuites, testCase.expectedSuites) {
+			t.Errorf("%s: did not produce the correct test suites from file:\n\texpected:\n\t%v,\n\tgot\n\t%v", testCase.name, testCase.expectedSuites, testSuites)
+		}
 	}
 }

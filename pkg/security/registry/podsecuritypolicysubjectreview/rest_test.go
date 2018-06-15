@@ -4,11 +4,9 @@ import (
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apiserver/pkg/authorization/authorizer"
 	apirequest "k8s.io/apiserver/pkg/endpoints/request"
-	"k8s.io/apiserver/pkg/registry/rest"
 	"k8s.io/client-go/tools/cache"
-	kapi "k8s.io/kubernetes/pkg/apis/core"
+	kapi "k8s.io/kubernetes/pkg/api"
 	clientsetfake "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset/fake"
 
 	admissionttesting "github.com/openshift/origin/pkg/security/admission/testing"
@@ -136,9 +134,9 @@ func TestAllowed(t *testing.T) {
 		}
 
 		csf := clientsetfake.NewSimpleClientset(namespace, serviceAccount)
-		storage := REST{oscc.NewDefaultSCCMatcher(sccCache, &noopTestAuthorizer{}), csf}
+		storage := REST{oscc.NewDefaultSCCMatcher(sccCache), csf}
 		ctx := apirequest.WithNamespace(apirequest.NewContext(), metav1.NamespaceAll)
-		obj, err := storage.Create(ctx, reviewRequest, rest.ValidateAllObjectFunc, false)
+		obj, err := storage.Create(ctx, reviewRequest, false)
 		if err != nil {
 			t.Errorf("%s - Unexpected error: %v", testName, err)
 			continue
@@ -263,9 +261,9 @@ func TestRequests(t *testing.T) {
 			}
 		}
 		csf := clientsetfake.NewSimpleClientset(namespace, serviceAccount)
-		storage := REST{oscc.NewDefaultSCCMatcher(sccCache, &noopTestAuthorizer{}), csf}
+		storage := REST{oscc.NewDefaultSCCMatcher(sccCache), csf}
 		ctx := apirequest.WithNamespace(apirequest.NewContext(), metav1.NamespaceAll)
-		_, err := storage.Create(ctx, testcase.request, rest.ValidateAllObjectFunc, false)
+		_, err := storage.Create(ctx, testcase.request, false)
 		switch {
 		case err == nil && len(testcase.errorMessage) == 0:
 			continue
@@ -277,10 +275,4 @@ func TestRequests(t *testing.T) {
 		}
 	}
 
-}
-
-type noopTestAuthorizer struct{}
-
-func (s *noopTestAuthorizer) Authorize(a authorizer.Attributes) (authorizer.Decision, string, error) {
-	return authorizer.DecisionNoOpinion, "", nil
 }

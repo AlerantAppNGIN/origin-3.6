@@ -60,7 +60,7 @@ func TestUnresponsiveConnection(t *testing.T) {
 
 // TestFinishMessage tests that we do not enter deadlock when a goroutine makes
 // a request but does not handle all responses from the server.
-func TestFinishMessage(t *testing.T) {
+func TestConn(t *testing.T) {
 	ptc := newPacketTranslatorConn()
 	defer ptc.Close()
 
@@ -174,11 +174,15 @@ func testSendUnhandledResponsesAndFinish(t *testing.T, ptc *packetTranslatorConn
 }
 
 func runWithTimeout(t *testing.T, timeout time.Duration, f func()) {
+	runtime.Gosched()
+
 	done := make(chan struct{})
 	go func() {
 		f()
 		close(done)
 	}()
+
+	runtime.Gosched()
 
 	select {
 	case <-done: // Success!
@@ -188,7 +192,7 @@ func runWithTimeout(t *testing.T, timeout time.Duration, f func()) {
 	}
 }
 
-// packetTranslatorConn is a helpful type which can be used with various tests
+// packetTranslatorConn is a helful type which can be used with various tests
 // in this package. It implements the net.Conn interface to be used as an
 // underlying connection for a *ldap.Conn. Most methods are no-ops but the
 // Read() and Write() methods are able to translate ber-encoded packets for
@@ -241,7 +245,7 @@ func (c *packetTranslatorConn) Read(b []byte) (n int, err error) {
 }
 
 // SendResponse writes the given response packet to the response buffer for
-// this connection, signalling any goroutine waiting to read a response.
+// this conection, signalling any goroutine waiting to read a response.
 func (c *packetTranslatorConn) SendResponse(packet *ber.Packet) error {
 	c.lock.Lock()
 	defer c.lock.Unlock()

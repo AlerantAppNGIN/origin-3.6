@@ -6,7 +6,7 @@ import (
 	"os"
 	"testing"
 
-	kapi "k8s.io/kubernetes/pkg/apis/core"
+	kapi "k8s.io/kubernetes/pkg/api"
 )
 
 func TestValidate(t *testing.T) {

@@ -3,6 +3,8 @@
 
 **This package is a work in progress.**
 
+I'm co-learning golang with [R00x](https://github.com/lor00x). Have a look at his implementation: https://github.com/lor00x/goldap
+
 **ldapserver** is a helper library for building server software capable of speaking the LDAP protocol. This could be an alternate implementation of LDAP, a custom LDAP proxy or even a completely different backend capable of "masquerading" its API as a LDAP Server.
 
 The package supports 
@@ -13,9 +15,7 @@ The package supports
 * Graceful stopping
 * Basic request routing inspired by [net/http ServeMux](http://golang.org/pkg/net/http/#ServeMux)
 
-# Default behaviors
-If no AbandonRequest route exists, the package will handle it. (signal sent to message.Done chan)
-
+# Default behavior
 When no route matches the request, the server will first try to call a special *NotFound* route, if nothing is specified, it will return an *UnwillingToResponse* Error code (53)
 
 Feel free to contribute, comment :)

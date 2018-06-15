@@ -12,9 +12,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/openshift/origin/pkg/oc/cli/util/clientcmd"
-	userclientinternal "github.com/openshift/origin/pkg/user/generated/internalclientset"
-	usertypedclient "github.com/openshift/origin/pkg/user/generated/internalclientset/typed/user/internalversion"
+	"github.com/openshift/origin/pkg/client"
+	"github.com/openshift/origin/pkg/cmd/util/clientcmd"
 )
 
 const (
@@ -43,7 +42,7 @@ var (
 )
 
 type GroupModificationOptions struct {
-	GroupClient usertypedclient.GroupInterface
+	GroupClient client.GroupInterface
 
 	Group string
 	Users []string
@@ -59,13 +58,10 @@ func NewCmdAddUsers(name, fullName string, f *clientcmd.Factory, out io.Writer) 
 		Example: fmt.Sprintf(addExample, fullName),
 		Run: func(cmd *cobra.Command, args []string) {
 			if err := options.Complete(f, args); err != nil {
-				kcmdutil.CheckErr(kcmdutil.UsageErrorf(cmd, err.Error()))
-			}
-			if err := options.AddUsers(); err != nil {
-				kcmdutil.CheckErr(err)
+				kcmdutil.CheckErr(kcmdutil.UsageError(cmd, err.Error()))
 			}
 
-			printSuccessForCommand(options.Group, true, options.Users, out)
+			kcmdutil.CheckErr(options.AddUsers())
 		},
 	}
 
@@ -82,13 +78,10 @@ func NewCmdRemoveUsers(name, fullName string, f *clientcmd.Factory, out io.Write
 		Example: fmt.Sprintf(removeExample, fullName),
 		Run: func(cmd *cobra.Command, args []string) {
 			if err := options.Complete(f, args); err != nil {
-				kcmdutil.CheckErr(kcmdutil.UsageErrorf(cmd, err.Error()))
-			}
-			if err := options.RemoveUsers(); err != nil {
-				kcmdutil.CheckErr(err)
+				kcmdutil.CheckErr(kcmdutil.UsageError(cmd, err.Error()))
 			}
 
-			printSuccessForCommand(options.Group, false, options.Users, out)
+			kcmdutil.CheckErr(options.RemoveUsers())
 		},
 	}
 
@@ -103,16 +96,12 @@ func (o *GroupModificationOptions) Complete(f *clientcmd.Factory, args []string)
 	o.Group = args[0]
 	o.Users = append(o.Users, args[1:]...)
 
-	clientConfig, err := f.ClientConfig()
-	if err != nil {
-		return err
-	}
-	userClient, err := userclientinternal.NewForConfig(clientConfig)
+	osClient, _, err := f.Clients()
 	if err != nil {
 		return err
 	}
 
-	o.GroupClient = userClient.User().Groups()
+	o.GroupClient = osClient.Groups()
 
 	return nil
 }
@@ -155,20 +144,4 @@ func (o *GroupModificationOptions) RemoveUsers() error {
 
 	_, err = o.GroupClient.Update(group)
 	return err
-}
-
-// prints affirmative output for role modification commands
-func printSuccessForCommand(group string, didAdd bool, targets []string, out io.Writer) {
-	verb := "removed"
-	allTargets := fmt.Sprintf("%q", targets)
-
-	if len(targets) == 1 {
-		allTargets = fmt.Sprintf("%q", targets[0])
-	}
-	if didAdd {
-		verb = "added"
-	}
-
-	msg := "group %q %s: %s"
-	fmt.Fprintf(out, msg+"\n", group, verb, allTargets)
 }

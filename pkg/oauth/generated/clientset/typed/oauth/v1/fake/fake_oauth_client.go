@@ -10,20 +10,8 @@ type FakeOauthV1 struct {
 	*testing.Fake
 }
 
-func (c *FakeOauthV1) OAuthAccessTokens() v1.OAuthAccessTokenInterface {
-	return &FakeOAuthAccessTokens{c}
-}
-
-func (c *FakeOauthV1) OAuthAuthorizeTokens() v1.OAuthAuthorizeTokenInterface {
-	return &FakeOAuthAuthorizeTokens{c}
-}
-
-func (c *FakeOauthV1) OAuthClients() v1.OAuthClientInterface {
-	return &FakeOAuthClients{c}
-}
-
-func (c *FakeOauthV1) OAuthClientAuthorizations() v1.OAuthClientAuthorizationInterface {
-	return &FakeOAuthClientAuthorizations{c}
+func (c *FakeOauthV1) OAuthClients(namespace string) v1.OAuthClientInterface {
+	return &FakeOAuthClients{c, namespace}
 }
 
 // RESTClient returns a RESTClient that is used to communicate

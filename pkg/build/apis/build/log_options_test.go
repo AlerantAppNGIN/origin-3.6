@@ -4,7 +4,7 @@ import (
 	"reflect"
 	"testing"
 
-	kapi "k8s.io/kubernetes/pkg/apis/core"
+	kapi "k8s.io/kubernetes/pkg/api"
 )
 
 func TestLogOptionsDrift(t *testing.T) {

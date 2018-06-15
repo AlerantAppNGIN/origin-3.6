@@ -7,12 +7,12 @@ import (
 
 	"github.com/docker/distribution"
 	"github.com/docker/distribution/context"
+	"github.com/docker/distribution/digest"
 	"github.com/docker/distribution/reference"
 	"github.com/docker/distribution/registry/storage/driver"
 	"github.com/docker/distribution/registry/storage/driver/inmemory"
 	"github.com/docker/distribution/testutil"
 	"github.com/docker/libtrust"
-	"github.com/opencontainers/go-digest"
 )
 
 type image struct {
@@ -21,14 +21,13 @@ type image struct {
 	layers         map[digest.Digest]io.ReadSeeker
 }
 
-func createRegistry(t *testing.T, driver driver.StorageDriver, options ...RegistryOption) distribution.Namespace {
+func createRegistry(t *testing.T, driver driver.StorageDriver) distribution.Namespace {
 	ctx := context.Background()
 	k, err := libtrust.GenerateECP256PrivateKey()
 	if err != nil {
 		t.Fatal(err)
 	}
-	options = append([]RegistryOption{EnableDelete, Schema1SigningKey(k)}, options...)
-	registry, err := NewRegistry(ctx, driver, options...)
+	registry, err := NewRegistry(ctx, driver, EnableDelete, Schema1SigningKey(k))
 	if err != nil {
 		t.Fatalf("Failed to construct namespace")
 	}
@@ -39,7 +38,7 @@ func makeRepository(t *testing.T, registry distribution.Namespace, name string) 
 	ctx := context.Background()
 
 	// Initialize a dummy repository
-	named, err := reference.WithName(name)
+	named, err := reference.ParseNamed(name)
 	if err != nil {
 		t.Fatalf("Failed to parse name %s:  %v", name, err)
 	}
@@ -145,7 +144,7 @@ func TestNoDeletionNoEffect(t *testing.T) {
 	ctx := context.Background()
 	inmemoryDriver := inmemory.New()
 
-	registry := createRegistry(t, inmemoryDriver)
+	registry := createRegistry(t, inmemory.New())
 	repo := makeRepository(t, registry, "palailogos")
 	manifestService, err := repo.Manifests(ctx)
 

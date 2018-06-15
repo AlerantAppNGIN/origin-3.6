@@ -6,7 +6,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/validation/field"
-	kapi "k8s.io/kubernetes/pkg/apis/core"
+	kapi "k8s.io/kubernetes/pkg/api"
 
 	templateapi "github.com/openshift/origin/pkg/template/apis/template"
 )
@@ -221,7 +221,35 @@ func TestValidateTemplateInstance(t *testing.T) {
 					Name:      "test",
 					Namespace: "test",
 				},
+				Spec: templateapi.TemplateInstanceSpec{},
+			},
+			expectedErrorType: field.ErrorTypeRequired,
+		},
+		{
+			templateInstance: templateapi.TemplateInstance{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test",
+					Namespace: "test",
+				},
 				Spec: templateapi.TemplateInstanceSpec{
+					Template: templateapi.Template{},
+				},
+			},
+			expectedErrorType: field.ErrorTypeRequired,
+		},
+		{
+			templateInstance: templateapi.TemplateInstance{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test",
+					Namespace: "test",
+				},
+				Spec: templateapi.TemplateInstanceSpec{
+					Template: templateapi.Template{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      "test",
+							Namespace: "test",
+						},
+					},
 					Requester: &templateapi.TemplateInstanceRequester{
 						Username: "test",
 					},
@@ -236,6 +264,10 @@ func TestValidateTemplateInstance(t *testing.T) {
 				},
 				Spec: templateapi.TemplateInstanceSpec{
 					Template: templateapi.Template{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      "test",
+							Namespace: "test",
+						},
 						Parameters: []templateapi.Parameter{
 							{
 								Name: "b@d",
@@ -256,6 +288,12 @@ func TestValidateTemplateInstance(t *testing.T) {
 					Namespace: "test",
 				},
 				Spec: templateapi.TemplateInstanceSpec{
+					Template: templateapi.Template{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      "test",
+							Namespace: "test",
+						},
+					},
 					Secret: &kapi.LocalObjectReference{
 						Name: "b@d",
 					},
@@ -273,6 +311,12 @@ func TestValidateTemplateInstance(t *testing.T) {
 					Namespace: "test",
 				},
 				Spec: templateapi.TemplateInstanceSpec{
+					Template: templateapi.Template{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      "test",
+							Namespace: "test",
+						},
+					},
 					Secret: &kapi.LocalObjectReference{},
 					Requester: &templateapi.TemplateInstanceRequester{
 						Username: "test",
@@ -288,6 +332,31 @@ func TestValidateTemplateInstance(t *testing.T) {
 					Namespace: "test",
 				},
 				Spec: templateapi.TemplateInstanceSpec{
+					Template: templateapi.Template{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      "test",
+							Namespace: "test",
+						},
+					},
+					Requester: &templateapi.TemplateInstanceRequester{
+						Username: "test",
+					},
+				},
+			},
+		},
+		{
+			templateInstance: templateapi.TemplateInstance{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test",
+					Namespace: "test",
+				},
+				Spec: templateapi.TemplateInstanceSpec{
+					Template: templateapi.Template{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      "test",
+							Namespace: "test",
+						},
+					},
 					Secret: &kapi.LocalObjectReference{
 						Name: "test",
 					},
@@ -442,9 +511,12 @@ func TestValidateTemplateInstanceUpdate(t *testing.T) {
 	}
 
 	for i, test := range tests {
-		newTemplateInstance := oldTemplateInstance.DeepCopy()
-		test.modifyTemplateInstance(newTemplateInstance)
-		errs := ValidateTemplateInstanceUpdate(newTemplateInstance, oldTemplateInstance)
+		newTemplateInstance, err := kapi.Scheme.DeepCopy(oldTemplateInstance)
+		if err != nil {
+			t.Fatal(err)
+		}
+		test.modifyTemplateInstance(newTemplateInstance.(*templateapi.TemplateInstance))
+		errs := ValidateTemplateInstanceUpdate(newTemplateInstance.(*templateapi.TemplateInstance), oldTemplateInstance)
 		if test.expectedErrorType == "" {
 			if len(errs) != 0 {
 				t.Errorf("%d: Unexpected non-empty error list", i)
@@ -839,9 +911,12 @@ func TestValidateBrokerTemplateInstanceUpdate(t *testing.T) {
 	}
 
 	for i, test := range tests {
-		newBrokerTemplateInstance := oldBrokerTemplateInstance.DeepCopy()
-		test.modifyBrokerTemplateInstance(newBrokerTemplateInstance)
-		errs := ValidateBrokerTemplateInstanceUpdate(newBrokerTemplateInstance, oldBrokerTemplateInstance)
+		newBrokerTemplateInstance, err := kapi.Scheme.DeepCopy(oldBrokerTemplateInstance)
+		if err != nil {
+			t.Fatal(err)
+		}
+		test.modifyBrokerTemplateInstance(newBrokerTemplateInstance.(*templateapi.BrokerTemplateInstance))
+		errs := ValidateBrokerTemplateInstanceUpdate(newBrokerTemplateInstance.(*templateapi.BrokerTemplateInstance), oldBrokerTemplateInstance)
 		if test.expectedErrorType == "" {
 			if len(errs) != 0 {
 				t.Errorf("%d: Unexpected non-empty error list", i)

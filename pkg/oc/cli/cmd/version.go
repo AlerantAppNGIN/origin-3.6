@@ -8,21 +8,21 @@ import (
 	"time"
 
 	etcdversion "github.com/coreos/etcd/version"
-	"github.com/spf13/cobra"
 
 	kapierrors "k8s.io/apimachinery/pkg/api/errors"
-	apimachineryversion "k8s.io/apimachinery/pkg/version"
 	kubeversiontypes "k8s.io/apimachinery/pkg/version"
-	"k8s.io/client-go/rest"
 	kclientcmd "k8s.io/client-go/tools/clientcmd"
 	kclientset "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset"
 	"k8s.io/kubernetes/pkg/kubectl/cmd/templates"
 	kcmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
 	kubeversion "k8s.io/kubernetes/pkg/version"
 
-	"github.com/openshift/origin/pkg/oc/cli/util/clientcmd"
-	"github.com/openshift/origin/pkg/oc/util/tokencmd"
+	"github.com/openshift/origin/pkg/client"
+	"github.com/openshift/origin/pkg/cmd/util/clientcmd"
+	"github.com/openshift/origin/pkg/cmd/util/tokencmd"
 	"github.com/openshift/origin/pkg/version"
+
+	"github.com/spf13/cobra"
 )
 
 var (
@@ -33,8 +33,8 @@ type VersionOptions struct {
 	BaseName string
 	Out      io.Writer
 
-	ClientConfig *rest.Config
-	Clients      func() (kclientset.Interface, error)
+	ClientConfig kclientcmd.ClientConfig
+	Clients      func() (*client.Client, kclientset.Interface, error)
 
 	Timeout time.Duration
 
@@ -53,7 +53,7 @@ func NewCmdVersion(fullName string, f *clientcmd.Factory, out io.Writer, options
 			options.BaseName = fullName
 
 			if err := options.Complete(cmd, f, out); err != nil {
-				kcmdutil.CheckErr(kcmdutil.UsageErrorf(cmd, err.Error()))
+				kcmdutil.CheckErr(kcmdutil.UsageError(cmd, err.Error()))
 			}
 
 			if err := options.RunVersion(); err != nil {
@@ -72,12 +72,8 @@ func (o *VersionOptions) Complete(cmd *cobra.Command, f *clientcmd.Factory, out 
 		return nil
 	}
 
-	o.Clients = f.ClientSet
-	var err error
-	o.ClientConfig, err = f.ClientConfig()
-	if err != nil && !kclientcmd.IsEmptyConfig(err) {
-		return err
-	}
+	o.Clients = f.Clients
+	o.ClientConfig = f.OpenShiftClientConfig()
 
 	if !o.IsServer {
 		// retrieve config timeout and set cmd option
@@ -85,7 +81,7 @@ func (o *VersionOptions) Complete(cmd *cobra.Command, f *clientcmd.Factory, out 
 		// flag, as flag value would have to be parsed
 		// from a string potentially not formatted as
 		// a valid time.Duration value
-		config, err := f.ClientConfig()
+		config, err := o.ClientConfig.ClientConfig()
 		if err == nil {
 			o.Timeout = config.Timeout
 		}
@@ -134,9 +130,14 @@ func (o VersionOptions) RunVersion() error {
 
 		// confirm config exists before making request to server
 		var err error
-		versionHost = o.ClientConfig.Host
+		clientConfig, err := o.ClientConfig.ClientConfig()
+		if err != nil {
+			done <- err
+			return
+		}
+		versionHost = clientConfig.Host
 
-		kClient, err := o.Clients()
+		oClient, kClient, err := o.Clients()
 		if err != nil {
 			done <- err
 			return
@@ -159,10 +160,10 @@ func (o VersionOptions) RunVersion() error {
 			return
 		}
 
-		ocVersionBody, err := kClient.Discovery().RESTClient().Get().AbsPath("/version/openshift").Do().Raw()
+		ocVersionBody, err := oClient.Get().AbsPath("/version/openshift").Do().Raw()
 		switch {
 		case err == nil:
-			var ocServerInfo apimachineryversion.Info
+			var ocServerInfo version.Info
 			err = json.Unmarshal(ocVersionBody, &ocServerInfo)
 			if err != nil && len(ocVersionBody) > 0 {
 				done <- err
@@ -178,7 +179,7 @@ func (o VersionOptions) RunVersion() error {
 
 	select {
 	case err, closed := <-done:
-		if strings.HasSuffix(fmt.Sprintf("%v", err), "connection refused") || kclientcmd.IsEmptyConfig(err) || kclientcmd.IsConfigurationInvalid(err) {
+		if strings.HasSuffix(fmt.Sprintf("%v", err), "connection refused") || clientcmd.IsConfigurationMissing(err) || kclientcmd.IsConfigurationInvalid(err) {
 			return nil
 		}
 		if closed && err != nil {

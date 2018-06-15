@@ -11,7 +11,7 @@ import (
 	"github.com/coreos/go-semver/semver"
 	"github.com/golang/glog"
 
-	configapi "github.com/openshift/origin/pkg/cmd/server/apis/config"
+	configapi "github.com/openshift/origin/pkg/cmd/server/api"
 )
 
 const defaultName = "openshift.local"
@@ -19,7 +19,7 @@ const defaultName = "openshift.local"
 // RunEtcd starts an etcd server and runs it forever
 func RunEtcd(etcdServerConfig *configapi.EtcdConfig) {
 	cfg := embed.NewConfig()
-	cfg.Debug = bool(glog.V(4))
+	cfg.Debug = true
 	cfg.Name = defaultName
 	cfg.Dir = etcdServerConfig.StorageDir
 
@@ -93,9 +93,6 @@ func RunEtcd(etcdServerConfig *configapi.EtcdConfig) {
 func addressToURLs(addr string, isTLS bool) []string {
 	addrs := strings.Split(addr, ",")
 	for i := range addrs {
-		if strings.HasPrefix(addrs[i], "unix://") || strings.HasPrefix(addrs[i], "unixs://") {
-			continue
-		}
 		if isTLS {
 			addrs[i] = "https://" + addrs[i]
 		} else {

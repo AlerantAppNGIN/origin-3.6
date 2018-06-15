@@ -1,18 +1,16 @@
 package v1
 
-import "github.com/openshift/api/route/v1"
-
 // If adding or changing route defaults, updates may be required to
 // pkg/router/controller/controller.go to ensure the routes generated from
 // ingress resources will match routes created via the api.
 
-func SetDefaults_RouteSpec(obj *v1.RouteSpec) {
+func SetDefaults_RouteSpec(obj *RouteSpec) {
 	if len(obj.WildcardPolicy) == 0 {
-		obj.WildcardPolicy = v1.WildcardPolicyNone
+		obj.WildcardPolicy = WildcardPolicyNone
 	}
 }
 
-func SetDefaults_RouteTargetReference(obj *v1.RouteTargetReference) {
+func SetDefaults_RouteTargetReference(obj *RouteTargetReference) {
 	if len(obj.Kind) == 0 {
 		obj.Kind = "Service"
 	}
@@ -22,22 +20,22 @@ func SetDefaults_RouteTargetReference(obj *v1.RouteTargetReference) {
 	}
 }
 
-func SetDefaults_TLSConfig(obj *v1.TLSConfig) {
+func SetDefaults_TLSConfig(obj *TLSConfig) {
 	if len(obj.Termination) == 0 && len(obj.DestinationCACertificate) == 0 {
-		obj.Termination = v1.TLSTerminationEdge
+		obj.Termination = TLSTerminationEdge
 	}
 	switch obj.Termination {
-	case v1.TLSTerminationType("Reencrypt"):
-		obj.Termination = v1.TLSTerminationReencrypt
-	case v1.TLSTerminationType("Edge"):
-		obj.Termination = v1.TLSTerminationEdge
-	case v1.TLSTerminationType("Passthrough"):
-		obj.Termination = v1.TLSTerminationPassthrough
+	case TLSTerminationType("Reencrypt"):
+		obj.Termination = TLSTerminationReencrypt
+	case TLSTerminationType("Edge"):
+		obj.Termination = TLSTerminationEdge
+	case TLSTerminationType("Passthrough"):
+		obj.Termination = TLSTerminationPassthrough
 	}
 }
 
-func SetDefaults_RouteIngress(obj *v1.RouteIngress) {
+func SetDefaults_RouteIngress(obj *RouteIngress) {
 	if len(obj.WildcardPolicy) == 0 {
-		obj.WildcardPolicy = v1.WildcardPolicyNone
+		obj.WildcardPolicy = WildcardPolicyNone
 	}
 }

@@ -2,9 +2,8 @@ package cmd
 
 import (
 	"fmt"
-	"testing"
-
 	templateapi "github.com/openshift/origin/pkg/template/apis/template"
+	"testing"
 )
 
 func TestInjectUserVars(t *testing.T) {

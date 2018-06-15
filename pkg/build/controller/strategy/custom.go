@@ -5,14 +5,14 @@ import (
 	"fmt"
 
 	"github.com/golang/glog"
-	"k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/kubernetes/pkg/api/legacyscheme"
+	kapi "k8s.io/kubernetes/pkg/api"
+	"k8s.io/kubernetes/pkg/api/v1"
 
 	buildapi "github.com/openshift/origin/pkg/build/apis/build"
-	buildutil "github.com/openshift/origin/pkg/build/util"
+	"github.com/openshift/origin/pkg/build/util"
 )
 
 // CustomBuildStrategy creates a build using a custom builder image.
@@ -36,7 +36,7 @@ func (bs *CustomBuildStrategy) CreateBuildPod(build *buildapi.Build) (*v1.Pod, e
 		if err != nil {
 			return nil, &FatalError{fmt.Sprintf("failed to parse buildAPIVersion specified in custom build strategy (%q): %v", strategy.BuildAPIVersion, err)}
 		}
-		codec = legacyscheme.Codecs.LegacyCodec(gv)
+		codec = kapi.Codecs.LegacyCodec(gv)
 	}
 
 	data, err := runtime.Encode(codec, build)
@@ -49,6 +49,7 @@ func (bs *CustomBuildStrategy) CreateBuildPod(build *buildapi.Build) (*v1.Pod, e
 	if build.Spec.Source.Git != nil {
 		addSourceEnvVars(build.Spec.Source, &containerEnv)
 	}
+	addOriginVersionVar(&containerEnv)
 
 	if build.Spec.Output.To != nil {
 		addOutputEnvVars(build.Spec.Output.To, &containerEnv)
@@ -62,17 +63,12 @@ func (bs *CustomBuildStrategy) CreateBuildPod(build *buildapi.Build) (*v1.Pod, e
 	}
 
 	if len(strategy.Env) > 0 {
-		containerEnv = append(containerEnv, buildutil.CopyApiEnvVarToV1EnvVar(strategy.Env)...)
+		containerEnv = append(containerEnv, util.CopyApiEnvVarToV1EnvVar(strategy.Env)...)
 	}
 
 	if strategy.ExposeDockerSocket {
 		glog.V(2).Infof("ExposeDockerSocket is enabled for %s build", build.Name)
 		containerEnv = append(containerEnv, v1.EnvVar{Name: "DOCKER_SOCKET", Value: dockerSocketPath})
-	}
-
-	serviceAccount := build.Spec.ServiceAccount
-	if len(serviceAccount) == 0 {
-		serviceAccount = buildutil.BuilderServiceAccountName
 	}
 
 	privileged := true
@@ -83,10 +79,10 @@ func (bs *CustomBuildStrategy) CreateBuildPod(build *buildapi.Build) (*v1.Pod, e
 			Labels:    getPodLabels(build),
 		},
 		Spec: v1.PodSpec{
-			ServiceAccountName: serviceAccount,
+			ServiceAccountName: build.Spec.ServiceAccount,
 			Containers: []v1.Container{
 				{
-					Name:  CustomBuild,
+					Name:  "custom-build",
 					Image: strategy.From.Name,
 					Env:   containerEnv,
 					// TODO: run unprivileged https://github.com/openshift/origin/issues/662
@@ -110,7 +106,7 @@ func (bs *CustomBuildStrategy) CreateBuildPod(build *buildapi.Build) (*v1.Pod, e
 		glog.V(2).Infof("ForcePull is enabled for %s build", build.Name)
 		pod.Spec.Containers[0].ImagePullPolicy = v1.PullAlways
 	}
-	pod.Spec.Containers[0].Resources = buildutil.CopyApiResourcesToV1Resources(&build.Spec.Resources)
+	pod.Spec.Containers[0].Resources = util.CopyApiResourcesToV1Resources(&build.Spec.Resources)
 	if build.Spec.Source.Binary != nil {
 		pod.Spec.Containers[0].Stdin = true
 		pod.Spec.Containers[0].StdinOnce = true
@@ -122,7 +118,7 @@ func (bs *CustomBuildStrategy) CreateBuildPod(build *buildapi.Build) (*v1.Pod, e
 	}
 	setOwnerReference(pod, build)
 	setupSourceSecrets(pod, &pod.Spec.Containers[0], build.Spec.Source.SourceSecret)
-	setupInputSecrets(pod, &pod.Spec.Containers[0], build.Spec.Source.Secrets)
+	setupSecrets(pod, &pod.Spec.Containers[0], build.Spec.Source.Secrets)
 	setupAdditionalSecrets(pod, &pod.Spec.Containers[0], build.Spec.Strategy.CustomStrategy.Secrets)
 	return pod, nil
 }

@@ -5,7 +5,8 @@ set -o nounset
 set -o pipefail
 
 # Should set OPENSHIFT_NETWORK_PLUGIN
-source /data/dind-env
+source /data/network-plugin
+source /data/additional-args
 
 function ensure-master-config() {
   local config_path="/data/openshift.local.config"
@@ -17,38 +18,21 @@ function ensure-master-config() {
     return
   fi
 
+  local ip_addr
+  ip_addr="$(ip addr | grep inet | grep eth0 | awk '{print $2}' | sed -e 's+/.*++')"
   local name
   name="$(hostname)"
 
-  local ip_addr1
-  ip_addr1="$(ip addr | grep inet | grep eth0 | awk '{print $2}' | sed -e 's+/.*++')"
+  /usr/local/bin/openshift admin ca create-master-certs \
+    --overwrite=false \
+    --cert-dir="${master_path}" \
+    --master="https://${ip_addr}:8443" \
+    --hostnames="${ip_addr},${name}"
 
-  local ip_addr2
-  ip_addr2="$(ip addr | grep inet | (grep eth1 || true) | awk '{print $2}' | sed -e 's+/.*++')"
-
-  local ip_addrs
-  local serving_ip_addr
-  if [[ -n "${ip_addr2}" ]]; then
-    ip_addrs="${ip_addr1},${ip_addr2}"
-    serving_ip_addr="${ip_addr2}"
-  else
-    ip_addrs="${ip_addr1}"
-    serving_ip_addr="${ip_addr1}"
-  fi
-
-  mkdir -p "${config_path}"
-  (flock 200;
-   /usr/local/bin/oc adm ca create-master-certs \
-     --overwrite=false \
-     --cert-dir="${master_path}" \
-     --master="https://${serving_ip_addr}:8443" \
-     --hostnames="${ip_addrs},${name}"
-
-   /usr/local/bin/openshift start master --write-config="${master_path}" \
-     --master="https://${serving_ip_addr}:8443" \
-     --network-plugin="${OPENSHIFT_NETWORK_PLUGIN}" \
-     ${OPENSHIFT_ADDITIONAL_ARGS}
-  ) 200>"${config_path}"/.openshift-ca.lock
+  /usr/local/bin/openshift start master --write-config="${master_path}" \
+    --master="https://${ip_addr}:8443" \
+    --network-plugin="${OPENSHIFT_NETWORK_PLUGIN}" \
+    ${OPENSHIFT_ADDITIONAL_ARGS}
 
   # ensure the configuration can be used outside of the container
   chmod -R ga+rX "${master_path}"

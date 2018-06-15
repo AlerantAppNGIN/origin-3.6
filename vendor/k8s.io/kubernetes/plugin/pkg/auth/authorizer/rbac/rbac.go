@@ -43,7 +43,7 @@ type RequestToRuleMapper interface {
 	// VisitRulesFor invokes visitor() with each rule that applies to a given user in a given namespace,
 	// and each error encountered resolving those rules. Rule may be nil if err is non-nil.
 	// If visitor() returns false, visiting is short-circuited.
-	VisitRulesFor(user user.Info, namespace string, visitor func(source fmt.Stringer, rule *rbac.PolicyRule, err error) bool)
+	VisitRulesFor(user user.Info, namespace string, visitor func(rule *rbac.PolicyRule, err error) bool)
 }
 
 type RBACAuthorizer struct {
@@ -55,14 +55,12 @@ type authorizingVisitor struct {
 	requestAttributes authorizer.Attributes
 
 	allowed bool
-	reason  string
 	errors  []error
 }
 
-func (v *authorizingVisitor) visit(source fmt.Stringer, rule *rbac.PolicyRule, err error) bool {
+func (v *authorizingVisitor) visit(rule *rbac.PolicyRule, err error) bool {
 	if rule != nil && RuleAllows(v.requestAttributes, rule) {
 		v.allowed = true
-		v.reason = fmt.Sprintf("allowed by %s", source.String())
 		return false
 	}
 	if err != nil {
@@ -71,17 +69,17 @@ func (v *authorizingVisitor) visit(source fmt.Stringer, rule *rbac.PolicyRule, e
 	return true
 }
 
-func (r *RBACAuthorizer) Authorize(requestAttributes authorizer.Attributes) (authorizer.Decision, string, error) {
+func (r *RBACAuthorizer) Authorize(requestAttributes authorizer.Attributes) (bool, string, error) {
 	ruleCheckingVisitor := &authorizingVisitor{requestAttributes: requestAttributes}
 
 	r.authorizationRuleResolver.VisitRulesFor(requestAttributes.GetUser(), requestAttributes.GetNamespace(), ruleCheckingVisitor.visit)
 	if ruleCheckingVisitor.allowed {
-		return authorizer.DecisionAllow, ruleCheckingVisitor.reason, nil
+		return true, "", nil
 	}
 
 	// Build a detailed log of the denial.
 	// Make the whole block conditional so we don't do a lot of string-building we won't use.
-	if glog.V(5) {
+	if glog.V(2) {
 		var operation string
 		if requestAttributes.IsResourceRequest() {
 			b := &bytes.Buffer{}
@@ -122,37 +120,7 @@ func (r *RBACAuthorizer) Authorize(requestAttributes authorizer.Attributes) (aut
 	if len(ruleCheckingVisitor.errors) > 0 {
 		reason = fmt.Sprintf("%v", utilerrors.NewAggregate(ruleCheckingVisitor.errors))
 	}
-	return authorizer.DecisionNoOpinion, reason, nil
-}
-
-func (r *RBACAuthorizer) RulesFor(user user.Info, namespace string) ([]authorizer.ResourceRuleInfo, []authorizer.NonResourceRuleInfo, bool, error) {
-	var (
-		resourceRules    []authorizer.ResourceRuleInfo
-		nonResourceRules []authorizer.NonResourceRuleInfo
-	)
-
-	policyRules, err := r.authorizationRuleResolver.RulesFor(user, namespace)
-	for _, policyRule := range policyRules {
-		if len(policyRule.Resources) > 0 {
-			r := authorizer.DefaultResourceRuleInfo{
-				Verbs:         policyRule.Verbs,
-				APIGroups:     policyRule.APIGroups,
-				Resources:     policyRule.Resources,
-				ResourceNames: policyRule.ResourceNames,
-			}
-			var resourceRule authorizer.ResourceRuleInfo = &r
-			resourceRules = append(resourceRules, resourceRule)
-		}
-		if len(policyRule.NonResourceURLs) > 0 {
-			r := authorizer.DefaultNonResourceRuleInfo{
-				Verbs:           policyRule.Verbs,
-				NonResourceURLs: policyRule.NonResourceURLs,
-			}
-			var nonResourceRule authorizer.NonResourceRuleInfo = &r
-			nonResourceRules = append(nonResourceRules, nonResourceRule)
-		}
-	}
-	return resourceRules, nonResourceRules, false, err
+	return false, reason, nil
 }
 
 func New(roles rbacregistryvalidation.RoleGetter, roleBindings rbacregistryvalidation.RoleBindingLister, clusterRoles rbacregistryvalidation.ClusterRoleGetter, clusterRoleBindings rbacregistryvalidation.ClusterRoleBindingLister) *RBACAuthorizer {
@@ -176,14 +144,14 @@ func RulesAllow(requestAttributes authorizer.Attributes, rules ...rbac.PolicyRul
 
 func RuleAllows(requestAttributes authorizer.Attributes, rule *rbac.PolicyRule) bool {
 	if requestAttributes.IsResourceRequest() {
-		combinedResource := requestAttributes.GetResource()
+		resource := requestAttributes.GetResource()
 		if len(requestAttributes.GetSubresource()) > 0 {
-			combinedResource = requestAttributes.GetResource() + "/" + requestAttributes.GetSubresource()
+			resource = requestAttributes.GetResource() + "/" + requestAttributes.GetSubresource()
 		}
 
 		return rbac.VerbMatches(rule, requestAttributes.GetVerb()) &&
 			rbac.APIGroupMatches(rule, requestAttributes.GetAPIGroup()) &&
-			rbac.ResourceMatches(rule, combinedResource, requestAttributes.GetSubresource()) &&
+			rbac.ResourceMatches(rule, resource) &&
 			rbac.ResourceNameMatches(rule, requestAttributes.GetName())
 	}
 

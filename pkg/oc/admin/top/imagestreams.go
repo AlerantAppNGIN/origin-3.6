@@ -3,9 +3,7 @@ package top
 import (
 	"fmt"
 	"io"
-	"sort"
 
-	units "github.com/docker/go-units"
 	gonum "github.com/gonum/graph"
 	"github.com/spf13/cobra"
 
@@ -14,12 +12,12 @@ import (
 	"k8s.io/kubernetes/pkg/kubectl/cmd/templates"
 	kcmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
 
-	"github.com/openshift/origin/pkg/oc/graph/genericgraph"
+	"github.com/openshift/origin/pkg/api/graph"
 
+	"github.com/openshift/origin/pkg/client"
+	"github.com/openshift/origin/pkg/cmd/util/clientcmd"
 	imageapi "github.com/openshift/origin/pkg/image/apis/image"
-	imageclientinternal "github.com/openshift/origin/pkg/image/generated/internalclientset"
-	"github.com/openshift/origin/pkg/oc/cli/util/clientcmd"
-	imagegraph "github.com/openshift/origin/pkg/oc/graph/imagegraph/nodes"
+	imagegraph "github.com/openshift/origin/pkg/image/graph/nodes"
 )
 
 const TopImageStreamsRecommendedName = "imagestreams"
@@ -60,33 +58,30 @@ type TopImageStreamsOptions struct {
 	Streams *imageapi.ImageStreamList
 
 	// helpers
-	out io.Writer
+	out      io.Writer
+	osClient client.Interface
 }
 
 // Complete turns a partially defined TopImageStreamsOptions into a solvent structure
 // which can be validated and used for showing limits usage.
 func (o *TopImageStreamsOptions) Complete(f *clientcmd.Factory, cmd *cobra.Command, args []string, out io.Writer) error {
+	osClient, _, err := f.Clients()
+	if err != nil {
+		return err
+	}
 	namespace := cmd.Flag("namespace").Value.String()
 	if len(namespace) == 0 {
 		namespace = metav1.NamespaceAll
 	}
 	o.out = out
-	clientConfig, err := f.ClientConfig()
-	if err != nil {
-		return err
-	}
-	imageClient, err := imageclientinternal.NewForConfig(clientConfig)
-	if err != nil {
-		return err
-	}
 
-	allImages, err := imageClient.Image().Images().List(metav1.ListOptions{})
+	allImages, err := osClient.Images().List(metav1.ListOptions{})
 	if err != nil {
 		return err
 	}
 	o.Images = allImages
 
-	allStreams, err := imageClient.Image().ImageStreams(namespace).List(metav1.ListOptions{})
+	allStreams, err := osClient.ImageStreams(namespace).List(metav1.ListOptions{})
 	if err != nil {
 		return err
 	}
@@ -121,7 +116,7 @@ var _ Info = &imageStreamInfo{}
 
 func (i imageStreamInfo) PrintLine(out io.Writer) {
 	printValue(out, i.ImageStream)
-	printValue(out, units.BytesSize(float64(i.Storage)))
+	printSize(out, i.Storage)
 	printValue(out, i.Images)
 	printValue(out, i.Layers)
 }
@@ -129,7 +124,7 @@ func (i imageStreamInfo) PrintLine(out io.Writer) {
 // imageStreamsTop generates ImageStream information from a graph and
 // returns this as a list of imageStreamInfo array.
 func (o TopImageStreamsOptions) imageStreamsTop() []Info {
-	g := genericgraph.New()
+	g := graph.New()
 	addImagesToGraph(g, o.Images)
 	addImageStreamsToGraph(g, o.Streams)
 
@@ -144,21 +139,11 @@ func (o TopImageStreamsOptions) imageStreamsTop() []Info {
 			Layers:      layers,
 		})
 	}
-	sort.Slice(infos, func(i, j int) bool {
-		a, b := infos[i].(imageStreamInfo), infos[j].(imageStreamInfo)
-		if a.Storage < b.Storage {
-			return false
-		}
-		if a.Storage > b.Storage {
-			return true
-		}
-		return a.Images > b.Images
-	})
 
 	return infos
 }
 
-func getImageStreamSize(g genericgraph.Graph, node *imagegraph.ImageStreamNode) (int64, int, int) {
+func getImageStreamSize(g graph.Graph, node *imagegraph.ImageStreamNode) (int64, int, int) {
 	imageEdges := g.OutboundEdges(node, ImageStreamImageEdgeKind)
 	storage := int64(0)
 	images := len(imageEdges)

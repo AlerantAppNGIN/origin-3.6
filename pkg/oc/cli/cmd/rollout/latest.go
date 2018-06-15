@@ -15,10 +15,10 @@ import (
 	kcmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
 	"k8s.io/kubernetes/pkg/kubectl/resource"
 
-	appsapi "github.com/openshift/origin/pkg/apps/apis/apps"
-	appsclientinternal "github.com/openshift/origin/pkg/apps/generated/internalclientset/typed/apps/internalversion"
-	appsutil "github.com/openshift/origin/pkg/apps/util"
-	"github.com/openshift/origin/pkg/oc/cli/util/clientcmd"
+	"github.com/openshift/origin/pkg/client"
+	"github.com/openshift/origin/pkg/cmd/util/clientcmd"
+	deployapi "github.com/openshift/origin/pkg/deploy/apis/apps"
+	deployutil "github.com/openshift/origin/pkg/deploy/util"
 )
 
 var (
@@ -32,11 +32,8 @@ var (
 		your image change triggers.`)
 
 	rolloutLatestExample = templates.Examples(`
-	# Start a new rollout based on the latest images defined in the image change triggers.
-	%[1]s rollout latest dc/nginx
-
-	# Print the rolled out deployment config
-	%[1]s rollout latest dc/nginx -o json`)
+		# Start a new rollout based on the latest images defined in the image change triggers.
+  	%[1]s rollout latest dc/nginx`)
 )
 
 // RolloutLatestOptions holds all the options for the `rollout latest` command.
@@ -50,12 +47,9 @@ type RolloutLatestOptions struct {
 	output string
 	again  bool
 
-	appsClient      appsclientinternal.DeploymentConfigsGetter
+	oc              client.Interface
 	kc              kclientset.Interface
 	baseCommandName string
-
-	// print an object using a printer for a given mapping
-	printObj func(runtime.Object, *meta.RESTMapping, io.Writer) error
 }
 
 // NewCmdRolloutLatest implements the oc rollout latest subcommand.
@@ -74,12 +68,13 @@ func NewCmdRolloutLatest(fullName string, f *clientcmd.Factory, out io.Writer) *
 			kcmdutil.CheckErr(err)
 
 			if err := opts.Validate(); err != nil {
-				kcmdutil.CheckErr(kcmdutil.UsageErrorf(cmd, err.Error()))
+				kcmdutil.CheckErr(kcmdutil.UsageError(cmd, err.Error()))
 			}
 
 			err = opts.RunRolloutLatest()
 			kcmdutil.CheckErr(err)
 		},
+		ValidArgs: []string{"deploymentconfig"},
 	}
 
 	kcmdutil.AddPrinterFlags(cmd)
@@ -101,23 +96,13 @@ func (o *RolloutLatestOptions) Complete(f *clientcmd.Factory, cmd *cobra.Command
 
 	o.DryRun = kcmdutil.GetFlagBool(cmd, "dry-run")
 
-	o.kc, err = f.ClientSet()
+	o.oc, o.kc, err = f.Clients()
 	if err != nil {
 		return err
 	}
-	clientConfig, err := f.ClientConfig()
-	if err != nil {
-		return err
-	}
-	appsClient, err := appsclientinternal.NewForConfig(clientConfig)
-	if err != nil {
-		return err
-	}
-	o.appsClient = appsClient
 
 	o.mapper, o.typer = f.Object()
-	o.infos, err = f.NewBuilder().
-		Internal().
+	o.infos, err = f.NewBuilder(true).
 		ContinueOnError().
 		NamespaceParam(namespace).
 		ResourceNames("deploymentconfigs", args[0]).
@@ -131,17 +116,6 @@ func (o *RolloutLatestOptions) Complete(f *clientcmd.Factory, cmd *cobra.Command
 	o.output = kcmdutil.GetFlagString(cmd, "output")
 	o.again = kcmdutil.GetFlagBool(cmd, "again")
 
-	if o.output != "revision" {
-		o.printObj = func(obj runtime.Object, mapping *meta.RESTMapping, out io.Writer) error {
-			printer, err := kcmdutil.PrinterForOptions(kcmdutil.ExtractCmdPrintOptions(cmd, false))
-			if err != nil {
-				return err
-			}
-
-			return printer.PrintObj(obj, out)
-		}
-	}
-
 	return nil
 }
 
@@ -154,7 +128,7 @@ func (o RolloutLatestOptions) Validate() error {
 
 func (o RolloutLatestOptions) RunRolloutLatest() error {
 	info := o.infos[0]
-	config, ok := info.Object.(*appsapi.DeploymentConfig)
+	config, ok := info.Object.(*deployapi.DeploymentConfig)
 	if !ok {
 		return fmt.Errorf("%s is not a deployment config", info.Name)
 	}
@@ -165,13 +139,13 @@ func (o RolloutLatestOptions) RunRolloutLatest() error {
 		return fmt.Errorf("cannot deploy a paused deployment config")
 	}
 
-	deploymentName := appsutil.LatestDeploymentNameForConfig(config)
+	deploymentName := deployutil.LatestDeploymentNameForConfig(config)
 	deployment, err := o.kc.Core().ReplicationControllers(config.Namespace).Get(deploymentName, metav1.GetOptions{})
 	switch {
 	case err == nil:
 		// Reject attempts to start a concurrent deployment.
-		if !appsutil.IsTerminatedDeployment(deployment) {
-			status := appsutil.DeploymentStatusFor(deployment)
+		if !deployutil.IsTerminatedDeployment(deployment) {
+			status := deployutil.DeploymentStatusFor(deployment)
 			return fmt.Errorf("#%d is already in progress (%s).", config.Status.LatestVersion, status)
 		}
 	case !kerrors.IsNotFound(err):
@@ -180,19 +154,19 @@ func (o RolloutLatestOptions) RunRolloutLatest() error {
 
 	dc := config
 	if !o.DryRun {
-		request := &appsapi.DeploymentRequest{
+		request := &deployapi.DeploymentRequest{
 			Name:   config.Name,
 			Latest: !o.again,
 			Force:  true,
 		}
 
-		dc, err = o.appsClient.DeploymentConfigs(config.Namespace).Instantiate(config.Name, request)
+		dc, err = o.oc.DeploymentConfigs(config.Namespace).Instantiate(request)
 
 		// Pre 1.4 servers don't support the instantiate endpoint. Fallback to incrementing
 		// latestVersion on them.
 		if kerrors.IsNotFound(err) || kerrors.IsForbidden(err) {
 			config.Status.LatestVersion++
-			dc, err = o.appsClient.DeploymentConfigs(config.Namespace).Update(config)
+			dc, err = o.oc.DeploymentConfigs(config.Namespace).Update(config)
 		}
 
 		if err != nil {
@@ -205,10 +179,8 @@ func (o RolloutLatestOptions) RunRolloutLatest() error {
 	if o.output == "revision" {
 		fmt.Fprintf(o.out, fmt.Sprintf("%d", dc.Status.LatestVersion))
 		return nil
-	} else if len(o.output) > 0 {
-		return o.printObj(dc, info.Mapping, o.out)
 	}
 
-	kcmdutil.PrintSuccess(o.output == "name", o.out, info.Object, o.DryRun, "rolled out")
+	kcmdutil.PrintSuccess(o.mapper, o.output == "name", o.out, info.Mapping.Resource, info.Name, o.DryRun, "rolled out")
 	return nil
 }

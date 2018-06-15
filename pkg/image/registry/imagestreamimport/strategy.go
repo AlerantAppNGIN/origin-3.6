@@ -4,23 +4,26 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	apirequest "k8s.io/apiserver/pkg/endpoints/request"
-	"k8s.io/kubernetes/pkg/api/legacyscheme"
+	kapi "k8s.io/kubernetes/pkg/api"
 
+	configapi "github.com/openshift/origin/pkg/cmd/server/api"
+	serverapi "github.com/openshift/origin/pkg/cmd/server/api"
 	imageapi "github.com/openshift/origin/pkg/image/apis/image"
 	"github.com/openshift/origin/pkg/image/apis/image/validation"
-	"github.com/openshift/origin/pkg/image/apis/image/validation/whitelist"
 )
 
 // strategy implements behavior for ImageStreamImports.
 type strategy struct {
 	runtime.ObjectTyper
-	registryWhitelister whitelist.RegistryWhitelister
+	allowedRegistries *serverapi.AllowedRegistries
+	registryFn        imageapi.DefaultRegistryFunc
 }
 
-func NewStrategy(rw whitelist.RegistryWhitelister) *strategy {
+func NewStrategy(registries *serverapi.AllowedRegistries, registryFn imageapi.DefaultRegistryFunc) *strategy {
 	return &strategy{
-		ObjectTyper:         legacyscheme.Scheme,
-		registryWhitelister: rw,
+		ObjectTyper:       kapi.Scheme,
+		allowedRegistries: registries,
+		registryFn:        registryFn,
 	}
 }
 
@@ -37,10 +40,19 @@ func (s *strategy) Canonicalize(runtime.Object) {
 
 func (s *strategy) ValidateAllowedRegistries(isi *imageapi.ImageStreamImport) field.ErrorList {
 	errs := field.ErrorList{}
+	if s.allowedRegistries == nil {
+		return errs
+	}
+	allowedRegistries := *s.allowedRegistries
+	// FIXME: The registryFn won't return the registry location until the registry service
+	// is created. This should be switched to use registry DNS instead of lazy-loading.
+	if localRegistry, ok := s.registryFn(); ok {
+		allowedRegistries = append([]configapi.RegistryLocation{{DomainName: localRegistry}}, allowedRegistries...)
+	}
 	validate := func(path *field.Path, name string, insecure bool) field.ErrorList {
 		ref, _ := imageapi.ParseDockerImageReference(name)
 		registryHost, registryPort := ref.RegistryHostPort(insecure)
-		return validation.ValidateRegistryAllowedForImport(s.registryWhitelister, path.Child("from", "name"), ref.Name, registryHost, registryPort)
+		return validation.ValidateRegistryAllowedForImport(path.Child("from", "name"), ref.Name, registryHost, registryPort, &allowedRegistries)
 	}
 	if spec := isi.Spec.Repository; spec != nil && spec.From.Kind == "DockerImage" {
 		errs = append(errs, validate(field.NewPath("spec").Child("repository"), spec.From.Name, spec.ImportPolicy.Insecure)...)

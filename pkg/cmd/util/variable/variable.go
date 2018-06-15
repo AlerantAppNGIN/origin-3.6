@@ -58,13 +58,13 @@ func Identity(key string) (string, bool) {
 func Versions(key string) (string, bool) {
 	switch key {
 	case "shortcommit":
-		s := overrideVersion.GitCommit
+		s := OverrideVersion.GitCommit
 		if len(s) > 7 {
 			s = s[:7]
 		}
 		return s, true
 	case "version":
-		s := lastSemanticVersion(overrideVersion.GitVersion)
+		s := OverrideVersion.LastSemanticVersion()
 		return s, true
 	default:
 		return "", false
@@ -76,12 +76,14 @@ func Env(key string) (string, bool) {
 	return os.Getenv(key), true
 }
 
-// overrideVersion is the latest version, exposed for testing.
-var overrideVersion = version.Get()
-
-// lastSemanticVersion attempts to return a semantic version from the GitVersion - which
-// is either <semver>+<commit> or <semver> on release boundaries.
-func lastSemanticVersion(version string) string {
-	parts := strings.Split(version, "+")
-	return parts[0]
+// EnvPresent is a KeyFunc which returns an environment variable if it is present.
+func EnvPresent(key string) (string, bool) {
+	s := os.Getenv(key)
+	if len(s) == 0 {
+		return "", false
+	}
+	return s, true
 }
+
+// OverrideVersion is the latest version, exposed for testing.
+var OverrideVersion = version.Get()

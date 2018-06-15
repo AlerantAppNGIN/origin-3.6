@@ -10,8 +10,7 @@ import (
 	"k8s.io/apiserver/pkg/authentication/user"
 	kauthorizer "k8s.io/apiserver/pkg/authorization/authorizer"
 	apirequest "k8s.io/apiserver/pkg/endpoints/request"
-	apiserverrest "k8s.io/apiserver/pkg/registry/rest"
-	kapi "k8s.io/kubernetes/pkg/apis/core"
+	kapi "k8s.io/kubernetes/pkg/api"
 
 	authorizationapi "github.com/openshift/origin/pkg/authorization/apis/authorization"
 	"github.com/openshift/origin/pkg/authorization/registry/util"
@@ -27,7 +26,7 @@ type subjectAccessTest struct {
 }
 
 type testAuthorizer struct {
-	allowed          kauthorizer.Decision
+	allowed          bool
 	reason           string
 	err              string
 	deniedNamespaces sets.String
@@ -35,14 +34,14 @@ type testAuthorizer struct {
 	actualAttributes kauthorizer.Attributes
 }
 
-func (a *testAuthorizer) Authorize(passedAttributes kauthorizer.Attributes) (allowed kauthorizer.Decision, reason string, err error) {
+func (a *testAuthorizer) Authorize(passedAttributes kauthorizer.Attributes) (allowed bool, reason string, err error) {
 	// allow the initial check for "can I run this SAR at all"
 	if passedAttributes.GetResource() == "localsubjectaccessreviews" {
 		if len(a.deniedNamespaces) != 0 && a.deniedNamespaces.Has(passedAttributes.GetNamespace()) {
-			return kauthorizer.DecisionNoOpinion, "no decision on initial check", nil
+			return false, "denied initial check", nil
 		}
 
-		return kauthorizer.DecisionAllow, "", nil
+		return true, "", nil
 	}
 
 	a.actualAttributes = passedAttributes
@@ -59,7 +58,7 @@ func (a *testAuthorizer) GetAllowedSubjects(passedAttributes kauthorizer.Attribu
 func TestDeniedNamespace(t *testing.T) {
 	test := &subjectAccessTest{
 		authorizer: &testAuthorizer{
-			allowed:          kauthorizer.DecisionNoOpinion,
+			allowed:          false,
 			err:              "denied initial check",
 			deniedNamespaces: sets.NewString("foo"),
 		},
@@ -81,7 +80,7 @@ func TestDeniedNamespace(t *testing.T) {
 func TestEmptyReturn(t *testing.T) {
 	test := &subjectAccessTest{
 		authorizer: &testAuthorizer{
-			allowed: kauthorizer.DecisionNoOpinion,
+			allowed: false,
 			reason:  "because reasons",
 		},
 		reviewRequest: &authorizationapi.SubjectAccessReview{
@@ -105,7 +104,7 @@ func TestEmptyReturn(t *testing.T) {
 func TestNoErrors(t *testing.T) {
 	test := &subjectAccessTest{
 		authorizer: &testAuthorizer{
-			allowed: kauthorizer.DecisionAllow,
+			allowed: true,
 			reason:  "because good things",
 		},
 		reviewRequest: &authorizationapi.SubjectAccessReview{
@@ -151,7 +150,7 @@ func TestErrors(t *testing.T) {
 func TestRegularWithScopes(t *testing.T) {
 	test := &subjectAccessTest{
 		authorizer: &testAuthorizer{
-			allowed: kauthorizer.DecisionAllow,
+			allowed: true,
 			reason:  "because good things",
 		},
 		reviewRequest: &authorizationapi.SubjectAccessReview{
@@ -179,7 +178,7 @@ func TestRegularWithScopes(t *testing.T) {
 func TestSelfWithDefaultScopes(t *testing.T) {
 	test := &subjectAccessTest{
 		authorizer: &testAuthorizer{
-			allowed: kauthorizer.DecisionAllow,
+			allowed: true,
 			reason:  "because good things",
 		},
 		reviewRequest: &authorizationapi.SubjectAccessReview{
@@ -206,7 +205,7 @@ func TestSelfWithDefaultScopes(t *testing.T) {
 func TestSelfWithClearedScopes(t *testing.T) {
 	test := &subjectAccessTest{
 		authorizer: &testAuthorizer{
-			allowed: kauthorizer.DecisionAllow,
+			allowed: true,
 			reason:  "because good things",
 		},
 		reviewRequest: &authorizationapi.SubjectAccessReview{
@@ -236,7 +235,7 @@ func (r *subjectAccessTest) runTest(t *testing.T) {
 
 	expectedResponse := &authorizationapi.SubjectAccessReviewResponse{
 		Namespace:       r.reviewRequest.Action.Namespace,
-		Allowed:         r.authorizer.allowed == kauthorizer.DecisionAllow,
+		Allowed:         r.authorizer.allowed,
 		Reason:          r.authorizer.reason,
 		EvaluationError: r.authorizer.err,
 	}
@@ -248,7 +247,7 @@ func (r *subjectAccessTest) runTest(t *testing.T) {
 		ctx = apirequest.WithUser(ctx, &user.DefaultInfo{Name: "dummy"})
 	}
 
-	obj, err := storage.Create(ctx, r.reviewRequest, apiserverrest.ValidateAllObjectFunc, false)
+	obj, err := storage.Create(ctx, r.reviewRequest, false)
 	switch {
 	case err == nil && len(r.expectedError) == 0:
 	case err == nil && len(r.expectedError) != 0:

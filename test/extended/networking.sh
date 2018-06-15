@@ -16,13 +16,43 @@ export SHELLOPTS
 #
 # The EmptyDir test is a canary; it will fail if mount propagation is
 # not properly configured on the host.
-NETWORKING_E2E_FOCUS="${NETWORKING_E2E_FOCUS:-Networking|Services|Feature:OSNetworkPolicy|EmptyDir volumes should support \(root,0644,tmpfs\)}"
+NETWORKING_E2E_FOCUS="${NETWORKING_E2E_FOCUS:-etworking|Feature:OSNetworkPolicy|EmptyDir volumes should support \(root,0644,tmpfs\)}"
+NETWORKING_E2E_SKIP="${NETWORKING_E2E_SKIP:-}"
+
+DEFAULT_SKIP_LIST=(
+  # Requires lots of setup that this script doesn't so
+  "\[Feature:Federation\]"
+
+  # Skipped until https://github.com/openshift/origin/issues/11042 is resolved
+  "should preserve source pod IP for traffic thru service cluster IP"
+
+  # Panicing, needs investigation
+  "Networking IPerf"
+
+  # Skipped due to origin returning 403 for some of the urls
+  "should provide unchanging, static URL paths for kubernetes api services"
+
+  # DNS inside container fails in CI but works locally
+  "should provide Internet connection for containers"
+
+  # Skip tests that require GCE or AWS. (They'll skip themselves if we run them, but
+  # only after several seconds of setup.)
+  "should be able to up and down services"
+  "should work after restarting kube-proxy"
+  "should work after restarting apiserver"
+  "should be able to change the type and ports of a service"
+
+  # Assumes kube-proxy (aka OpenShift node) is serving /healthz at port 10249, which we currently
+  # have disabled
+  "Networking.*should check kube-proxy urls"
+)
 
 NETWORKING_E2E_MINIMAL="${NETWORKING_E2E_MINIMAL:-}"
 
 # Tests that are skipped when running networking-minimal.sh because they're slow
 # and unlikely to be broken by changes outside of the SDN code.
 MINIMAL_SKIP_LIST=(
+  "OVS"
   "multicast"
 )
 
@@ -30,6 +60,10 @@ NETWORKING_E2E_EXTERNAL="${NETWORKING_E2E_EXTERNAL:-}"
 
 # Tests that are are openshift-sdn-specific, so shouldn't be run against external plugins
 EXTERNAL_PLUGIN_SKIP_LIST=(
+  # Tests OpenShift-SDN-specific behavior. Would not necessarily apply even to other
+  # OVS-based plugins
+  "OVS"
+
   # Relies on an OpenShift-specific annotation, and is not a "required" feature for
   # network plugins
   "multicast"
@@ -55,26 +89,27 @@ function copy-container-files() {
 
 function save-container-logs() {
   local base_dest_dir=$1
-  local deployment_failed=${2:-}
+  local output_to_stdout=${2:-}
 
   os::log::info "Saving container logs"
 
-  local container_log_file="/tmp/systemd.log"
+  local container_log_file="/tmp/systemd.log.gz"
 
   for container_name in "${CONTAINER_NAMES[@]}"; do
     local dest_dir="${base_dest_dir}/${container_name}"
     if [[ ! -d "${dest_dir}" ]]; then
       mkdir -p "${dest_dir}"
     fi
-    sudo docker exec -t "${container_name}" bash -c "journalctl > ${container_log_file}"
+    sudo docker exec -t "${container_name}" bash -c "journalctl | \
+gzip > ${container_log_file}"
     sudo docker cp "${container_name}:${container_log_file}" "${dest_dir}"
-    if [[ -n "${deployment_failed}" ]]; then
-      # Output container logs to stdout to ensure that jenkins has
-      # detail to classify the failure cause.
+    # Output container logs to stdout to ensure that jenkins has
+    # detail to classify the failure cause.
+    if [[ -n "${output_to_stdout}" ]]; then
       local msg="System logs for container ${container_name}"
       os::log::info "< ${msg} >"
       os::log::info "***************************************************"
-      cat "${dest_dir}/$(basename "${container_log_file}")"
+      gunzip --stdout "${dest_dir}/$(basename "${container_log_file}")"
       os::log::info "***************************************************"
       os::log::info "</ ${msg} >"
     fi
@@ -129,6 +164,8 @@ TEST_FAILURES=0
 function test-osdn-plugin() {
   local name=$1
   local plugin=$2
+  local isolation=$3
+  local networkpolicy=$4
 
   os::log::info "Targeting ${name} plugin: ${plugin}"
 
@@ -143,7 +180,9 @@ function test-osdn-plugin() {
     export TEST_REPORT_FILE_NAME="${name}-junit"
 
     local kubeconfig="$(get-kubeconfig-from-root "${OPENSHIFT_CONFIG_ROOT}")"
-    if ! TEST_REPORT_FILE_NAME=networking_${name} \
+    if ! TEST_REPORT_FILE_NAME=networking_${name}_${isolation} \
+         NETWORKING_E2E_ISOLATION="${isolation}" \
+         NETWORKING_E2E_NETWORKPOLICY="${networkpolicy}" \
          run-extended-tests "${kubeconfig}" "${log_dir}/test.log"; then
       tests_failed=1
       os::log::error "e2e tests failed for plugin: ${plugin}"
@@ -176,12 +215,16 @@ function run-extended-tests() {
   local dlv_debug="${DLV_DEBUG:-}"
 
   local focus_regex="${NETWORKING_E2E_FOCUS}"
-  local skip_regex=""
+  local skip_regex="${NETWORKING_E2E_SKIP}"
 
-  if [[ -n "${NETWORKING_E2E_MINIMAL}" ]]; then
-    skip_regex="$(join '|' "${MINIMAL_SKIP_LIST[@]}")"
-  elif [[ -n "${NETWORKING_E2E_EXTERNAL}" ]]; then
-    skip_regex="$(join '|' "${EXTERNAL_PLUGIN_SKIP_LIST[@]}")"
+  if [[ -z "${skip_regex}" ]]; then
+    skip_regex="$(join '|' "${DEFAULT_SKIP_LIST[@]}")"
+    if [[ -n "${NETWORKING_E2E_MINIMAL}" ]]; then
+      skip_regex="${skip_regex}|$(join '|' "${MINIMAL_SKIP_LIST[@]}")"
+    fi
+    if [[ -n "${NETWORKING_E2E_EXTERNAL}" ]]; then
+      skip_regex="${skip_regex}|$(join '|' "${EXTERNAL_PLUGIN_SKIP_LIST[@]}")"
+    fi
   fi
 
   export KUBECONFIG="${kubeconfig}"
@@ -325,9 +368,9 @@ else
 
   # Allow setting $JUNIT_REPORT to toggle output behavior
   if [[ -n "${JUNIT_REPORT:-}" ]]; then
+    export JUNIT_REPORT_OUTPUT="${LOG_DIR}/raw_test_output.log"
     # the Ginkgo tests also generate jUnit but expect different envars
-    export TEST_REPORT_DIR="${ARTIFACT_DIR}/junit"
-    mkdir -p $TEST_REPORT_DIR
+    export TEST_REPORT_DIR="${ARTIFACT_DIR}"
   fi
 
   os::log::system::start
@@ -367,13 +410,13 @@ else
   if [[ -z "${NETWORKING_E2E_MINIMAL}" ]]; then
     # Ignore deployment errors for a given plugin to allow other plugins
     # to be tested.
-    test-osdn-plugin "subnet" "redhat/openshift-ovs-subnet" || true
+    test-osdn-plugin "subnet" "redhat/openshift-ovs-subnet" "false" "false" || true
     if kernel-supports-networkpolicy; then
-      test-osdn-plugin "networkpolicy" "redhat/openshift-ovs-networkpolicy" || true
+      test-osdn-plugin "networkpolicy" "redhat/openshift-ovs-networkpolicy" "false" "true" || true
     else
       os::log::warning "Skipping networkpolicy tests due to kernel version"
     fi
   fi
 
-  test-osdn-plugin "multitenant" "redhat/openshift-ovs-multitenant" || true
+  test-osdn-plugin "multitenant" "redhat/openshift-ovs-multitenant" "true" "false" || true
 fi

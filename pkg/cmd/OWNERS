@@ -2,21 +2,16 @@ reviewers:
   - smarterclayton
   - liggitt
   - mfojtik
+  - kargakis
   - soltysh
   - juanvallejo
   - csrwng
+  - fabianofranz
   - enj
-  - ericavonb
-  - mrogers950
-  - simo5
-  - knobunc
-  - squeed
-  - dcbw
 approvers:
   - smarterclayton
   - liggitt
   - mfojtik
+  - kargakis
+  - fabianofranz
   - enj
-  - knobunc
-  - squeed
-  - dcbw

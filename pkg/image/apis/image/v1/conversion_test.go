@@ -1,4 +1,4 @@
-package v1
+package v1_test
 
 import (
 	"reflect"
@@ -6,28 +6,17 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/serializer"
 	"k8s.io/apimachinery/pkg/util/diff"
-	kapi "k8s.io/kubernetes/pkg/apis/core"
+	kapi "k8s.io/kubernetes/pkg/api"
 
-	"github.com/openshift/api/image/docker10"
-	"github.com/openshift/api/image/dockerpre012"
-	"github.com/openshift/origin/pkg/api/apihelpers/apitesting"
 	newer "github.com/openshift/origin/pkg/image/apis/image"
+	imageapiv1 "github.com/openshift/origin/pkg/image/apis/image/v1"
+	testutil "github.com/openshift/origin/test/util/api"
+
+	_ "github.com/openshift/origin/pkg/api/install"
 )
 
 func TestRoundTripVersionedObject(t *testing.T) {
-	scheme := runtime.NewScheme()
-	docker10.AddToSchemeInCoreGroup(scheme)
-	dockerpre012.AddToSchemeInCoreGroup(scheme)
-	newer.AddToSchemeInCoreGroup(scheme)
-	docker10.AddToScheme(scheme)
-	dockerpre012.AddToScheme(scheme)
-	AddToSchemeInCoreGroup(scheme)
-	newer.AddToScheme(scheme)
-	AddToScheme(scheme)
-	codecs := serializer.NewCodecFactory(scheme)
-
 	d := &newer.DockerImage{
 		Config: &newer.DockerConfig{
 			Env: []string{"A=1", "B=2"},
@@ -41,12 +30,12 @@ func TestRoundTripVersionedObject(t *testing.T) {
 		DockerImageReference: "foo/bar/baz",
 	}
 
-	data, err := runtime.Encode(codecs.LegacyCodec(SchemeGroupVersion), i)
+	data, err := runtime.Encode(kapi.Codecs.LegacyCodec(imageapiv1.SchemeGroupVersion), i)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	obj, err := runtime.Decode(codecs.UniversalDecoder(), data)
+	obj, err := runtime.Decode(kapi.Codecs.UniversalDecoder(), data)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -61,31 +50,19 @@ func TestRoundTripVersionedObject(t *testing.T) {
 }
 
 func TestFieldSelectors(t *testing.T) {
-	apitesting.FieldKeyCheck{
-		SchemeBuilder: []func(*runtime.Scheme) error{LegacySchemeBuilder.AddToScheme, newer.LegacySchemeBuilder.AddToScheme},
-		Kind:          LegacySchemeGroupVersion.WithKind("ImageStream"),
+	testutil.CheckFieldLabelConversions(t, "v1", "Image",
+		// Ensure all currently returned labels are supported
+		newer.ImageToSelectableFields(&newer.Image{}),
+	)
+	testutil.CheckFieldLabelConversions(t, "v1", "ImageStream",
+		// Ensure all currently returned labels are supported
+		newer.ImageStreamToSelectableFields(&newer.ImageStream{}),
 		// Ensure previously supported labels have conversions. DO NOT REMOVE THINGS FROM THIS LIST
-		AllowedExternalFieldKeys: []string{"name", "spec.dockerImageRepository", "status.dockerImageRepository"},
-		FieldKeyEvaluatorFn:      newer.ImageStreamSelector,
-	}.Check(t)
-
-	apitesting.FieldKeyCheck{
-		SchemeBuilder: []func(*runtime.Scheme) error{SchemeBuilder.AddToScheme, newer.SchemeBuilder.AddToScheme},
-		Kind:          SchemeGroupVersion.WithKind("ImageStream"),
-		// Ensure previously supported labels have conversions. DO NOT REMOVE THINGS FROM THIS LIST
-		AllowedExternalFieldKeys: []string{"spec.dockerImageRepository", "status.dockerImageRepository"},
-		FieldKeyEvaluatorFn:      newer.ImageStreamSelector,
-	}.Check(t)
+		"name", "spec.dockerImageRepository", "status.dockerImageRepository",
+	)
 }
 
 func TestImageImportSpecDefaulting(t *testing.T) {
-	scheme := runtime.NewScheme()
-	codecs := serializer.NewCodecFactory(scheme)
-	LegacySchemeBuilder.AddToScheme(scheme)
-	SchemeBuilder.AddToScheme(scheme)
-	newer.LegacySchemeBuilder.AddToScheme(scheme)
-	newer.SchemeBuilder.AddToScheme(scheme)
-
 	i := &newer.ImageStreamImport{
 		Spec: newer.ImageStreamImportSpec{
 			Images: []newer.ImageImportSpec{
@@ -93,11 +70,11 @@ func TestImageImportSpecDefaulting(t *testing.T) {
 			},
 		},
 	}
-	data, err := runtime.Encode(codecs.LegacyCodec(SchemeGroupVersion), i)
+	data, err := runtime.Encode(kapi.Codecs.LegacyCodec(imageapiv1.SchemeGroupVersion), i)
 	if err != nil {
 		t.Fatal(err)
 	}
-	obj, err := runtime.Decode(codecs.UniversalDecoder(), data)
+	obj, err := runtime.Decode(kapi.Codecs.UniversalDecoder(), data)
 	if err != nil {
 		t.Fatal(err)
 	}

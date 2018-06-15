@@ -20,10 +20,9 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apiserver/pkg/registry/generic"
 	genericregistry "k8s.io/apiserver/pkg/registry/generic/registry"
+	"k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/apis/rbac"
-	"k8s.io/kubernetes/pkg/printers"
-	printersinternal "k8s.io/kubernetes/pkg/printers/internalversion"
-	printerstorage "k8s.io/kubernetes/pkg/printers/storage"
+	"k8s.io/kubernetes/pkg/registry/cachesize"
 	"k8s.io/kubernetes/pkg/registry/rbac/clusterrolebinding"
 )
 
@@ -35,17 +34,18 @@ type REST struct {
 // NewREST returns a RESTStorage object that will work against ClusterRoleBinding objects.
 func NewREST(optsGetter generic.RESTOptionsGetter) *REST {
 	store := &genericregistry.Store{
+		Copier:                   api.Scheme,
 		NewFunc:                  func() runtime.Object { return &rbac.ClusterRoleBinding{} },
 		NewListFunc:              func() runtime.Object { return &rbac.ClusterRoleBindingList{} },
+		PredicateFunc:            clusterrolebinding.Matcher,
 		DefaultQualifiedResource: rbac.Resource("clusterrolebindings"),
+		WatchCacheSize:           cachesize.GetWatchCacheSizeByResource("clusterrolebindings"),
 
 		CreateStrategy: clusterrolebinding.Strategy,
 		UpdateStrategy: clusterrolebinding.Strategy,
 		DeleteStrategy: clusterrolebinding.Strategy,
-
-		TableConvertor: printerstorage.TableConvertor{TablePrinter: printers.NewTablePrinter().With(printersinternal.AddHandlers)},
 	}
-	options := &generic.StoreOptions{RESTOptions: optsGetter}
+	options := &generic.StoreOptions{RESTOptions: optsGetter, AttrFunc: clusterrolebinding.GetAttrs}
 	if err := store.CompleteWithOptions(options); err != nil {
 		panic(err) // TODO: Propagate error up
 	}

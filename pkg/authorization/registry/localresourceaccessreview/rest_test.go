@@ -10,13 +10,10 @@ import (
 	"k8s.io/apiserver/pkg/authentication/user"
 	kauthorizer "k8s.io/apiserver/pkg/authorization/authorizer"
 	apirequest "k8s.io/apiserver/pkg/endpoints/request"
-	apiserverrest "k8s.io/apiserver/pkg/registry/rest"
-	rbacapi "k8s.io/kubernetes/pkg/apis/rbac"
 
 	authorizationapi "github.com/openshift/origin/pkg/authorization/apis/authorization"
 	"github.com/openshift/origin/pkg/authorization/registry/resourceaccessreview"
 	"github.com/openshift/origin/pkg/authorization/registry/util"
-	authorizationutil "github.com/openshift/origin/pkg/authorization/util"
 )
 
 type resourceAccessTest struct {
@@ -25,26 +22,27 @@ type resourceAccessTest struct {
 }
 
 type testAuthorizer struct {
-	subjects []rbacapi.Subject
-	err      string
+	users  sets.String
+	groups sets.String
+	err    string
 
 	actualAttributes kauthorizer.Attributes
 }
 
-func (a *testAuthorizer) Authorize(attributes kauthorizer.Attributes) (decision kauthorizer.Decision, reason string, err error) {
+func (a *testAuthorizer) Authorize(attributes kauthorizer.Attributes) (allowed bool, reason string, err error) {
 	// allow the initial check for "can I run this RAR at all"
 	if attributes.GetResource() == "localresourceaccessreviews" {
-		return kauthorizer.DecisionAllow, "", nil
+		return true, "", nil
 	}
 
-	return kauthorizer.DecisionNoOpinion, "", errors.New("Unsupported")
+	return false, "", errors.New("Unsupported")
 }
-func (a *testAuthorizer) AllowedSubjects(attributes kauthorizer.Attributes) ([]rbacapi.Subject, error) {
-	a.actualAttributes = attributes
+func (a *testAuthorizer) GetAllowedSubjects(passedAttributes kauthorizer.Attributes) (sets.String, sets.String, error) {
+	a.actualAttributes = passedAttributes
 	if len(a.err) == 0 {
-		return a.subjects, nil
+		return a.users, a.groups, nil
 	}
-	return a.subjects, errors.New(a.err)
+	return a.users, a.groups, errors.New(a.err)
 }
 
 func TestNoNamespace(t *testing.T) {
@@ -76,7 +74,7 @@ func TestConflictingNamespace(t *testing.T) {
 
 	storage := NewREST(resourceaccessreview.NewRegistry(resourceaccessreview.NewREST(authorizer, authorizer)))
 	ctx := apirequest.WithNamespace(apirequest.NewContext(), "bar")
-	_, err := storage.Create(ctx, reviewRequest, apiserverrest.ValidateAllObjectFunc, false)
+	_, err := storage.Create(ctx, reviewRequest, false)
 	if err == nil {
 		t.Fatalf("unexpected non-error: %v", err)
 	}
@@ -87,7 +85,10 @@ func TestConflictingNamespace(t *testing.T) {
 
 func TestEmptyReturn(t *testing.T) {
 	test := &resourceAccessTest{
-		authorizer: &testAuthorizer{},
+		authorizer: &testAuthorizer{
+			users:  sets.String{},
+			groups: sets.String{},
+		},
 		reviewRequest: &authorizationapi.LocalResourceAccessReview{
 			Action: authorizationapi.Action{
 				Namespace: "unittest",
@@ -103,12 +104,8 @@ func TestEmptyReturn(t *testing.T) {
 func TestNoErrors(t *testing.T) {
 	test := &resourceAccessTest{
 		authorizer: &testAuthorizer{
-			subjects: []rbacapi.Subject{
-				{APIGroup: rbacapi.GroupName, Kind: rbacapi.UserKind, Name: "one"},
-				{APIGroup: rbacapi.GroupName, Kind: rbacapi.UserKind, Name: "two"},
-				{APIGroup: rbacapi.GroupName, Kind: rbacapi.GroupKind, Name: "three"},
-				{APIGroup: rbacapi.GroupName, Kind: rbacapi.GroupKind, Name: "four"},
-			},
+			users:  sets.NewString("one", "two"),
+			groups: sets.NewString("three", "four"),
 		},
 		reviewRequest: &authorizationapi.LocalResourceAccessReview{
 			Action: authorizationapi.Action{
@@ -125,17 +122,16 @@ func TestNoErrors(t *testing.T) {
 func (r *resourceAccessTest) runTest(t *testing.T) {
 	storage := NewREST(resourceaccessreview.NewRegistry(resourceaccessreview.NewREST(r.authorizer, r.authorizer)))
 
-	users, groups := authorizationutil.RBACSubjectsToUsersAndGroups(r.authorizer.subjects, r.reviewRequest.Action.Namespace)
 	expectedResponse := &authorizationapi.ResourceAccessReviewResponse{
 		Namespace: r.reviewRequest.Action.Namespace,
-		Users:     sets.NewString(users...),
-		Groups:    sets.NewString(groups...),
+		Users:     r.authorizer.users,
+		Groups:    r.authorizer.groups,
 	}
 
 	expectedAttributes := util.ToDefaultAuthorizationAttributes(nil, r.reviewRequest.Action.Namespace, r.reviewRequest.Action)
 
 	ctx := apirequest.WithNamespace(apirequest.WithUser(apirequest.NewContext(), &user.DefaultInfo{}), r.reviewRequest.Action.Namespace)
-	obj, err := storage.Create(ctx, r.reviewRequest, apiserverrest.ValidateAllObjectFunc, false)
+	obj, err := storage.Create(ctx, r.reviewRequest, false)
 	if err != nil && len(r.authorizer.err) == 0 {
 		t.Fatalf("unexpected error: %v", err)
 	}

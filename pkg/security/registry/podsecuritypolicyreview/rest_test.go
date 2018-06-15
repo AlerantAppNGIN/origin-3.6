@@ -5,11 +5,9 @@ import (
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apiserver/pkg/authorization/authorizer"
 	apirequest "k8s.io/apiserver/pkg/endpoints/request"
-	"k8s.io/apiserver/pkg/registry/rest"
-	"k8s.io/client-go/tools/cache"
-	kapi "k8s.io/kubernetes/pkg/apis/core"
+	cache "k8s.io/client-go/tools/cache"
+	kapi "k8s.io/kubernetes/pkg/api"
 	clientsetfake "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset/fake"
 	"k8s.io/kubernetes/pkg/client/listers/core/internalversion"
 
@@ -150,9 +148,9 @@ func TestNoErrors(t *testing.T) {
 		serviceAccount.Namespace = namespace.Name
 		saIndexer.Add(serviceAccount)
 		csf := clientsetfake.NewSimpleClientset(namespace)
-		storage := REST{scc.NewDefaultSCCMatcher(sccCache, &noopTestAuthorizer{}), saCache, csf}
+		storage := REST{scc.NewDefaultSCCMatcher(sccCache), saCache, csf}
 		ctx := apirequest.WithNamespace(apirequest.NewContext(), namespace.Name)
-		obj, err := storage.Create(ctx, testcase.request, rest.ValidateAllObjectFunc, false)
+		obj, err := storage.Create(ctx, testcase.request, false)
 		if err != nil {
 			t.Errorf("%s - Unexpected error: %v", testName, err)
 			continue
@@ -247,9 +245,9 @@ func TestErrors(t *testing.T) {
 		}
 		csf := clientsetfake.NewSimpleClientset(namespace)
 
-		storage := REST{scc.NewDefaultSCCMatcher(sccCache, &noopTestAuthorizer{}), saCache, csf}
+		storage := REST{scc.NewDefaultSCCMatcher(sccCache), saCache, csf}
 		ctx := apirequest.WithNamespace(apirequest.NewContext(), namespace.Name)
-		_, err := storage.Create(ctx, testcase.request, rest.ValidateAllObjectFunc, false)
+		_, err := storage.Create(ctx, testcase.request, false)
 		if err == nil {
 			t.Errorf("%s - Expected error", testName)
 			continue
@@ -404,9 +402,9 @@ func TestSpecificSAs(t *testing.T) {
 			saIndexer.Add(testcase.serviceAccounts[i])
 		}
 		csf := clientsetfake.NewSimpleClientset(namespace)
-		storage := REST{scc.NewDefaultSCCMatcher(sccCache, &noopTestAuthorizer{}), saCache, csf}
+		storage := REST{scc.NewDefaultSCCMatcher(sccCache), saCache, csf}
 		ctx := apirequest.WithNamespace(apirequest.NewContext(), namespace.Name)
-		_, err := storage.Create(ctx, testcase.request, rest.ValidateAllObjectFunc, false)
+		_, err := storage.Create(ctx, testcase.request, false)
 		switch {
 		case err == nil && len(testcase.errorMessage) == 0:
 			continue
@@ -417,10 +415,4 @@ func TestSpecificSAs(t *testing.T) {
 			t.Errorf("%s - Expected error %q. But got %#v", testName, testcase.errorMessage, err)
 		}
 	}
-}
-
-type noopTestAuthorizer struct{}
-
-func (s *noopTestAuthorizer) Authorize(a authorizer.Attributes) (authorizer.Decision, string, error) {
-	return authorizer.DecisionNoOpinion, "", nil
 }

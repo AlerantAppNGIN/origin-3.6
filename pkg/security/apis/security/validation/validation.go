@@ -6,8 +6,8 @@ import (
 
 	"k8s.io/apimachinery/pkg/api/validation"
 	"k8s.io/apimachinery/pkg/util/validation/field"
-	kapi "k8s.io/kubernetes/pkg/apis/core"
-	kapivalidation "k8s.io/kubernetes/pkg/apis/core/validation"
+	kapi "k8s.io/kubernetes/pkg/api"
+	kapivalidation "k8s.io/kubernetes/pkg/api/validation"
 
 	securityapi "github.com/openshift/origin/pkg/security/apis/security"
 )
@@ -77,36 +77,17 @@ func ValidateSecurityContextConstraints(scc *securityapi.SecurityContextConstrai
 			"required capabilities must be empty when all capabilities are allowed by a wildcard"))
 	}
 
-	allowsFlexVolumes := false
-	hasNoneVolume := false
-
-	if len(scc.Volumes) > 0 {
+	if len(scc.Volumes) > 1 {
+		hasNone := false
 		for _, fsType := range scc.Volumes {
 			if fsType == securityapi.FSTypeNone {
-				hasNoneVolume = true
-
-			} else if fsType == securityapi.FSTypeFlexVolume || fsType == securityapi.FSTypeAll {
-				allowsFlexVolumes = true
+				hasNone = true
+				break
 			}
 		}
-	}
-
-	if hasNoneVolume && len(scc.Volumes) > 1 {
-		allErrs = append(allErrs, field.Invalid(field.NewPath("volumes"), scc.Volumes,
-			"if 'none' is specified, no other values are allowed"))
-	}
-
-	if len(scc.AllowedFlexVolumes) > 0 {
-		if allowsFlexVolumes {
-			for idx, allowedFlexVolume := range scc.AllowedFlexVolumes {
-				if len(allowedFlexVolume.Driver) == 0 {
-					allErrs = append(allErrs, field.Required(field.NewPath("allowedFlexVolumes").Index(idx).Child("driver"),
-						"must specify a driver"))
-				}
-			}
-		} else {
-			allErrs = append(allErrs, field.Invalid(field.NewPath("allowedFlexVolumes"), scc.AllowedFlexVolumes,
-				"volumes does not include 'flexVolume' or '*', so no flex volumes are allowed"))
+		if hasNone {
+			allErrs = append(allErrs, field.Invalid(field.NewPath("volumes"), scc.Volumes,
+				"if 'none' is specified, no other values are allowed"))
 		}
 	}
 

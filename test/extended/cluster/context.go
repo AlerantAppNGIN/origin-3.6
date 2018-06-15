@@ -8,55 +8,41 @@ import (
 	"github.com/spf13/viper"
 )
 
-const (
-	IF_EXISTS_DELETE = "delete"
-	IF_EXISTS_REUSE  = "reuse"
-)
-
 // ContextType is the root config struct
 type ContextType struct {
 	ClusterLoader struct {
 		Cleanup    bool
 		Projects   []ClusterLoaderType
-		Sync       SyncObjectType  `yaml:",omitempty"`
-		TuningSets []TuningSetType `yaml:",omitempty"`
+		TuningSets []TuningSetType
 	}
 }
 
 // ClusterLoaderType struct only used for Cluster Loader test config
 type ClusterLoaderType struct {
-	Number     int `mapstructure:"num" yaml:"num"`
-	Basename   string
-	IfExists   string                    `json:"ifexists"`
-	Labels     map[string]string         `yaml:",omitempty"`
-	Tuning     string                    `yaml:",omitempty"`
-	Configmaps map[string]interface{}    `yaml:",omitempty"`
-	Secrets    map[string]interface{}    `yaml:",omitempty"`
-	Pods       []ClusterLoaderObjectType `yaml:",omitempty"`
-	Templates  []ClusterLoaderObjectType `yaml:",omitempty"`
+	Number    int `mapstructure:"num"`
+	Basename  string
+	Tuning    string
+	Pods      []ClusterLoaderObjectType
+	Templates []ClusterLoaderObjectType
 }
 
 // ClusterLoaderObjectType is nested object type for cluster loader struct
 type ClusterLoaderObjectType struct {
-	Total      int                    `yaml:",omitempty"`
-	Number     int                    `mapstructure:"num" yaml:"num"`
-	Image      string                 `yaml:",omitempty"`
-	Basename   string                 `yaml:",omitempty"`
-	File       string                 `yaml:",omitempty"`
-	Sync       SyncObjectType         `yaml:",omitempty"`
-	Parameters map[string]interface{} `yaml:",omitempty"`
+	Total      int
+	Number     int `mapstructure:"num"`
+	Image      string
+	Basename   string
+	File       string
+	Parameters ParameterConfigType
 }
 
-// SyncObjectType is nested object type for cluster loader synchronisation functionality
-type SyncObjectType struct {
-	Server struct {
-		Enabled bool
-		Port    int
-	}
-	Running   bool
-	Succeeded bool
-	Selectors map[string]string
-	Timeout   string
+// ParameterConfigType contains config parameters for each object
+type ParameterConfigType struct {
+	Run         string `mapstructure:"run"`
+	RouterIP    string `mapstructure:"router_ip"`
+	TargetHost  string `mapstructure:"target_host"`
+	DurationSec int    `mapstructure:"duration"`
+	Megabytes   int
 }
 
 // TuningSetType is nested type for controlling Cluster Loader deployment pattern
@@ -93,6 +79,11 @@ type ServiceInfo struct {
 	Name string
 	IP   string
 	Port int32
+}
+
+// TestResult struct contains result data to be saved at end of run
+type TestResult struct {
+	Time time.Duration `json:"time"`
 }
 
 // ParseConfig will complete flag parsing as well as viper tasks

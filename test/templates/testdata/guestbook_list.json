@@ -12,7 +12,7 @@
     "message": "Your admin credentials are adminQ3H:dwNJiJwW",
     "objects": [
         {
-            "apiVersion": "route.openshift.io/v1",
+            "apiVersion": "v1",
             "kind": "Route",
             "metadata": {
                 "creationTimestamp": null,

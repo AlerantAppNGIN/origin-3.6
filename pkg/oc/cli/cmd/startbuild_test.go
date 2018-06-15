@@ -13,18 +13,14 @@ import (
 	"strings"
 	"testing"
 
-	kerrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	restclient "k8s.io/client-go/rest"
-	restfake "k8s.io/client-go/rest/fake"
 	kclientcmd "k8s.io/client-go/tools/clientcmd"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
-	"k8s.io/kubernetes/pkg/api/legacyscheme"
+	kapi "k8s.io/kubernetes/pkg/api"
 
 	buildapi "github.com/openshift/origin/pkg/build/apis/build"
-	buildclient "github.com/openshift/origin/pkg/build/client/internalversion"
-	"github.com/openshift/origin/pkg/oauth/generated/clientset/scheme"
+	"github.com/openshift/origin/pkg/client"
+	"github.com/openshift/origin/pkg/client/testclient"
 )
 
 type FakeClientConfig struct {
@@ -66,9 +62,9 @@ func TestStartBuildWebHook(t *testing.T) {
 	buf := &bytes.Buffer{}
 	o := &StartBuildOptions{
 		Out:          buf,
-		ClientConfig: cfg.Client,
+		ClientConfig: cfg,
 		FromWebhook:  server.URL + "/webhook",
-		Mapper:       legacyscheme.Registry.RESTMapper(),
+		Mapper:       kapi.Registry.RESTMapper(),
 	}
 	if err := o.Run(); err != nil {
 		t.Fatalf("unable to start hook: %v", err)
@@ -81,6 +77,30 @@ func TestStartBuildWebHook(t *testing.T) {
 		GitPostReceive: "unknownpath",
 	}
 	if err := o.Run(); err == nil {
+		t.Fatalf("unexpected non-error: %v", err)
+	}
+}
+
+func TestStartBuildWebHookHTTPS(t *testing.T) {
+	invoked := make(chan struct{}, 1)
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		invoked <- struct{}{}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	testErr := errors.New("not enabled")
+	cfg := &FakeClientConfig{
+		Err: testErr,
+	}
+	buf := &bytes.Buffer{}
+	o := &StartBuildOptions{
+		Out:          buf,
+		ClientConfig: cfg,
+		FromWebhook:  server.URL + "/webhook",
+		Mapper:       kapi.Registry.RESTMapper(),
+	}
+	if err := o.Run(); err == nil || !strings.Contains(err.Error(), "certificate signed by unknown authority") {
 		t.Fatalf("unexpected non-error: %v", err)
 	}
 }
@@ -111,10 +131,10 @@ func TestStartBuildHookPostReceive(t *testing.T) {
 	buf := &bytes.Buffer{}
 	o := &StartBuildOptions{
 		Out:            buf,
-		ClientConfig:   cfg.Client,
+		ClientConfig:   cfg,
 		FromWebhook:    server.URL + "/webhook",
 		GitPostReceive: f.Name(),
-		Mapper:         legacyscheme.Registry.RESTMapper(),
+		Mapper:         kapi.Registry.RESTMapper(),
 	}
 	if err := o.Run(); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -130,11 +150,12 @@ func TestStartBuildHookPostReceive(t *testing.T) {
 }
 
 type FakeBuildConfigs struct {
+	client.BuildConfigInterface
 	t            *testing.T
 	expectAsFile bool
 }
 
-func (c FakeBuildConfigs) InstantiateBinary(name string, options *buildapi.BinaryBuildRequestOptions, r io.Reader) (result *buildapi.Build, err error) {
+func (c FakeBuildConfigs) InstantiateBinary(options *buildapi.BinaryBuildRequestOptions, r io.Reader) (result *buildapi.Build, err error) {
 	if binary, err := ioutil.ReadAll(r); err != nil {
 		c.t.Errorf("Error while reading binary over HTTP: %v", err)
 	} else if string(binary) != "hi" {
@@ -229,6 +250,9 @@ func TestHttpBinary(t *testing.T) {
 		stdin := bytes.NewReader([]byte{})
 		stdout := &bytes.Buffer{}
 		options := buildapi.BinaryBuildRequestOptions{}
+		fakeclient := testclient.NewSimpleFake()
+		buildconfigs := FakeBuildConfigs{fakeclient.BuildConfigs("default"), t, tc.fromFile}
+
 		handler := func(w http.ResponseWriter, r *http.Request) {
 			if tc.contentDisposition {
 				w.Header().Add("Content-Disposition", "attachment; filename=hi.txt")
@@ -258,7 +282,7 @@ func TestHttpBinary(t *testing.T) {
 			fromDir = server.URL + tc.urlPath
 		}
 
-		build, err := streamPathToBuild(nil, stdin, stdout, &FakeBuildConfigs{t: t, expectAsFile: tc.fromFile}, fromDir, fromFile, "", &options)
+		build, err := streamPathToBuild(nil, stdin, stdout, buildconfigs, fromDir, fromFile, "", &options)
 
 		if len(tc.expectedError) > 0 {
 			if err == nil {
@@ -285,100 +309,6 @@ func TestHttpBinary(t *testing.T) {
 
 		if out := stdout.String(); tc.expectWarning != strings.Contains(out, "may not be an archive") {
 			t.Errorf("[%s] Expected archive warning: %v, got: %q", tc.description, tc.expectWarning, out)
-		}
-	}
-}
-
-type logTestCase struct {
-	RequestErr     error
-	IOErr          error
-	ExpectedLogMsg string
-	ExpectedErrMsg string
-}
-
-type failReader struct {
-	Err error
-}
-
-func (r *failReader) Read(p []byte) (n int, err error) {
-	return 0, r.Err
-}
-
-func TestStreamBuildLogs(t *testing.T) {
-	cases := []logTestCase{
-		{
-			ExpectedLogMsg: "hello",
-		},
-		{
-			RequestErr:     errors.New("simulated failure"),
-			ExpectedErrMsg: "unable to stream the build logs",
-		},
-		{
-			RequestErr: &kerrors.StatusError{
-				ErrStatus: metav1.Status{
-					Reason:  metav1.StatusReasonTimeout,
-					Message: "timeout",
-				},
-			},
-			ExpectedErrMsg: "unable to stream the build logs",
-		},
-		{
-			IOErr:          errors.New("failed to read"),
-			ExpectedErrMsg: "unable to stream the build logs",
-		},
-	}
-
-	for _, tc := range cases {
-		out := &bytes.Buffer{}
-		build := &buildapi.Build{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "test-build",
-				Namespace: "test-namespace",
-			},
-		}
-		// Set up dummy RESTClient to handle requests
-		fakeREST := &restfake.RESTClient{
-			NegotiatedSerializer: scheme.Codecs,
-			GroupVersion:         schema.GroupVersion{Group: "build.openshift.io", Version: "v1"},
-			Client: restfake.CreateHTTPClient(func(*http.Request) (*http.Response, error) {
-				if tc.RequestErr != nil {
-					return nil, tc.RequestErr
-				}
-				var body io.Reader
-				if tc.IOErr != nil {
-					body = &failReader{
-						Err: tc.IOErr,
-					}
-				} else {
-					body = bytes.NewBufferString(tc.ExpectedLogMsg)
-				}
-				return &http.Response{
-					StatusCode: http.StatusOK,
-					Body:       ioutil.NopCloser(body),
-				}, nil
-			}),
-		}
-
-		o := &StartBuildOptions{
-			Out:            out,
-			ErrOut:         out,
-			BuildLogClient: buildclient.NewBuildLogClient(fakeREST, build.Namespace),
-		}
-
-		err := o.streamBuildLogs(build)
-		if tc.RequestErr == nil && tc.IOErr == nil {
-			if err != nil {
-				t.Errorf("received unexpected error streaming build logs: %v", err)
-			}
-			if out.String() != tc.ExpectedLogMsg {
-				t.Errorf("expected log \"%s\", got \"%s\"", tc.ExpectedLogMsg, out.String())
-			}
-		} else {
-			if err == nil {
-				t.Errorf("no error was received, expected error message: %s", tc.ExpectedErrMsg)
-			} else if !strings.Contains(err.Error(), tc.ExpectedErrMsg) {
-				t.Errorf("expected error message \"%s\", got \"%s\"", tc.ExpectedErrMsg, err)
-			}
 		}
 	}
 }

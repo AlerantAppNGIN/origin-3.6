@@ -11,25 +11,16 @@ import (
 	"time"
 
 	jsonserializer "k8s.io/apimachinery/pkg/runtime/serializer/json"
-	"k8s.io/kubernetes/pkg/kubectl/scheme"
+	"k8s.io/kubernetes/pkg/api"
 
 	"github.com/coreos/etcd/clientv3"
 	"github.com/coreos/etcd/pkg/transport"
 
 	// install all APIs
 	_ "github.com/openshift/origin/pkg/api/install"
-	apiinstall "github.com/openshift/origin/pkg/api/install"
-	apilegacy "github.com/openshift/origin/pkg/api/legacy"
 	_ "github.com/openshift/origin/pkg/quota/apis/quota/install"
-	apiregistration "k8s.io/kube-aggregator/pkg/apis/apiregistration/install"
-	_ "k8s.io/kubernetes/pkg/apis/core/install"
+	_ "k8s.io/kubernetes/pkg/api/install"
 )
-
-func init() {
-	apiregistration.Install(scheme.GroupFactoryRegistry, scheme.Registry, scheme.Scheme)
-	apiinstall.InstallAll(scheme.Scheme, scheme.GroupFactoryRegistry, scheme.Registry)
-	apilegacy.LegacyInstallAll(scheme.Scheme, scheme.Registry)
-}
 
 func main() {
 	var endpoint, keyFile, certFile, caFile string
@@ -126,8 +117,8 @@ func getKey(client *clientv3.Client, key string) error {
 		return err
 	}
 
-	decoder := scheme.Codecs.UniversalDeserializer()
-	encoder := jsonserializer.NewSerializer(jsonserializer.DefaultMetaFactory, scheme.Scheme, scheme.Scheme, true)
+	decoder := api.Codecs.UniversalDeserializer()
+	encoder := jsonserializer.NewSerializer(jsonserializer.DefaultMetaFactory, api.Scheme, api.Scheme, true)
 
 	for _, kv := range resp.Kvs {
 		obj, gvk, err := decoder.Decode(kv.Value, nil, nil)
@@ -138,7 +129,7 @@ func getKey(client *clientv3.Client, key string) error {
 		fmt.Println(gvk)
 		err = encoder.Encode(obj, os.Stdout)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "WARN: unable to encode %s: %v\n", kv.Key, err)
+			fmt.Fprintf(os.Stderr, "WARN: unable to decode %s: %v\n", kv.Key, err)
 			continue
 		}
 	}
@@ -153,14 +144,14 @@ func dump(client *clientv3.Client) error {
 	}
 
 	kvData := []etcd3kv{}
-	decoder := scheme.Codecs.UniversalDeserializer()
-	encoder := jsonserializer.NewSerializer(jsonserializer.DefaultMetaFactory, scheme.Scheme, scheme.Scheme, false)
+	decoder := api.Codecs.UniversalDeserializer()
+	encoder := jsonserializer.NewSerializer(jsonserializer.DefaultMetaFactory, api.Scheme, api.Scheme, false)
 	objJSON := &bytes.Buffer{}
 
 	for _, kv := range response.Kvs {
 		obj, _, err := decoder.Decode(kv.Value, nil, nil)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "WARN: error decoding value %q: %v\n", string(kv.Value), err)
+			fmt.Fprintf(os.Stderr, "WARN: error decoding value %s: %v\n", string(kv.Value), err)
 			continue
 		}
 		objJSON.Reset()

@@ -109,7 +109,7 @@ func New(client dockerpkg.Client, config *api.Config, fs fs.FileSystem, override
 		config.PullAuthentication,
 		fs,
 	)
-	tarHandler := tar.NewParanoid(fs)
+	tarHandler := tar.New(fs)
 	tarHandler.SetExclusionPattern(excludePattern)
 
 	builder := &STI{
@@ -270,7 +270,7 @@ func (builder *STI) Prepare(config *api.Config) error {
 
 	if len(config.RuntimeImage) > 0 {
 		startTime := time.Now()
-		dockerpkg.GetRuntimeImage(builder.runtimeDocker, config)
+		dockerpkg.GetRuntimeImage(config, builder.runtimeDocker)
 		builder.result.BuildInfo.Stages = api.RecordStageAndStepInfo(builder.result.BuildInfo.Stages, api.StagePullImages, api.StepPullRuntimeImage, startTime, time.Now())
 
 		if err != nil {
@@ -537,8 +537,6 @@ func (builder *STI) Save(config *api.Config) (err error) {
 		NetworkMode:     string(config.DockerNetworkMode),
 		CGroupLimits:    config.CGroupLimits,
 		CapDrop:         config.DropCapabilities,
-		Binds:           config.BuildVolumes,
-		SecurityOpt:     config.SecurityOpt,
 	}
 
 	dockerpkg.StreamContainerIO(errReader, nil, func(s string) { glog.Info(s) })
@@ -596,7 +594,6 @@ func (builder *STI) Execute(command string, user string, config *api.Config) err
 		CGroupLimits:    config.CGroupLimits,
 		CapDrop:         config.DropCapabilities,
 		Binds:           config.BuildVolumes,
-		SecurityOpt:     config.SecurityOpt,
 	}
 
 	// If there are injections specified, override the original assemble script
@@ -613,7 +610,7 @@ func (builder *STI) Execute(command string, user string, config *api.Config) err
 			return err
 		}
 		config.Injections = util.FixInjectionsWithRelativePath(workdir, config.Injections)
-		truncatedFiles, err := util.ListFilesToTruncate(builder.fs, config.Injections)
+		injectedFiles, err := util.ExpandInjectedFiles(builder.fs, config.Injections)
 		if err != nil {
 			builder.result.BuildInfo.FailureReason = utilstatus.NewFailureReason(
 				utilstatus.ReasonInstallScriptsFailed,
@@ -621,7 +618,7 @@ func (builder *STI) Execute(command string, user string, config *api.Config) err
 			)
 			return err
 		}
-		rmScript, err := util.CreateTruncateFilesScript(truncatedFiles, "/tmp/rm-injections")
+		rmScript, err := util.CreateInjectedFilesRemovalScript(injectedFiles, "/tmp/rm-injections")
 		if len(rmScript) != 0 {
 			defer os.Remove(rmScript)
 		}
@@ -692,7 +689,7 @@ func (builder *STI) Execute(command string, user string, config *api.Config) err
 		if isMissingRequirements(errOutput) {
 			err = errMissingRequirements
 		} else if e, ok := err.(s2ierr.ContainerError); ok {
-			err = s2ierr.NewContainerError(config.BuilderImage, e.ErrorCode, errOutput+e.Output)
+			err = s2ierr.NewContainerError(config.BuilderImage, e.ErrorCode, errOutput)
 		}
 	}
 
@@ -741,7 +738,6 @@ func (builder *STI) initPostExecutorSteps() {
 				image:   builder.config.RuntimeImage,
 				builder: builder,
 				docker:  builder.docker,
-				tar:     builder.tar,
 			},
 			&reportSuccessStep{
 				builder: builder,
@@ -751,9 +747,9 @@ func (builder *STI) initPostExecutorSteps() {
 }
 
 func isMissingRequirements(text string) bool {
-	tarCommand, _ := regexp.MatchString(`.*tar.*not found`, text)
-	shCommand, _ := regexp.MatchString(`.*/bin/sh.*no such file or directory`, text)
-	return tarCommand || shCommand
+	tar, _ := regexp.MatchString(`.*tar.*not found`, text)
+	sh, _ := regexp.MatchString(`.*/bin/sh.*no such file or directory`, text)
+	return tar || sh
 }
 
 func includes(arr []string, str string) bool {

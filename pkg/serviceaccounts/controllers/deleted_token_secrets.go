@@ -6,15 +6,15 @@ import (
 
 	"github.com/golang/glog"
 
-	"k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
-	informers "k8s.io/client-go/informers/core/v1"
-	kclientset "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
-	api "k8s.io/kubernetes/pkg/apis/core"
+	"k8s.io/kubernetes/pkg/api"
+	"k8s.io/kubernetes/pkg/api/v1"
+	kclientset "k8s.io/kubernetes/pkg/client/clientset_generated/clientset"
+	informers "k8s.io/kubernetes/pkg/client/informers/informers_generated/externalversions/core/v1"
 )
 
 // DockercfgTokenDeletedControllerOptions contains options for the DockercfgTokenDeletedController
@@ -62,16 +62,15 @@ type DockercfgTokenDeletedController struct {
 // Runs controller loops and returns on shutdown
 func (e *DockercfgTokenDeletedController) Run(stopCh <-chan struct{}) {
 	defer utilruntime.HandleCrash()
-	glog.Infof("Starting DockercfgTokenDeletedController controller")
-	defer glog.Infof("Shutting down DockercfgTokenDeletedController controller")
 
 	// Wait for the stores to fill
 	if !cache.WaitForCacheSync(stopCh, e.secretController.HasSynced) {
 		return
 	}
-	glog.V(1).Infof("caches synced")
 
+	glog.V(5).Infof("Worker started")
 	<-stopCh
+	glog.V(1).Infof("Shutting down")
 }
 
 // secretDeleted reacts to a token secret being deleted by looking for a corresponding dockercfg secret and deleting it if it exists

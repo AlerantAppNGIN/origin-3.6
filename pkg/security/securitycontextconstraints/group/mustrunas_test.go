@@ -3,7 +3,7 @@ package group
 import (
 	"testing"
 
-	api "k8s.io/kubernetes/pkg/apis/core"
+	"k8s.io/kubernetes/pkg/api"
 
 	securityapi "github.com/openshift/origin/pkg/security/apis/security"
 )
@@ -94,6 +94,14 @@ func TestGenerate(t *testing.T) {
 }
 
 func TestValidate(t *testing.T) {
+	validPod := func() *api.Pod {
+		return &api.Pod{
+			Spec: api.PodSpec{
+				SecurityContext: &api.PodSecurityContext{},
+			},
+		}
+	}
+
 	tests := map[string]struct {
 		ranges []securityapi.IDRange
 		pod    *api.Pod
@@ -101,16 +109,19 @@ func TestValidate(t *testing.T) {
 		pass   bool
 	}{
 		"nil security context": {
+			pod: &api.Pod{},
 			ranges: []securityapi.IDRange{
 				{Min: 1, Max: 3},
 			},
 		},
 		"empty groups": {
+			pod: validPod(),
 			ranges: []securityapi.IDRange{
 				{Min: 1, Max: 3},
 			},
 		},
 		"not in range": {
+			pod:    validPod(),
 			groups: []int64{5},
 			ranges: []securityapi.IDRange{
 				{Min: 1, Max: 3},
@@ -118,6 +129,7 @@ func TestValidate(t *testing.T) {
 			},
 		},
 		"in range 1": {
+			pod:    validPod(),
 			groups: []int64{2},
 			ranges: []securityapi.IDRange{
 				{Min: 1, Max: 3},
@@ -125,6 +137,7 @@ func TestValidate(t *testing.T) {
 			pass: true,
 		},
 		"in range boundry min": {
+			pod:    validPod(),
 			groups: []int64{1},
 			ranges: []securityapi.IDRange{
 				{Min: 1, Max: 3},
@@ -132,6 +145,7 @@ func TestValidate(t *testing.T) {
 			pass: true,
 		},
 		"in range boundry max": {
+			pod:    validPod(),
 			groups: []int64{3},
 			ranges: []securityapi.IDRange{
 				{Min: 1, Max: 3},
@@ -139,6 +153,7 @@ func TestValidate(t *testing.T) {
 			pass: true,
 		},
 		"singular range": {
+			pod:    validPod(),
 			groups: []int64{4},
 			ranges: []securityapi.IDRange{
 				{Min: 4, Max: 4},
@@ -152,7 +167,7 @@ func TestValidate(t *testing.T) {
 		if err != nil {
 			t.Errorf("error creating strategy for %s: %v", k, err)
 		}
-		errs := s.Validate(nil, v.groups)
+		errs := s.Validate(v.pod, v.groups)
 		if v.pass && len(errs) > 0 {
 			t.Errorf("unexpected errors for %s: %v", k, errs)
 		}

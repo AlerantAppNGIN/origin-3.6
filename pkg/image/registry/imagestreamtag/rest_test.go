@@ -7,9 +7,7 @@ import (
 
 	etcd "github.com/coreos/etcd/clientv3"
 	"golang.org/x/net/context"
-	"k8s.io/apiserver/pkg/registry/rest"
 
-	"k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -17,14 +15,14 @@ import (
 	apirequest "k8s.io/apiserver/pkg/endpoints/request"
 	"k8s.io/apiserver/pkg/storage/etcd/etcdtest"
 	etcdtesting "k8s.io/apiserver/pkg/storage/etcd/testing"
-	"k8s.io/kubernetes/pkg/api/legacyscheme"
-	authorizationapi "k8s.io/kubernetes/pkg/apis/authorization"
-	kapi "k8s.io/kubernetes/pkg/apis/core"
+	kapi "k8s.io/kubernetes/pkg/api"
+	"k8s.io/kubernetes/pkg/api/v1"
 	"k8s.io/kubernetes/pkg/registry/registrytest"
 
-	admfake "github.com/openshift/origin/pkg/image/admission/fake"
+	authorizationapi "github.com/openshift/origin/pkg/authorization/apis/authorization"
+	"github.com/openshift/origin/pkg/authorization/registry/subjectaccessreview"
+	"github.com/openshift/origin/pkg/image/admission/testutil"
 	imageapi "github.com/openshift/origin/pkg/image/apis/image"
-	"github.com/openshift/origin/pkg/image/apis/image/validation/fake"
 	"github.com/openshift/origin/pkg/image/registry/image"
 	imageetcd "github.com/openshift/origin/pkg/image/registry/image/etcd"
 	"github.com/openshift/origin/pkg/image/registry/imagestream"
@@ -34,12 +32,14 @@ import (
 	_ "github.com/openshift/origin/pkg/api/install"
 )
 
-var testDefaultRegistry = func() (string, bool) { return "defaultregistry:5000", true }
+var testDefaultRegistry = imageapi.DefaultRegistryFunc(func() (string, bool) { return "defaultregistry:5000", true })
 
 type fakeSubjectAccessReviewRegistry struct {
 }
 
-func (f *fakeSubjectAccessReviewRegistry) Create(subjectAccessReview *authorizationapi.SubjectAccessReview) (*authorizationapi.SubjectAccessReview, error) {
+var _ subjectaccessreview.Registry = &fakeSubjectAccessReviewRegistry{}
+
+func (f *fakeSubjectAccessReviewRegistry) CreateSubjectAccessReview(ctx apirequest.Context, subjectAccessReview *authorizationapi.SubjectAccessReview) (*authorizationapi.SubjectAccessReviewResponse, error) {
 	return nil, nil
 }
 
@@ -67,19 +67,12 @@ func (u *fakeUser) GetExtra() map[string][]string {
 func setup(t *testing.T) (etcd.KV, *etcdtesting.EtcdTestServer, *REST) {
 	etcdStorage, server := registrytest.NewEtcdStorage(t, "")
 	etcdClient := etcd.NewKV(server.V3Client)
-	rw := &fake.RegistryWhitelister{}
 
 	imageStorage, err := imageetcd.NewREST(restoptions.NewSimpleGetter(etcdStorage))
 	if err != nil {
 		t.Fatal(err)
 	}
-	registry := imageapi.DefaultRegistryHostnameRetriever(testDefaultRegistry, "", "")
-	imageStreamStorage, imageStreamStatus, internalStorage, err := imagestreametcd.NewREST(
-		restoptions.NewSimpleGetter(etcdStorage),
-		registry,
-		&fakeSubjectAccessReviewRegistry{},
-		&admfake.ImageStreamLimitVerifier{},
-		rw)
+	imageStreamStorage, imageStreamStatus, internalStorage, err := imagestreametcd.NewREST(restoptions.NewSimpleGetter(etcdStorage), testDefaultRegistry, &fakeSubjectAccessReviewRegistry{}, &testutil.FakeImageStreamLimitVerifier{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,7 +80,7 @@ func setup(t *testing.T) (etcd.KV, *etcdtesting.EtcdTestServer, *REST) {
 	imageRegistry := image.NewRegistry(imageStorage)
 	imageStreamRegistry := imagestream.NewRegistry(imageStreamStorage, imageStreamStatus, internalStorage)
 
-	storage := NewREST(imageRegistry, imageStreamRegistry, rw)
+	storage := NewREST(imageRegistry, imageStreamRegistry)
 
 	return etcdClient, server, storage
 }
@@ -187,14 +180,14 @@ func TestGetImageStreamTag(t *testing.T) {
 				client.Put(
 					context.TODO(),
 					etcdtest.AddPrefix("/images/"+testCase.image.Name),
-					runtime.EncodeOrDie(legacyscheme.Codecs.LegacyCodec(v1.SchemeGroupVersion), testCase.image),
+					runtime.EncodeOrDie(kapi.Codecs.LegacyCodec(v1.SchemeGroupVersion), testCase.image),
 				)
 			}
 			if testCase.repo != nil {
 				client.Put(
 					context.TODO(),
 					etcdtest.AddPrefix("/imagestreams/default/test"),
-					runtime.EncodeOrDie(legacyscheme.Codecs.LegacyCodec(v1.SchemeGroupVersion), testCase.repo),
+					runtime.EncodeOrDie(kapi.Codecs.LegacyCodec(v1.SchemeGroupVersion), testCase.repo),
 				)
 			}
 
@@ -225,7 +218,7 @@ func TestGetImageStreamTag(t *testing.T) {
 				if e, a := map[string]string{"size": "large", "color": "blue"}, actual.Image.Annotations; !reflect.DeepEqual(e, a) {
 					t.Errorf("%s: annotations: expected %v, got %v", name, e, a)
 				}
-				if e, a := metav1.Date(2015, 3, 24, 9, 38, 0, 0, time.UTC), actual.CreationTimestamp; !a.Equal(&e) {
+				if e, a := metav1.Date(2015, 3, 24, 9, 38, 0, 0, time.UTC), actual.CreationTimestamp; !a.Equal(e) {
 					t.Errorf("%s: timestamp: expected %v, got %v", name, e, a)
 				}
 			}
@@ -261,12 +254,12 @@ func TestGetImageStreamTagDIR(t *testing.T) {
 	client.Put(
 		context.TODO(),
 		etcdtest.AddPrefix("/images/"+image.Name),
-		runtime.EncodeOrDie(legacyscheme.Codecs.LegacyCodec(v1.SchemeGroupVersion), image),
+		runtime.EncodeOrDie(kapi.Codecs.LegacyCodec(v1.SchemeGroupVersion), image),
 	)
 	client.Put(
 		context.TODO(),
 		etcdtest.AddPrefix("/imagestreams/default/test"),
-		runtime.EncodeOrDie(legacyscheme.Codecs.LegacyCodec(v1.SchemeGroupVersion), repo),
+		runtime.EncodeOrDie(kapi.Codecs.LegacyCodec(v1.SchemeGroupVersion), repo),
 	)
 	obj, err := storage.Get(apirequest.NewDefaultContext(), "test:latest", &metav1.GetOptions{})
 	if err != nil {
@@ -391,12 +384,12 @@ func TestDeleteImageStreamTag(t *testing.T) {
 				client.Put(
 					context.TODO(),
 					etcdtest.AddPrefix("/imagestreams/default/test"),
-					runtime.EncodeOrDie(legacyscheme.Codecs.LegacyCodec(v1.SchemeGroupVersion), testCase.repo),
+					runtime.EncodeOrDie(kapi.Codecs.LegacyCodec(v1.SchemeGroupVersion), testCase.repo),
 				)
 			}
 
 			ctx := apirequest.WithUser(apirequest.NewDefaultContext(), &fakeUser{})
-			obj, _, err := storage.Delete(ctx, "test:latest", nil)
+			obj, err := storage.Delete(ctx, "test:latest")
 			gotError := err != nil
 			if e, a := testCase.expectError, gotError; e != a {
 				t.Fatalf("%s: expectError=%t, gotError=%t: %s", name, e, a, err)
@@ -527,7 +520,7 @@ func TestCreateImageStreamTag(t *testing.T) {
 			client.Put(
 				context.TODO(),
 				etcdtest.AddPrefix("/imagestreams/default/test"),
-				runtime.EncodeOrDie(legacyscheme.Codecs.LegacyCodec(v1.SchemeGroupVersion),
+				runtime.EncodeOrDie(kapi.Codecs.LegacyCodec(v1.SchemeGroupVersion),
 					&imageapi.ImageStream{
 						ObjectMeta: metav1.ObjectMeta{
 							CreationTimestamp: metav1.Date(2015, 3, 24, 9, 38, 0, 0, time.UTC),
@@ -541,7 +534,7 @@ func TestCreateImageStreamTag(t *testing.T) {
 				))
 
 			ctx := apirequest.WithUser(apirequest.NewDefaultContext(), &fakeUser{})
-			_, err := storage.Create(ctx, tc.istag, rest.ValidateAllObjectFunc, false)
+			_, err := storage.Create(ctx, tc.istag, false)
 			gotErr := err != nil
 			if e, a := tc.expectError, gotErr; e != a {
 				t.Errorf("%s: Expected err=%v: got %v: %v", name, e, a, err)

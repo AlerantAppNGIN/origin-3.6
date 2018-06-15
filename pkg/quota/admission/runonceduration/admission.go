@@ -10,13 +10,13 @@ import (
 
 	"k8s.io/apiserver/pkg/admission"
 	"k8s.io/client-go/util/integer"
-	kapi "k8s.io/kubernetes/pkg/apis/core"
+	kapi "k8s.io/kubernetes/pkg/api"
 
 	oadmission "github.com/openshift/origin/pkg/cmd/server/admission"
-	configlatest "github.com/openshift/origin/pkg/cmd/server/apis/config/latest"
+	configlatest "github.com/openshift/origin/pkg/cmd/server/api/latest"
 	projectcache "github.com/openshift/origin/pkg/project/cache"
-	"github.com/openshift/origin/pkg/quota/admission/apis/runonceduration"
-	"github.com/openshift/origin/pkg/quota/admission/apis/runonceduration/validation"
+	"github.com/openshift/origin/pkg/quota/admission/runonceduration/api"
+	"github.com/openshift/origin/pkg/quota/admission/runonceduration/api/validation"
 )
 
 func Register(plugins *admission.Plugins) {
@@ -34,7 +34,7 @@ func Register(plugins *admission.Plugins) {
 		})
 }
 
-func readConfig(reader io.Reader) (*runonceduration.RunOnceDurationConfig, error) {
+func readConfig(reader io.Reader) (*api.RunOnceDurationConfig, error) {
 	obj, err := configlatest.ReadYAML(reader)
 	if err != nil {
 		return nil, err
@@ -42,7 +42,7 @@ func readConfig(reader io.Reader) (*runonceduration.RunOnceDurationConfig, error
 	if obj == nil {
 		return nil, nil
 	}
-	config, ok := obj.(*runonceduration.RunOnceDurationConfig)
+	config, ok := obj.(*api.RunOnceDurationConfig)
 	if !ok {
 		return nil, fmt.Errorf("unexpected config object %#v", obj)
 	}
@@ -54,7 +54,7 @@ func readConfig(reader io.Reader) (*runonceduration.RunOnceDurationConfig, error
 }
 
 // NewRunOnceDuration creates a new RunOnceDuration admission plugin
-func NewRunOnceDuration(config *runonceduration.RunOnceDurationConfig) admission.Interface {
+func NewRunOnceDuration(config *api.RunOnceDurationConfig) admission.Interface {
 	return &runOnceDuration{
 		Handler: admission.NewHandler(admission.Create),
 		config:  config,
@@ -63,7 +63,7 @@ func NewRunOnceDuration(config *runonceduration.RunOnceDurationConfig) admission
 
 type runOnceDuration struct {
 	*admission.Handler
-	config *runonceduration.RunOnceDurationConfig
+	config *api.RunOnceDurationConfig
 	cache  *projectcache.ProjectCache
 }
 
@@ -105,7 +105,7 @@ func (a *runOnceDuration) SetProjectCache(cache *projectcache.ProjectCache) {
 	a.cache = cache
 }
 
-func (a *runOnceDuration) ValidateInitialization() error {
+func (a *runOnceDuration) Validate() error {
 	if a.cache == nil {
 		return errors.New("RunOnceDuration plugin requires a project cache")
 	}
@@ -120,7 +120,7 @@ func (a *runOnceDuration) applyProjectAnnotationLimit(namespace string, pod *kap
 	if ns.Annotations == nil {
 		return false, nil
 	}
-	limit, hasLimit := ns.Annotations[runonceduration.ActiveDeadlineSecondsLimitAnnotation]
+	limit, hasLimit := ns.Annotations[api.ActiveDeadlineSecondsLimitAnnotation]
 	if !hasLimit {
 		return false, nil
 	}

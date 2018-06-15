@@ -13,7 +13,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/watch"
 	clientgotesting "k8s.io/client-go/testing"
-	kapi "k8s.io/kubernetes/pkg/apis/core"
+	kapi "k8s.io/kubernetes/pkg/api"
 	internalfake "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset/fake"
 	kinternalinformers "k8s.io/kubernetes/pkg/client/informers/informers_generated/internalversion"
 
@@ -110,7 +110,10 @@ func runFuzzer(t *testing.T) {
 
 			quota := NewQuota(name)
 			finalQuotas[name] = quota
-			copied := quota.DeepCopy()
+			copied, err := kapi.Scheme.Copy(quota)
+			if err != nil {
+				t.Fatal(err)
+			}
 			if exists {
 				quotaActions[name] = append(quotaActions[name], fmt.Sprintf("updating %v to %v", name, quota.Spec.Selector))
 				quotaWatch.Modify(copied)
@@ -146,7 +149,10 @@ func runFuzzer(t *testing.T) {
 
 			ns := NewNamespace(name)
 			finalNamespaces[name] = ns
-			copied := ns.DeepCopy()
+			copied, err := kapi.Scheme.Copy(ns)
+			if err != nil {
+				t.Fatal(err)
+			}
 			if exists {
 				namespaceActions[name] = append(namespaceActions[name], fmt.Sprintf("updating %v to %v", name, ns.Labels))
 				nsWatch.Modify(copied)

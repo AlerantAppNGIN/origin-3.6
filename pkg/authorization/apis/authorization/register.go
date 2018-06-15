@@ -17,7 +17,7 @@ var (
 	LegacySchemeBuilder    = runtime.NewSchemeBuilder(addLegacyKnownTypes)
 	AddToSchemeInCoreGroup = LegacySchemeBuilder.AddToScheme
 
-	SchemeBuilder = runtime.NewSchemeBuilder(addKnownTypes)
+	SchemeBuilder = runtime.NewSchemeBuilder(addKnownTypes, addConversionFuncs)
 	AddToScheme   = SchemeBuilder.AddToScheme
 )
 
@@ -42,11 +42,27 @@ func LegacyResource(resource string) schema.GroupResource {
 	return LegacySchemeGroupVersion.WithResource(resource).GroupResource()
 }
 
+// IsKindOrLegacy checks if the provided GroupKind matches with the given kind by looking
+// up the API group and also the legacy API.
+func IsKindOrLegacy(kind string, gk schema.GroupKind) bool {
+	return gk == Kind(kind) || gk == LegacyKind(kind)
+}
+
+// IsResourceOrLegacy checks if the provided GroupResources matches with the given
+// resource by looking up the API group and also the legacy API.
+func IsResourceOrLegacy(resource string, gr schema.GroupResource) bool {
+	return gr == Resource(resource) || gr == LegacyResource(resource)
+}
+
 // Adds the list of known types to api.Scheme.
 func addKnownTypes(scheme *runtime.Scheme) error {
 	scheme.AddKnownTypes(SchemeGroupVersion,
 		&Role{},
 		&RoleBinding{},
+		&Policy{},
+		&PolicyBinding{},
+		&PolicyList{},
+		&PolicyBindingList{},
 		&RoleBindingList{},
 		&RoleList{},
 
@@ -62,6 +78,10 @@ func addKnownTypes(scheme *runtime.Scheme) error {
 
 		&ClusterRole{},
 		&ClusterRoleBinding{},
+		&ClusterPolicy{},
+		&ClusterPolicyBinding{},
+		&ClusterPolicyList{},
+		&ClusterPolicyBindingList{},
 		&ClusterRoleBindingList{},
 		&ClusterRoleList{},
 
@@ -75,6 +95,10 @@ func addLegacyKnownTypes(scheme *runtime.Scheme) error {
 	types := []runtime.Object{
 		&Role{},
 		&RoleBinding{},
+		&Policy{},
+		&PolicyBinding{},
+		&PolicyList{},
+		&PolicyBindingList{},
 		&RoleBindingList{},
 		&RoleList{},
 
@@ -90,6 +114,10 @@ func addLegacyKnownTypes(scheme *runtime.Scheme) error {
 
 		&ClusterRole{},
 		&ClusterRoleBinding{},
+		&ClusterPolicy{},
+		&ClusterPolicyBinding{},
+		&ClusterPolicyList{},
+		&ClusterPolicyBindingList{},
 		&ClusterRoleBindingList{},
 		&ClusterRoleList{},
 

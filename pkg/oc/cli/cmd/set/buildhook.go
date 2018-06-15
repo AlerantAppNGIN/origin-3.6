@@ -14,7 +14,8 @@ import (
 	"k8s.io/kubernetes/pkg/kubectl/resource"
 
 	buildapi "github.com/openshift/origin/pkg/build/apis/build"
-	"github.com/openshift/origin/pkg/oc/cli/util/clientcmd"
+	cmdutil "github.com/openshift/origin/pkg/cmd/util"
+	"github.com/openshift/origin/pkg/cmd/util/clientcmd"
 )
 
 var (
@@ -94,7 +95,7 @@ func NewCmdBuildHook(fullName string, f *clientcmd.Factory, out, errOut io.Write
 			kcmdutil.CheckErr(options.Validate())
 			if err := options.Run(); err != nil {
 				// TODO: move me to kcmdutil
-				if err == kcmdutil.ErrExit {
+				if err == cmdutil.ErrExit {
 					os.Exit(1)
 				}
 				kcmdutil.CheckErr(err)
@@ -126,7 +127,7 @@ func (o *BuildHookOptions) Complete(f *clientcmd.Factory, cmd *cobra.Command, ar
 		o.Command = args[i:]
 	}
 	if len(o.Filenames) == 0 && len(args) < 1 {
-		return kcmdutil.UsageErrorf(cmd, "one or more build configs must be specified as <name> or <resource>/<name>")
+		return kcmdutil.UsageError(cmd, "one or more build configs must be specified as <name> or <resource>/<name>")
 	}
 
 	cmdNamespace, explicit, err := f.DefaultNamespace()
@@ -137,19 +138,17 @@ func (o *BuildHookOptions) Complete(f *clientcmd.Factory, cmd *cobra.Command, ar
 	o.Cmd = cmd
 
 	mapper, _ := f.Object()
-	o.Builder = f.NewBuilder().
-		Internal().
-		LocalParam(o.Local).
+	o.Builder = f.NewBuilder(!o.Local).
 		ContinueOnError().
 		NamespaceParam(cmdNamespace).DefaultNamespace().
 		FilenameParam(explicit, &resource.FilenameOptions{Recursive: false, Filenames: o.Filenames}).
-		LabelSelectorParam(o.Selector).
+		SelectorParam(o.Selector).
 		ResourceNames("buildconfigs", resources...).
 		Flatten()
 
 	if !o.Local {
 		o.Builder = o.Builder.
-			LabelSelectorParam(o.Selector).
+			SelectorParam(o.Selector).
 			ResourceNames("buildconfigs", resources...)
 		if o.All {
 			o.Builder.ResourceTypes("buildconfigs").SelectAllParam(o.All)
@@ -161,7 +160,7 @@ func (o *BuildHookOptions) Complete(f *clientcmd.Factory, cmd *cobra.Command, ar
 		return f.PrintResourceInfos(cmd, o.Local, infos, o.Out)
 	}
 
-	o.Encoder = kcmdutil.InternalVersionJSONEncoder()
+	o.Encoder = f.JSONEncoder()
 	o.ShortOutput = kcmdutil.GetFlagString(cmd, "output") == "name"
 	o.Mapper = mapper
 
@@ -244,10 +243,10 @@ func (o *BuildHookOptions) Run() error {
 		}
 
 		info.Refresh(obj, true)
-		kcmdutil.PrintSuccess(o.ShortOutput, o.Out, info.Object, false, "updated")
+		kcmdutil.PrintSuccess(o.Mapper, o.ShortOutput, o.Out, info.Mapping.Resource, info.Name, false, "updated")
 	}
 	if failed {
-		return kcmdutil.ErrExit
+		return cmdutil.ErrExit
 	}
 	return nil
 }

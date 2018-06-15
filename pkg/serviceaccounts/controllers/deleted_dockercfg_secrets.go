@@ -6,14 +6,14 @@ import (
 
 	"github.com/golang/glog"
 
-	"k8s.io/api/core/v1"
 	kapierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
-	informers "k8s.io/client-go/informers/core/v1"
-	kclientset "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
+	"k8s.io/kubernetes/pkg/api/v1"
+	kclientset "k8s.io/kubernetes/pkg/client/clientset_generated/clientset"
+	informers "k8s.io/kubernetes/pkg/client/informers/informers_generated/externalversions/core/v1"
 )
 
 // NumServiceAccountUpdateRetries controls the number of times we will retry on conflict errors.
@@ -65,16 +65,15 @@ type DockercfgDeletedController struct {
 // Run processes the queue.
 func (e *DockercfgDeletedController) Run(stopCh <-chan struct{}) {
 	defer utilruntime.HandleCrash()
-	glog.Infof("Starting DockercfgDeletedController controller")
-	defer glog.Infof("Shutting down DockercfgDeletedController controller")
 
 	// Wait for the stores to fill
 	if !cache.WaitForCacheSync(stopCh, e.secretController.HasSynced) {
 		return
 	}
-	glog.V(1).Infof("caches synced")
 
+	glog.V(5).Infof("Worker started")
 	<-stopCh
+	glog.V(1).Infof("Shutting down")
 }
 
 // secretDeleted reacts to a Secret being deleted by looking to see if it's a dockercfg secret for a service account, in which case it

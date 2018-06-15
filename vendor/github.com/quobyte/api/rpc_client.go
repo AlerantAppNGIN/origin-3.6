@@ -7,7 +7,6 @@ import (
 	"io"
 	"math/rand"
 	"net/http"
-	"reflect"
 	"strconv"
 )
 
@@ -89,11 +88,6 @@ func decodeResponse(ioReader io.Reader, reply interface{}) error {
 }
 
 func (client QuobyteClient) sendRequest(method string, request interface{}, response interface{}) error {
-	etype := reflect.ValueOf(request).Elem()
-	field := etype.FieldByName("RetryPolicy")
-	if field.IsValid() {
-		field.SetString(client.GetAPIRetryPolicy())
-	}
 	message, err := encodeRequest(method, request)
 	if err != nil {
 		return err

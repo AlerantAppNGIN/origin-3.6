@@ -10,7 +10,6 @@ import (
 	o "github.com/onsi/gomega"
 
 	"k8s.io/apimachinery/pkg/util/wait"
-	e2e "k8s.io/kubernetes/test/e2e/framework"
 
 	exutil "github.com/openshift/origin/test/extended/util"
 )
@@ -24,8 +23,8 @@ type JobMon struct {
 }
 
 const (
-	EnableJenkinsMemoryStats = "ENABLE_JENKINS_MEMORY_MONITORING"
-	EnableJenkinsGCStats     = "ENABLE_JENKINS_GC_MONITORING"
+	DisableJenkinsMemoryStats = "DISABLE_JENKINS_MEMORY_MONITORING"
+	DisableJenkinsGCStats     = "DISABLE_JENKINS_GC_MONITORING"
 )
 
 // Designed to match if RSS memory is greater than 500000000  (i.e. > 476MB)
@@ -39,7 +38,7 @@ func (jmon *JobMon) Await(timeout time.Duration) error {
 		buildNumber, err := jmon.j.GetJobBuildNumber(jmon.jobName, time.Minute)
 		o.ExpectWithOffset(1, err).NotTo(o.HaveOccurred())
 
-		e2e.Logf("Checking build number for job %q current[%v] vs last[%v]", jmon.jobName, buildNumber, jmon.lastBuildNumber)
+		ginkgolog("Checking build number for job %q current[%v] vs last[%v]", jmon.jobName, buildNumber, jmon.lastBuildNumber)
 		if buildNumber == jmon.lastBuildNumber {
 			return false, nil
 		}
@@ -53,23 +52,23 @@ func (jmon *JobMon) Await(timeout time.Duration) error {
 
 		body = strings.ToLower(body)
 		if strings.Contains(body, "\"building\":true") {
-			e2e.Logf("Jenkins job %q still building:\n%s\n\n", jmon.jobName, body)
+			ginkgolog("Jenkins job %q still building:\n%s\n\n", jmon.jobName, body)
 			return false, nil
 		}
 
 		if strings.Contains(body, "\"result\":null") {
-			e2e.Logf("Jenkins job %q still building result:\n%s\n\n", jmon.jobName, body)
+			ginkgolog("Jenkins job %q still building result:\n%s\n\n", jmon.jobName, body)
 			return false, nil
 		}
 
-		e2e.Logf("Jenkins job %q build complete:\n%s\n\n", jmon.jobName, body)
+		ginkgolog("Jenkins job %q build complete:\n%s\n\n", jmon.jobName, body)
 		// If Jenkins job has completed, output its log
 		body, status, err = jmon.j.GetResource("job/%s/%s/consoleText", jmon.jobName, jmon.buildNumber)
 		if err != nil || status != 200 {
-			e2e.Logf("Unable to retrieve job log from Jenkins.\nStatus code: %d\nError: %v\nResponse Text: %s\n", status, err, body)
+			ginkgolog("Unable to retrieve job log from Jenkins.\nStatus code: %d\nError: %v\nResponse Text: %s\n", status, err, body)
 			return true, nil
 		}
-		e2e.Logf("Jenkins job %q log:\n%s\n\n", jmon.jobName, body)
+		ginkgolog("Jenkins job %q log:\n%s\n\n", jmon.jobName, body)
 		return true, nil
 	})
 	return err

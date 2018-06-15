@@ -17,7 +17,7 @@ func (s *Server) HandleInfoRequest(w *Response, r *http.Request) *InfoRequest {
 	r.ParseForm()
 	bearer := CheckBearerAuth(r)
 	if bearer == nil {
-		s.setErrorAndLog(w, E_INVALID_REQUEST, nil, "handle_info_request=%s", "bearer is nil")
+		w.SetError(E_INVALID_REQUEST, "")
 		return nil
 	}
 
@@ -27,7 +27,7 @@ func (s *Server) HandleInfoRequest(w *Response, r *http.Request) *InfoRequest {
 	}
 
 	if ret.Code == "" {
-		s.setErrorAndLog(w, E_INVALID_REQUEST, nil, "handle_info_request=%s", "code is nil")
+		w.SetError(E_INVALID_REQUEST, "")
 		return nil
 	}
 
@@ -36,23 +36,24 @@ func (s *Server) HandleInfoRequest(w *Response, r *http.Request) *InfoRequest {
 	// load access data
 	ret.AccessData, err = w.Storage.LoadAccess(ret.Code)
 	if err != nil {
-		s.setErrorAndLog(w, E_INVALID_REQUEST, err, "handle_info_request=%s", "failed to load access data")
+		w.SetError(E_INVALID_REQUEST, "")
+		w.InternalError = err
 		return nil
 	}
 	if ret.AccessData == nil {
-		s.setErrorAndLog(w, E_INVALID_REQUEST, nil, "handle_info_request=%s", "access data is nil")
+		w.SetError(E_INVALID_REQUEST, "")
 		return nil
 	}
 	if ret.AccessData.Client == nil {
-		s.setErrorAndLog(w, E_UNAUTHORIZED_CLIENT, nil, "handle_info_request=%s", "access data client is nil")
+		w.SetError(E_UNAUTHORIZED_CLIENT, "")
 		return nil
 	}
 	if ret.AccessData.Client.GetRedirectUri() == "" {
-		s.setErrorAndLog(w, E_UNAUTHORIZED_CLIENT, nil, "handle_info_request=%s", "access data client redirect uri is empty")
+		w.SetError(E_UNAUTHORIZED_CLIENT, "")
 		return nil
 	}
 	if ret.AccessData.IsExpiredAt(s.Now()) {
-		s.setErrorAndLog(w, E_INVALID_GRANT, nil, "handle_info_request=%s", "access data is expired")
+		w.SetError(E_INVALID_GRANT, "")
 		return nil
 	}
 

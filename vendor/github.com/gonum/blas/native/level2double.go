@@ -6,7 +6,7 @@ package native
 
 import (
 	"github.com/gonum/blas"
-	"github.com/gonum/internal/asm/f64"
+	"github.com/gonum/internal/asm"
 )
 
 var _ blas.Float64Level2 = Implementation{}
@@ -84,13 +84,13 @@ func (Implementation) Dgemv(tA blas.Transpose, m, n int, alpha float64, a []floa
 	if tA == blas.NoTrans {
 		if incX == 1 && incY == 1 {
 			for i := 0; i < m; i++ {
-				y[i] += alpha * f64.DotUnitary(a[lda*i:lda*i+n], x)
+				y[i] += alpha * asm.DdotUnitary(a[lda*i:lda*i+n], x)
 			}
 			return
 		}
 		iy := ky
 		for i := 0; i < m; i++ {
-			y[iy] += alpha * f64.DotInc(x, a[lda*i:lda*i+n], uintptr(n), uintptr(incX), 1, uintptr(kx), 0)
+			y[iy] += alpha * asm.DdotInc(x, a[lda*i:lda*i+n], uintptr(n), uintptr(incX), 1, uintptr(kx), 0)
 			iy += incY
 		}
 		return
@@ -100,7 +100,7 @@ func (Implementation) Dgemv(tA blas.Transpose, m, n int, alpha float64, a []floa
 		for i := 0; i < m; i++ {
 			tmp := alpha * x[i]
 			if tmp != 0 {
-				f64.AxpyUnitaryTo(y, tmp, a[lda*i:lda*i+n], y)
+				asm.DaxpyUnitary(tmp, a[lda*i:lda*i+n], y, y)
 			}
 		}
 		return
@@ -109,7 +109,7 @@ func (Implementation) Dgemv(tA blas.Transpose, m, n int, alpha float64, a []floa
 	for i := 0; i < m; i++ {
 		tmp := alpha * x[ix]
 		if tmp != 0 {
-			f64.AxpyInc(tmp, a[lda*i:lda*i+n], y, uintptr(n), 1, uintptr(incY), 0, uintptr(ky))
+			asm.DaxpyInc(tmp, a[lda*i:lda*i+n], y, uintptr(n), 1, uintptr(incY), 0, uintptr(ky))
 		}
 		ix += incX
 	}
@@ -170,7 +170,7 @@ func (Implementation) Dger(m, n int, alpha float64, x []float64, incX int, y []f
 			tmp := alpha * xv
 			if tmp != 0 {
 				atmp := a[i*lda : i*lda+n]
-				f64.AxpyUnitaryTo(atmp, tmp, y, atmp)
+				asm.DaxpyUnitary(tmp, y, atmp, atmp)
 			}
 		}
 		return
@@ -180,7 +180,7 @@ func (Implementation) Dger(m, n int, alpha float64, x []float64, incX int, y []f
 	for i := 0; i < m; i++ {
 		tmp := alpha * x[ix]
 		if tmp != 0 {
-			f64.AxpyInc(tmp, y, a[i*lda:i*lda+n], uintptr(n), uintptr(incY), 1, uintptr(ky), 0)
+			asm.DaxpyInc(tmp, y, a[i*lda:i*lda+n], uintptr(n), uintptr(incY), 1, uintptr(ky), 0)
 		}
 		ix += incX
 	}
@@ -365,9 +365,7 @@ func (Implementation) Dtrmv(ul blas.Uplo, tA blas.Transpose, d blas.Diag, n int,
 	}
 	nonUnit := d != blas.Unit
 	if n == 1 {
-		if nonUnit {
-			x[0] *= a[0]
-		}
+		x[0] *= a[0]
 		return
 	}
 	var kx int
@@ -378,55 +376,67 @@ func (Implementation) Dtrmv(ul blas.Uplo, tA blas.Transpose, d blas.Diag, n int,
 		if ul == blas.Upper {
 			if incX == 1 {
 				for i := 0; i < n; i++ {
-					ilda := i * lda
 					var tmp float64
 					if nonUnit {
-						tmp = a[ilda+i] * x[i]
+						tmp = a[i*lda+i] * x[i]
 					} else {
 						tmp = x[i]
 					}
 					xtmp := x[i+1:]
-					x[i] = tmp + f64.DotUnitary(a[ilda+i+1:ilda+n], xtmp)
+					for j, v := range a[i*lda+i+1 : i*lda+n] {
+						tmp += v * xtmp[j]
+					}
+					x[i] = tmp
 				}
 				return
 			}
 			ix := kx
 			for i := 0; i < n; i++ {
-				ilda := i * lda
 				var tmp float64
 				if nonUnit {
-					tmp = a[ilda+i] * x[ix]
+					tmp = a[i*lda+i] * x[ix]
 				} else {
 					tmp = x[ix]
 				}
-				x[ix] = tmp + f64.DotInc(x, a[ilda+i+1:ilda+n], uintptr(n-i-1), uintptr(incX), 1, uintptr(ix+incX), 0)
+				jx := ix + incX
+				for _, v := range a[i*lda+i+1 : i*lda+n] {
+					tmp += v * x[jx]
+					jx += incX
+				}
+				x[ix] = tmp
 				ix += incX
 			}
 			return
 		}
 		if incX == 1 {
 			for i := n - 1; i >= 0; i-- {
-				ilda := i * lda
 				var tmp float64
 				if nonUnit {
-					tmp += a[ilda+i] * x[i]
+					tmp += a[i*lda+i] * x[i]
 				} else {
 					tmp = x[i]
 				}
-				x[i] = tmp + f64.DotUnitary(a[ilda:ilda+i], x)
+				for j, v := range a[i*lda : i*lda+i] {
+					tmp += v * x[j]
+				}
+				x[i] = tmp
 			}
 			return
 		}
 		ix := kx + (n-1)*incX
 		for i := n - 1; i >= 0; i-- {
-			ilda := i * lda
 			var tmp float64
 			if nonUnit {
-				tmp = a[ilda+i] * x[ix]
+				tmp += a[i*lda+i] * x[ix]
 			} else {
 				tmp = x[ix]
 			}
-			x[ix] = tmp + f64.DotInc(x, a[ilda:ilda+i], uintptr(i), uintptr(incX), 1, uintptr(kx), 0)
+			jx := kx
+			for _, v := range a[i*lda : i*lda+i] {
+				tmp += v * x[jx]
+				jx += incX
+			}
+			x[ix] = tmp
 			ix -= incX
 		}
 		return
@@ -435,22 +445,29 @@ func (Implementation) Dtrmv(ul blas.Uplo, tA blas.Transpose, d blas.Diag, n int,
 	if ul == blas.Upper {
 		if incX == 1 {
 			for i := n - 1; i >= 0; i-- {
-				ilda := i * lda
 				xi := x[i]
-				f64.AxpyUnitary(xi, a[ilda+i+1:ilda+n], x[i+1:n])
+				atmp := a[i*lda+i+1 : i*lda+n]
+				xtmp := x[i+1 : n]
+				for j, v := range atmp {
+					xtmp[j] += xi * v
+				}
 				if nonUnit {
-					x[i] *= a[ilda+i]
+					x[i] *= a[i*lda+i]
 				}
 			}
 			return
 		}
 		ix := kx + (n-1)*incX
 		for i := n - 1; i >= 0; i-- {
-			ilda := i * lda
 			xi := x[ix]
-			f64.AxpyInc(xi, a[ilda+i+1:ilda+n], x, uintptr(n-i-1), 1, uintptr(incX), 0, uintptr(kx+(i+1)*incX))
+			jx := kx + (i+1)*incX
+			atmp := a[i*lda+i+1 : i*lda+n]
+			for _, v := range atmp {
+				x[jx] += xi * v
+				jx += incX
+			}
 			if nonUnit {
-				x[ix] *= a[ilda+i]
+				x[ix] *= a[i*lda+i]
 			}
 			ix -= incX
 		}
@@ -458,9 +475,11 @@ func (Implementation) Dtrmv(ul blas.Uplo, tA blas.Transpose, d blas.Diag, n int,
 	}
 	if incX == 1 {
 		for i := 0; i < n; i++ {
-			ilda := i * lda
 			xi := x[i]
-			f64.AxpyUnitary(xi, a[ilda:ilda+i], x)
+			atmp := a[i*lda : i*lda+i]
+			for j, v := range atmp {
+				x[j] += xi * v
+			}
 			if nonUnit {
 				x[i] *= a[i*lda+i]
 			}
@@ -469,11 +488,15 @@ func (Implementation) Dtrmv(ul blas.Uplo, tA blas.Transpose, d blas.Diag, n int,
 	}
 	ix := kx
 	for i := 0; i < n; i++ {
-		ilda := i * lda
 		xi := x[ix]
-		f64.AxpyInc(xi, a[ilda:ilda+i], x, uintptr(i), 1, uintptr(incX), 0, uintptr(kx))
+		jx := kx
+		atmp := a[i*lda : i*lda+i]
+		for _, v := range atmp {
+			x[jx] += xi * v
+			jx += incX
+		}
 		if nonUnit {
-			x[ix] *= a[ilda+i]
+			x[ix] *= a[i*lda+i]
 		}
 		ix += incX
 	}
@@ -666,7 +689,7 @@ func (Implementation) Dsymv(ul blas.Uplo, n int, alpha float64, a []float64, lda
 	if n < 0 {
 		panic(negativeN)
 	}
-	if lda > 1 && lda < n {
+	if lda > 1 && lda > n {
 		panic(badLdA)
 	}
 	if incX == 0 {
@@ -2131,9 +2154,8 @@ func (Implementation) Dspr(ul blas.Uplo, n int, alpha float64, x []float64, incX
 }
 
 // Dspr2 performs the symmetric rank-2 update
-//  A += alpha * x * y^T + alpha * y * x^T,
-// where A is an n×n symmetric matrix in packed format, x and y are vectors,
-// and alpha is a scalar.
+//  a += alpha * x * y^T + alpha * y * x^T
+// where a is an n×n symmetric matrix in packed format and x and y are vectors.
 func (Implementation) Dspr2(ul blas.Uplo, n int, alpha float64, x []float64, incX int, y []float64, incY int, ap []float64) {
 	if ul != blas.Lower && ul != blas.Upper {
 		panic(badUplo)

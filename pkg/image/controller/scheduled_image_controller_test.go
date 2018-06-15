@@ -5,11 +5,12 @@ import (
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	kapi "k8s.io/kubernetes/pkg/apis/core"
+	kapi "k8s.io/kubernetes/pkg/api"
 
+	"github.com/openshift/origin/pkg/client/testclient"
 	imageapi "github.com/openshift/origin/pkg/image/apis/image"
 	imageinformer "github.com/openshift/origin/pkg/image/generated/informers/internalversion"
-	imageclient "github.com/openshift/origin/pkg/image/generated/internalclientset/fake"
+	imageinternal "github.com/openshift/origin/pkg/image/generated/internalclientset/fake"
 
 	_ "github.com/openshift/origin/pkg/api/install"
 )
@@ -38,9 +39,9 @@ func TestScheduledImport(t *testing.T) {
 		},
 	}
 
-	imageInformers := imageinformer.NewSharedInformerFactory(imageclient.NewSimpleClientset(), 0)
+	imageInformers := imageinformer.NewSharedInformerFactory(imageinternal.NewSimpleClientset(), 0)
 	isInformer := imageInformers.Image().InternalVersion().ImageStreams()
-	fake := imageclient.NewSimpleClientset()
+	fake := testclient.NewSimpleFake()
 	sched := NewScheduledImageStreamController(fake, isInformer, ScheduledImageStreamControllerOptions{
 		Enabled:           true,
 		Resync:            1 * time.Second,
@@ -57,9 +58,8 @@ func TestScheduledImport(t *testing.T) {
 	}
 
 	// encountering a not found error for image streams should drop the stream
-	for i := 0; i < 3; i++ { // loop all the buckets (2 + the additional internal one)
-		sched.scheduler.RunOnce()
-	}
+	sched.scheduler.RunOnce() // we need to run it twice since we have 2 buckets
+	sched.scheduler.RunOnce()
 	if sched.scheduler.Len() != 0 {
 		t.Fatalf("should have removed item in scheduler: %#v", sched.scheduler)
 	}
@@ -73,9 +73,8 @@ func TestScheduledImport(t *testing.T) {
 	isInformer.Informer().GetIndexer().Add(stream)
 
 	// run a background import
-	for i := 0; i < 3; i++ { // loop all the buckets (2 + the additional internal one)
-		sched.scheduler.RunOnce()
-	}
+	sched.scheduler.RunOnce() // we need to run it twice since we have 2 buckets
+	sched.scheduler.RunOnce()
 	if sched.scheduler.Len() != 1 {
 		t.Fatalf("should have left item in scheduler: %#v", sched.scheduler)
 	}
@@ -87,9 +86,8 @@ func TestScheduledImport(t *testing.T) {
 	sched.enabled = false
 	fake.ClearActions()
 
-	for i := 0; i < 3; i++ { // loop all the buckets (2 + the additional internal one)
-		sched.scheduler.RunOnce()
-	}
+	sched.scheduler.RunOnce() // we need to run it twice since we have 2 buckets
+	sched.scheduler.RunOnce()
 	if sched.scheduler.Len() != 0 {
 		t.Fatalf("should have removed item from scheduler: %#v", sched.scheduler)
 	}

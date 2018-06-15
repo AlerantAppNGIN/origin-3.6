@@ -8,7 +8,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apiserver/pkg/admission"
 	genericapiserver "k8s.io/apiserver/pkg/server"
-	kubeapiserver "k8s.io/kubernetes/pkg/kubeapiserver/options"
+	kubeapiserver "k8s.io/kubernetes/cmd/kube-apiserver/app"
 
 	// Admission control plug-ins used by OpenShift
 	authorizationrestrictusers "github.com/openshift/origin/pkg/authorization/admission/restrictusers"
@@ -28,19 +28,17 @@ import (
 	securityadmission "github.com/openshift/origin/pkg/security/admission"
 	serviceadmit "github.com/openshift/origin/pkg/service/admission"
 
-	"k8s.io/kubernetes/plugin/pkg/admission/noderestriction"
-	expandpvcadmission "k8s.io/kubernetes/plugin/pkg/admission/persistentvolume/resize"
-	storageclassdefaultadmission "k8s.io/kubernetes/plugin/pkg/admission/storage/storageclass/setdefault"
+	storageclassdefaultadmission "k8s.io/kubernetes/plugin/pkg/admission/storageclass/setdefault"
 
-	imagepolicyapi "github.com/openshift/origin/pkg/image/admission/apis/imagepolicy"
-	overrideapi "github.com/openshift/origin/pkg/quota/admission/apis/clusterresourceoverride"
+	imagepolicyapi "github.com/openshift/origin/pkg/image/admission/imagepolicy/api"
+	overrideapi "github.com/openshift/origin/pkg/quota/admission/clusterresourceoverride/api"
 	"k8s.io/apiserver/pkg/admission/plugin/namespace/lifecycle"
 
-	configlatest "github.com/openshift/origin/pkg/cmd/server/apis/config/latest"
+	configlatest "github.com/openshift/origin/pkg/cmd/server/api/latest"
 )
 
 // TODO register this per apiserver or at least per process
-var OriginAdmissionPlugins = admission.NewPlugins()
+var OriginAdmissionPlugins = &admission.Plugins{}
 
 func init() {
 	RegisterAllAdmissionPlugins(OriginAdmissionPlugins)
@@ -50,10 +48,6 @@ func init() {
 func RegisterAllAdmissionPlugins(plugins *admission.Plugins) {
 	kubeapiserver.RegisterAllAdmissionPlugins(plugins)
 	genericapiserver.RegisterAllAdmissionPlugins(plugins)
-	registerOpenshiftAdmissionPlugins(plugins)
-}
-
-func registerOpenshiftAdmissionPlugins(plugins *admission.Plugins) {
 	authorizationrestrictusers.Register(plugins)
 	buildjenkinsbootstrapper.Register(plugins)
 	buildsecretinjector.Register(plugins)
@@ -89,14 +83,11 @@ var (
 		serviceadmit.RestrictedEndpointsPluginName,
 		"LimitRanger",
 		"ServiceAccount",
-		noderestriction.PluginName,
-		securityadmission.PluginName,
-		"StorageObjectInUseProtection",
+		"SecurityContextConstraint",
 		"SCCExecRestrictions",
 		"PersistentVolumeLabel",
 		"DefaultStorageClass",
 		"OwnerReferencesPermissionEnforcement",
-		"PodTolerationRestriction",
 		"ResourceQuota",
 		"openshift.io/ClusterResourceQuota",
 		"openshift.io/IngressAdmission",
@@ -116,24 +107,12 @@ var (
 		"LimitPodHardAntiAffinityTopology",
 		"DefaultTolerationSeconds",
 		"PodPreset", // default to off while PodPreset is alpha
-		"EventRateLimit",
-		"PodSecurityPolicy",
-		"Priority",
-		"Initializers",
-		"ValidatingAdmissionWebhook",
-		"MutatingAdmissionWebhook",
-		"ExtendedResourceToleration",
-		expandpvcadmission.PluginName,
 
-		// these should usually be off.
-		"AlwaysAdmit",
-		"AlwaysDeny",
-		"DenyEscalatingExec",
-		"DenyExecOnPrivileged",
-		"InitialResources",
-		"NamespaceAutoProvision",
-		"NamespaceExists",
-		"SecurityContextDeny",
+		// these are new, reassess post-rebase
+		"Initializers",
+		"GenericAdmissionWebhook",
+		"NodeRestriction",
+		"PodTolerationRestriction",
 	)
 )
 

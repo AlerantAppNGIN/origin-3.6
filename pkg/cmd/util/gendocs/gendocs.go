@@ -12,8 +12,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
-	kapi "k8s.io/kubernetes/pkg/apis/core"
-	kcmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
+	kapi "k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/printers"
 )
 
@@ -44,12 +43,13 @@ func GenDocs(cmd *cobra.Command, filename string) error {
 		items = append(items, example)
 	}
 
-	printOpts := kcmdutil.ExtractCmdPrintOptions(cmd, false)
-	printOpts.OutputFormatType = "template"
-	printOpts.OutputFormatArgument = string(template)
-
 	printer, err := printers.GetStandardPrinter(
-		nil, nil, nil, *printOpts)
+		&printers.OutputOptions{
+			FmtType:          "template",
+			FmtArg:           string(template),
+			AllowMissingKeys: false,
+		},
+		false, nil, nil, nil, nil, printers.PrintOptions{})
 	if err != nil {
 		return err
 	}

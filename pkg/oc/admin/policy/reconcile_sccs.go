@@ -12,19 +12,18 @@ import (
 	kapierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
-	"k8s.io/kubernetes/pkg/api/legacyscheme"
-	kapi "k8s.io/kubernetes/pkg/apis/core"
-	kapihelper "k8s.io/kubernetes/pkg/apis/core/helper"
+	kapi "k8s.io/kubernetes/pkg/api"
+	kapihelper "k8s.io/kubernetes/pkg/api/helper"
 	kcoreclient "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset/typed/core/internalversion"
 	"k8s.io/kubernetes/pkg/kubectl/cmd/templates"
 	kcmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
 
 	"github.com/openshift/origin/pkg/cmd/server/bootstrappolicy"
-	"github.com/openshift/origin/pkg/cmd/util/print"
-	"github.com/openshift/origin/pkg/oc/cli/util/clientcmd"
+	cmdutil "github.com/openshift/origin/pkg/cmd/util"
+
+	"github.com/openshift/origin/pkg/cmd/util/clientcmd"
 	securityapi "github.com/openshift/origin/pkg/security/apis/security"
-	securityclientinternal "github.com/openshift/origin/pkg/security/generated/internalclientset"
-	securitytypedclient "github.com/openshift/origin/pkg/security/generated/internalclientset/typed/security/internalversion"
+	"github.com/openshift/origin/pkg/security/legacyclient"
 )
 
 // ReconcileSCCRecommendedName is the recommended command name
@@ -44,7 +43,7 @@ type ReconcileSCCOptions struct {
 	Out    io.Writer
 	Output string
 
-	SCCClient securitytypedclient.SecurityContextConstraintsInterface
+	SCCClient legacyclient.SecurityContextConstraintInterface
 	NSClient  kcoreclient.NamespaceInterface
 }
 
@@ -96,7 +95,7 @@ func NewCmdReconcileSCC(name, fullName string, f *clientcmd.Factory, out io.Writ
 				kcmdutil.CheckErr(err)
 			}
 			if err := o.Validate(); err != nil {
-				kcmdutil.CheckErr(kcmdutil.UsageErrorf(cmd, err.Error()))
+				kcmdutil.CheckErr(kcmdutil.UsageError(cmd, err.Error()))
 			}
 			if err := o.RunReconcileSCCs(cmd, f); err != nil {
 				kcmdutil.CheckErr(err)
@@ -115,22 +114,14 @@ func NewCmdReconcileSCC(name, fullName string, f *clientcmd.Factory, out io.Writ
 
 func (o *ReconcileSCCOptions) Complete(cmd *cobra.Command, f *clientcmd.Factory, args []string) error {
 	if len(args) != 0 {
-		return kcmdutil.UsageErrorf(cmd, "no arguments are allowed")
+		return kcmdutil.UsageError(cmd, "no arguments are allowed")
 	}
 
-	kClient, err := f.ClientSet()
+	_, kClient, err := f.Clients()
 	if err != nil {
 		return err
 	}
-	clientConfig, err := f.ClientConfig()
-	if err != nil {
-		return err
-	}
-	securityClient, err := securityclientinternal.NewForConfig(clientConfig)
-	if err != nil {
-		return err
-	}
-	o.SCCClient = securityClient.Security().SecurityContextConstraints()
+	o.SCCClient = legacyclient.NewFromClient(kClient.Core().RESTClient())
 	o.NSClient = kClient.Core().Namespaces()
 	o.Output = kcmdutil.GetFlagString(cmd, "output")
 
@@ -165,7 +156,8 @@ func (o *ReconcileSCCOptions) RunReconcileSCCs(cmd *cobra.Command, f *clientcmd.
 		for _, item := range changedSCCs {
 			list.Items = append(list.Items, item)
 		}
-		fn := print.VersionedPrintObject(legacyscheme.Scheme, legacyscheme.Registry, kcmdutil.PrintObject, cmd, o.Out)
+		mapper, _ := f.Object()
+		fn := cmdutil.VersionedPrintObject(f.PrintObject, cmd, mapper, o.Out)
 		if err := fn(list); err != nil {
 			return err
 		}
@@ -185,7 +177,8 @@ func (o *ReconcileSCCOptions) ChangedSCCs() ([]*securityapi.SecurityContextConst
 	groups, users := bootstrappolicy.GetBoostrapSCCAccess(o.InfraNamespace)
 	bootstrapSCCs := bootstrappolicy.GetBootstrapSecurityContextConstraints(groups, users)
 
-	for _, expectedSCC := range bootstrapSCCs {
+	for i := range bootstrapSCCs {
+		expectedSCC := &bootstrapSCCs[i]
 		actualSCC, err := o.SCCClient.Get(expectedSCC.Name, metav1.GetOptions{})
 		// if not found it needs to be created
 		if kapierrors.IsNotFound(err) {

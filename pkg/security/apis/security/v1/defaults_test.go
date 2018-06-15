@@ -6,15 +6,14 @@ import (
 
 	sccutil "github.com/openshift/origin/pkg/security/securitycontextconstraints/util"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/kubernetes/pkg/api/legacyscheme"
+	"k8s.io/kubernetes/pkg/api"
 
-	versioned "github.com/openshift/api/security/v1"
 	_ "github.com/openshift/origin/pkg/api/install"
-	conversionv1 "github.com/openshift/origin/pkg/security/apis/security/v1"
+	versioned "github.com/openshift/origin/pkg/security/apis/security/v1"
 )
 
 func roundTrip(t *testing.T, obj runtime.Object) runtime.Object {
-	codec := legacyscheme.Codecs.LegacyCodec(versioned.SchemeGroupVersion)
+	codec := api.Codecs.LegacyCodec(versioned.SchemeGroupVersion)
 	data, err := runtime.Encode(codec, obj)
 	if err != nil {
 		t.Errorf("%v\n %#v", err, obj)
@@ -26,7 +25,7 @@ func roundTrip(t *testing.T, obj runtime.Object) runtime.Object {
 		return nil
 	}
 	obj3 := reflect.New(reflect.TypeOf(obj).Elem()).Interface().(runtime.Object)
-	err = legacyscheme.Scheme.Convert(obj2, obj3, nil)
+	err = api.Scheme.Convert(obj2, obj3, nil)
 	if err != nil {
 		t.Errorf("%v\nSource: %#v", err, obj2)
 		return nil
@@ -124,7 +123,7 @@ func TestDefaultSCCVolumes(t *testing.T) {
 		// but since the host dir setting is false it should be all - host dir
 		"old client - default allow* fields, no volumes slice": {
 			scc:             &versioned.SecurityContextConstraints{},
-			expectedVolumes: conversionv1.StringSetToFSType(sccutil.GetAllFSTypesExcept(string(versioned.FSTypeHostPath))),
+			expectedVolumes: versioned.StringSetToFSType(sccutil.GetAllFSTypesExcept(string(versioned.FSTypeHostPath))),
 			expectedHostDir: false,
 		},
 		// this expects the volumes to default to all for an empty volume slice
@@ -156,7 +155,7 @@ func TestDefaultSCCVolumes(t *testing.T) {
 				Volumes:                  []versioned.FSType{versioned.FSTypeAll},
 				AllowHostDirVolumePlugin: false,
 			},
-			expectedVolumes: conversionv1.StringSetToFSType(sccutil.GetAllFSTypesExcept(string(versioned.FSTypeHostPath))),
+			expectedVolumes: versioned.StringSetToFSType(sccutil.GetAllFSTypesExcept(string(versioned.FSTypeHostPath))),
 			expectedHostDir: false,
 		},
 		"new client - allow* fields unset with volume slice": {

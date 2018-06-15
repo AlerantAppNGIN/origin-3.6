@@ -22,47 +22,41 @@ import (
 	"net/http"
 	"net/url"
 	"path"
-
-	"github.com/golang/glog"
 )
 
 const StaticResource = "/static/"
 
-var popper, _ = Asset("pages/assets/js/popper.min.js")
-var bootstrapJs, _ = Asset("pages/assets/js/bootstrap-4.0.0-beta.2.min.js")
+var bootstrapJs, _ = Asset("pages/assets/js/bootstrap-3.1.1.min.js")
 var containersJs, _ = Asset("pages/assets/js/containers.js")
 var gchartsJs, _ = Asset("pages/assets/js/gcharts.js")
 var googleJsapiJs, _ = Asset("pages/assets/js/google-jsapi.js")
-var jqueryJs, _ = Asset("pages/assets/js/jquery-3.0.0.min.js")
+var jqueryJs, _ = Asset("pages/assets/js/jquery-1.10.2.min.js")
 
-var bootstrapCss, _ = Asset("pages/assets/styles/bootstrap-4.0.0-beta.2.min.css")
+var bootstrapCss, _ = Asset("pages/assets/styles/bootstrap-3.1.1.min.css")
 var bootstrapThemeCss, _ = Asset("pages/assets/styles/bootstrap-theme-3.1.1.min.css")
 var containersCss, _ = Asset("pages/assets/styles/containers.css")
 
 var staticFiles = map[string][]byte{
-	"popper.min.js":                  popper,
-	"bootstrap-4.0.0-beta.2.min.css": bootstrapCss,
-	"bootstrap-4.0.0-beta.2.min.js":  bootstrapJs,
-	"bootstrap-theme-3.1.1.min.css":  bootstrapThemeCss,
-	"containers.css":                 containersCss,
-	"containers.js":                  containersJs,
-	"gcharts.js":                     gchartsJs,
-	"google-jsapi.js":                googleJsapiJs,
-	"jquery-3.0.0.min.js":            jqueryJs,
+	"bootstrap-3.1.1.min.css":       bootstrapCss,
+	"bootstrap-3.1.1.min.js":        bootstrapJs,
+	"bootstrap-theme-3.1.1.min.css": bootstrapThemeCss,
+	"containers.css":                containersCss,
+	"containers.js":                 containersJs,
+	"gcharts.js":                    gchartsJs,
+	"google-jsapi.js":               googleJsapiJs,
+	"jquery-1.10.2.min.js":          jqueryJs,
 }
 
-func HandleRequest(w http.ResponseWriter, u *url.URL) {
+func HandleRequest(w http.ResponseWriter, u *url.URL) error {
 	if len(u.Path) <= len(StaticResource) {
-		http.Error(w, fmt.Sprintf("unknown static resource %q", u.Path), http.StatusNotFound)
-		return
+		return fmt.Errorf("unknown static resource %q", u.Path)
 	}
 
 	// Get the static content if it exists.
 	resource := u.Path[len(StaticResource):]
 	content, ok := staticFiles[resource]
 	if !ok {
-		http.Error(w, fmt.Sprintf("unknown static resource %q", u.Path), http.StatusNotFound)
-		return
+		return fmt.Errorf("unknown static resource %q", resource)
 	}
 
 	// Set Content-Type if we were able to detect it.
@@ -71,7 +65,6 @@ func HandleRequest(w http.ResponseWriter, u *url.URL) {
 		w.Header().Set("Content-Type", contentType)
 	}
 
-	if _, err := w.Write(content); err != nil {
-		glog.Errorf("Failed to write response: %v", err)
-	}
+	_, err := w.Write(content)
+	return err
 }

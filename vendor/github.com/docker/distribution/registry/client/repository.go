@@ -10,17 +10,16 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/docker/distribution"
 	"github.com/docker/distribution/context"
+	"github.com/docker/distribution/digest"
 	"github.com/docker/distribution/reference"
 	"github.com/docker/distribution/registry/api/v2"
 	"github.com/docker/distribution/registry/client/transport"
 	"github.com/docker/distribution/registry/storage/cache"
 	"github.com/docker/distribution/registry/storage/cache/memory"
-	"github.com/opencontainers/go-digest"
 )
 
 // Registry provides an interface for calling Repositories, which returns a catalog of repositories.
@@ -214,35 +213,28 @@ func (t *tags) All(ctx context.Context) ([]string, error) {
 		return tags, err
 	}
 
-	for {
-		resp, err := t.client.Get(u)
+	resp, err := t.client.Get(u)
+	if err != nil {
+		return tags, err
+	}
+	defer resp.Body.Close()
+
+	if SuccessStatus(resp.StatusCode) {
+		b, err := ioutil.ReadAll(resp.Body)
 		if err != nil {
 			return tags, err
 		}
-		defer resp.Body.Close()
 
-		if SuccessStatus(resp.StatusCode) {
-			b, err := ioutil.ReadAll(resp.Body)
-			if err != nil {
-				return tags, err
-			}
-
-			tagsResponse := struct {
-				Tags []string `json:"tags"`
-			}{}
-			if err := json.Unmarshal(b, &tagsResponse); err != nil {
-				return tags, err
-			}
-			tags = append(tags, tagsResponse.Tags...)
-			if link := resp.Header.Get("Link"); link != "" {
-				u = strings.Trim(strings.Split(link, ";")[0], "<>")
-			} else {
-				return tags, nil
-			}
-		} else {
-			return tags, HandleErrorResponse(resp)
+		tagsResponse := struct {
+			Tags []string `json:"tags"`
+		}{}
+		if err := json.Unmarshal(b, &tagsResponse); err != nil {
+			return tags, err
 		}
+		tags = tagsResponse.Tags
+		return tags, nil
 	}
+	return tags, HandleErrorResponse(resp)
 }
 
 func descriptorFromResponse(response *http.Response) (distribution.Descriptor, error) {
@@ -268,7 +260,7 @@ func descriptorFromResponse(response *http.Response) (distribution.Descriptor, e
 		return desc, nil
 	}
 
-	dgst, err := digest.Parse(digestHeader)
+	dgst, err := digest.ParseDigest(digestHeader)
 	if err != nil {
 		return distribution.Descriptor{}, err
 	}
@@ -301,20 +293,18 @@ func (t *tags) Get(ctx context.Context, tag string) (distribution.Descriptor, er
 		return distribution.Descriptor{}, err
 	}
 
-	newRequest := func(method string) (*http.Response, error) {
-		req, err := http.NewRequest(method, u, nil)
-		if err != nil {
-			return nil, err
-		}
-
-		for _, t := range distribution.ManifestMediaTypes() {
-			req.Header.Add("Accept", t)
-		}
-		resp, err := t.client.Do(req)
-		return resp, err
+	req, err := http.NewRequest("HEAD", u, nil)
+	if err != nil {
+		return distribution.Descriptor{}, err
 	}
 
-	resp, err := newRequest("HEAD")
+	for _, t := range distribution.ManifestMediaTypes() {
+		req.Header.Add("Accept", t)
+	}
+
+	var attempts int
+	resp, err := t.client.Do(req)
+check:
 	if err != nil {
 		return distribution.Descriptor{}, err
 	}
@@ -323,20 +313,23 @@ func (t *tags) Get(ctx context.Context, tag string) (distribution.Descriptor, er
 	switch {
 	case resp.StatusCode >= 200 && resp.StatusCode < 400:
 		return descriptorFromResponse(resp)
-	default:
-		// if the response is an error - there will be no body to decode.
-		// Issue a GET request:
-		//   - for data from a server that does not handle HEAD
-		//   - to get error details in case of a failure
-		resp, err = newRequest("GET")
+	case resp.StatusCode == http.StatusMethodNotAllowed:
+		req, err = http.NewRequest("GET", u, nil)
 		if err != nil {
 			return distribution.Descriptor{}, err
 		}
-		defer resp.Body.Close()
 
-		if resp.StatusCode >= 200 && resp.StatusCode < 400 {
-			return descriptorFromResponse(resp)
+		for _, t := range distribution.ManifestMediaTypes() {
+			req.Header.Add("Accept", t)
 		}
+
+		resp, err = t.client.Do(req)
+		attempts++
+		if attempts > 1 {
+			return distribution.Descriptor{}, err
+		}
+		goto check
+	default:
 		return distribution.Descriptor{}, HandleErrorResponse(resp)
 	}
 }
@@ -421,22 +414,18 @@ func (ms *manifests) Get(ctx context.Context, dgst digest.Digest, options ...dis
 		ref         reference.Named
 		err         error
 		contentDgst *digest.Digest
-		mediaTypes  []string
 	)
 
 	for _, option := range options {
-		switch opt := option.(type) {
-		case distribution.WithTagOption:
+		if opt, ok := option.(distribution.WithTagOption); ok {
 			digestOrTag = opt.Tag
 			ref, err = reference.WithTag(ms.name, opt.Tag)
 			if err != nil {
 				return nil, err
 			}
-		case contentDigestOption:
+		} else if opt, ok := option.(contentDigestOption); ok {
 			contentDgst = opt.digest
-		case distribution.WithManifestMediaTypesOption:
-			mediaTypes = opt.MediaTypes
-		default:
+		} else {
 			err := option.Apply(ms)
 			if err != nil {
 				return nil, err
@@ -452,10 +441,6 @@ func (ms *manifests) Get(ctx context.Context, dgst digest.Digest, options ...dis
 		}
 	}
 
-	if len(mediaTypes) == 0 {
-		mediaTypes = distribution.ManifestMediaTypes()
-	}
-
 	u, err := ms.ub.BuildManifestURL(ref)
 	if err != nil {
 		return nil, err
@@ -466,7 +451,7 @@ func (ms *manifests) Get(ctx context.Context, dgst digest.Digest, options ...dis
 		return nil, err
 	}
 
-	for _, t := range mediaTypes {
+	for _, t := range distribution.ManifestMediaTypes() {
 		req.Header.Add("Accept", t)
 	}
 
@@ -483,7 +468,7 @@ func (ms *manifests) Get(ctx context.Context, dgst digest.Digest, options ...dis
 		return nil, distribution.ErrManifestNotModified
 	} else if SuccessStatus(resp.StatusCode) {
 		if contentDgst != nil {
-			dgst, err := digest.Parse(resp.Header.Get("Docker-Content-Digest"))
+			dgst, err := digest.ParseDigest(resp.Header.Get("Docker-Content-Digest"))
 			if err == nil {
 				*contentDgst = dgst
 			}
@@ -561,7 +546,7 @@ func (ms *manifests) Put(ctx context.Context, m distribution.Manifest, options .
 
 	if SuccessStatus(resp.StatusCode) {
 		dgstHeader := resp.Header.Get("Docker-Content-Digest")
-		dgst, err := digest.Parse(dgstHeader)
+		dgst, err := digest.ParseDigest(dgstHeader)
 		if err != nil {
 			return "", err
 		}
@@ -669,7 +654,7 @@ func (bs *blobs) Put(ctx context.Context, mediaType string, p []byte) (distribut
 	if err != nil {
 		return distribution.Descriptor{}, err
 	}
-	dgstr := digest.Canonical.Digester()
+	dgstr := digest.Canonical.New()
 	n, err := io.Copy(writer, io.TeeReader(bytes.NewReader(p), dgstr.Hash()))
 	if err != nil {
 		return distribution.Descriptor{}, err

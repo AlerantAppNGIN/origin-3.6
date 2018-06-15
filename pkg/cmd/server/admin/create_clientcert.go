@@ -8,7 +8,7 @@ import (
 
 	"k8s.io/apiserver/pkg/authentication/user"
 
-	"github.com/openshift/library-go/pkg/crypto"
+	"github.com/openshift/origin/pkg/cmd/server/crypto"
 )
 
 type CreateClientCertOptions struct {

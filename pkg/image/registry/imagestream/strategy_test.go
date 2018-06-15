@@ -13,19 +13,18 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/diff"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/apiserver/pkg/authentication/user"
 	apirequest "k8s.io/apiserver/pkg/endpoints/request"
-	authorizationapi "k8s.io/kubernetes/pkg/apis/authorization"
-	kapi "k8s.io/kubernetes/pkg/apis/core"
+	kapi "k8s.io/kubernetes/pkg/api"
 	kquota "k8s.io/kubernetes/pkg/quota"
 
-	oauthorizationapi "github.com/openshift/origin/pkg/authorization/apis/authorization"
+	authorizationapi "github.com/openshift/origin/pkg/authorization/apis/authorization"
+	"github.com/openshift/origin/pkg/authorization/registry/subjectaccessreview"
 	"github.com/openshift/origin/pkg/image/admission"
-	admfake "github.com/openshift/origin/pkg/image/admission/fake"
 	"github.com/openshift/origin/pkg/image/admission/testutil"
 	imageapi "github.com/openshift/origin/pkg/image/apis/image"
-	"github.com/openshift/origin/pkg/image/apis/image/validation/fake"
 )
 
 type fakeUser struct {
@@ -47,7 +46,7 @@ func (u *fakeUser) GetGroups() []string {
 
 func (u *fakeUser) GetExtra() map[string][]string {
 	return map[string][]string{
-		oauthorizationapi.ScopesKey: {"a", "b"},
+		authorizationapi.ScopesKey: {"a", "b"},
 	}
 }
 
@@ -66,55 +65,12 @@ type fakeSubjectAccessReviewRegistry struct {
 	requestNamespace string
 }
 
-func (f *fakeSubjectAccessReviewRegistry) Create(subjectAccessReview *authorizationapi.SubjectAccessReview) (*authorizationapi.SubjectAccessReview, error) {
+var _ subjectaccessreview.Registry = &fakeSubjectAccessReviewRegistry{}
+
+func (f *fakeSubjectAccessReviewRegistry) CreateSubjectAccessReview(ctx apirequest.Context, subjectAccessReview *authorizationapi.SubjectAccessReview) (*authorizationapi.SubjectAccessReviewResponse, error) {
 	f.request = subjectAccessReview
-	f.requestNamespace = subjectAccessReview.Spec.ResourceAttributes.Namespace
-	return &authorizationapi.SubjectAccessReview{
-		Status: authorizationapi.SubjectAccessReviewStatus{
-			Allowed: f.allow,
-		},
-	}, f.err
-}
-
-func TestPublicDockerImageRepository(t *testing.T) {
-	tests := map[string]struct {
-		stream         *imageapi.ImageStream
-		expected       string
-		publicRegistry string
-	}{
-		"public registry is not set": {
-			stream: &imageapi.ImageStream{
-				ObjectMeta: metav1.ObjectMeta{
-					Name: "somerepo",
-				},
-				Spec: imageapi.ImageStreamSpec{
-					DockerImageRepository: "a/b",
-				},
-			},
-			publicRegistry: "",
-			expected:       "",
-		},
-		"public registry is set": {
-			stream: &imageapi.ImageStream{
-				ObjectMeta: metav1.ObjectMeta{
-					Name: "somerepo",
-				},
-				Spec: imageapi.ImageStreamSpec{
-					DockerImageRepository: "a/b",
-				},
-			},
-			publicRegistry: "registry-default.external.url",
-			expected:       "registry-default.external.url/somerepo",
-		},
-	}
-
-	for testName, test := range tests {
-		strategy := NewStrategy(imageapi.DefaultRegistryHostnameRetriever(nil, test.publicRegistry, ""), &fakeSubjectAccessReviewRegistry{}, &admfake.ImageStreamLimitVerifier{}, nil, nil)
-		value := strategy.publicDockerImageRepository(test.stream)
-		if e, a := test.expected, value; e != a {
-			t.Errorf("%s: expected %q, got %q", testName, e, a)
-		}
-	}
+	f.requestNamespace = apirequest.NamespaceValue(ctx)
+	return &authorizationapi.SubjectAccessReviewResponse{Allowed: f.allow}, f.err
 }
 
 func TestDockerImageRepository(t *testing.T) {
@@ -179,9 +135,8 @@ func TestDockerImageRepository(t *testing.T) {
 	}
 
 	for testName, test := range tests {
-		fakeRegistry := &fakeDefaultRegistry{test.defaultRegistry}
-		strategy := NewStrategy(imageapi.DefaultRegistryHostnameRetriever(fakeRegistry.DefaultRegistry, "", ""), &fakeSubjectAccessReviewRegistry{}, &admfake.ImageStreamLimitVerifier{}, nil, nil)
-		value := strategy.dockerImageRepository(test.stream, true)
+		strategy := NewStrategy(&fakeDefaultRegistry{test.defaultRegistry}, &fakeSubjectAccessReviewRegistry{}, &testutil.FakeImageStreamLimitVerifier{}, nil)
+		value := strategy.dockerImageRepository(test.stream)
 		if e, a := test.expected, value; e != a {
 			t.Errorf("%s: expected %q, got %q", testName, e, a)
 		}
@@ -358,19 +313,15 @@ func TestTagVerifier(t *testing.T) {
 				t.Errorf("%s: sar namespace: expected %v, got %v", name, e, a)
 			}
 			expectedSar := &authorizationapi.SubjectAccessReview{
-				Spec: authorizationapi.SubjectAccessReviewSpec{
-					ResourceAttributes: &authorizationapi.ResourceAttributes{
-						Namespace:   "otherns",
-						Verb:        "get",
-						Group:       "image.openshift.io",
-						Resource:    "imagestreams",
-						Subresource: "layers",
-						Name:        "otherstream",
-					},
-					User:   "user",
-					Groups: []string{"group1"},
-					Extra:  map[string]authorizationapi.ExtraValue{oauthorizationapi.ScopesKey: {"a", "b"}},
+				Action: authorizationapi.Action{
+					//				Group:        "image.openshift.io",
+					Verb:         "get",
+					Resource:     "imagestreams/layers",
+					ResourceName: "otherstream",
 				},
+				User:   "user",
+				Groups: sets.NewString("group1"),
+				Scopes: []string{"a", "b"},
 			}
 			if e, a := expectedSar, sar.request; !reflect.DeepEqual(e, a) {
 				t.Errorf("%s: unexpected SAR request: %s", name, diff.ObjectDiff(e, a))
@@ -567,14 +518,13 @@ func TestLimitVerifier(t *testing.T) {
 			allow: true,
 		}
 		tagVerifier := &TagVerifier{sar}
-		fakeRegistry := &fakeDefaultRegistry{}
+
 		s := &Strategy{
 			tagVerifier: tagVerifier,
-			limitVerifier: &admfake.ImageStreamLimitVerifier{
+			limitVerifier: &testutil.FakeImageStreamLimitVerifier{
 				ImageStreamEvaluator: tc.isEvaluator,
 			},
-			registryWhitelister:       &fake.RegistryWhitelister{},
-			registryHostnameRetriever: imageapi.DefaultRegistryHostnameRetriever(fakeRegistry.DefaultRegistry, "", ""),
+			defaultRegistry: &fakeDefaultRegistry{},
 		}
 
 		ctx := apirequest.WithUser(apirequest.NewDefaultContext(), &fakeUser{})
@@ -834,9 +784,6 @@ func TestTagsChanged(t *testing.T) {
 					},
 				}},
 				"t3": {Items: []imageapi.TagEvent{
-					{
-						DockerImageReference: "@sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-					},
 					{
 						DockerImageReference: "registry:5000/ns/stream@sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
 						Image:                "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -1114,11 +1061,8 @@ func TestTagsChanged(t *testing.T) {
 		// we can't reuse the same map twice, it causes both to be modified during updates
 		var previousTagHistory = test.existingTagHistory
 		if previousTagHistory != nil {
-			previousTagHistoryCopy := map[string]imageapi.TagEventList{}
-			for k, v := range previousTagHistory {
-				previousTagHistory[k] = *v.DeepCopy()
-			}
-			previousTagHistory = previousTagHistoryCopy
+			obj, _ := kapi.Scheme.DeepCopy(previousTagHistory)
+			previousTagHistory, _ = obj.(map[string]imageapi.TagEventList)
 		}
 		previousStream := &imageapi.ImageStream{
 			ObjectMeta: metav1.ObjectMeta{
@@ -1136,10 +1080,9 @@ func TestTagsChanged(t *testing.T) {
 			previousStream = nil
 		}
 
-		fakeRegistry := &fakeDefaultRegistry{}
 		s := &Strategy{
-			registryHostnameRetriever: imageapi.DefaultRegistryHostnameRetriever(fakeRegistry.DefaultRegistry, "", ""),
-			imageStreamGetter:         &fakeImageStreamGetter{test.otherStream},
+			defaultRegistry:   &fakeDefaultRegistry{},
+			imageStreamGetter: &fakeImageStreamGetter{test.otherStream},
 		}
 		err := s.tagsChanged(previousStream, stream)
 		if len(err) > 0 {

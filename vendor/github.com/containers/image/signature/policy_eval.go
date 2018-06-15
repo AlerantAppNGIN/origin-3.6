@@ -6,11 +6,9 @@
 package signature
 
 import (
-	"context"
-
+	"github.com/Sirupsen/logrus"
 	"github.com/containers/image/types"
 	"github.com/pkg/errors"
-	"github.com/sirupsen/logrus"
 )
 
 // PolicyRequirementError is an explanatory text for rejecting a signature or an image.
@@ -190,8 +188,7 @@ func (pc *PolicyContext) GetSignaturesWithAcceptedAuthor(image types.UnparsedIma
 	reqs := pc.requirementsForImageRef(image.Reference())
 
 	// FIXME: rename Signatures to UnverifiedSignatures
-	// FIXME: pass context.Context
-	unverifiedSignatures, err := image.Signatures(context.TODO())
+	unverifiedSignatures, err := image.Signatures()
 	if err != nil {
 		return nil, err
 	}

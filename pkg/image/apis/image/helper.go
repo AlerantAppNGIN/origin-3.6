@@ -2,7 +2,7 @@ package image
 
 import (
 	"bytes"
-	"errors"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/url"
@@ -10,14 +10,17 @@ import (
 	"sort"
 	"strings"
 
-	kerrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
 
 	"github.com/blang/semver"
+	"github.com/docker/distribution/digest"
+	"github.com/docker/distribution/manifest/schema1"
+	"github.com/docker/distribution/manifest/schema2"
 	"github.com/golang/glog"
 
-	"github.com/openshift/origin/pkg/image/apis/image/internal/digest"
+	"github.com/openshift/origin/pkg/image/reference"
 )
 
 const (
@@ -38,73 +41,21 @@ const (
 	ImportRegistryNotAllowed = "registry is not allowed for import"
 )
 
-var errNoRegistryURLPathAllowed = errors.New("no path after <host>[:<port>] is allowed")
-var errNoRegistryURLQueryAllowed = errors.New("no query arguments are allowed after <host>[:<port>]")
-var errRegistryURLHostEmpty = errors.New("no host name specified")
+var errNoRegistryURLPathAllowed = fmt.Errorf("no path after <host>[:<port>] is allowed")
+var errNoRegistryURLQueryAllowed = fmt.Errorf("no query arguments are allowed after <host>[:<port>]")
+var errRegistryURLHostEmpty = fmt.Errorf("no host name specified")
 
-// ErrImageStreamImportUnsupported is an error client receive when the import
-// failed.
-var ErrImageStreamImportUnsupported = errors.New("the server does not support directly importing images - create an image stream with tags or the dockerImageRepository field set")
-
-// ErrCircularReference is an error when reference tag is circular.
-var ErrCircularReference = errors.New("reference tag is circular")
-
-// ErrNotFoundReference is an error when reference tag is not found.
-var ErrNotFoundReference = errors.New("reference tag is not found")
-
-// ErrCrossImageStreamReference is an error when reference tag points to another imagestream.
-var ErrCrossImageStreamReference = errors.New("reference tag points to another imagestream")
-
-// ErrInvalidReference is an error when reference tag is invalid.
-var ErrInvalidReference = errors.New("reference tag is invalid")
-
-// RegistryHostnameRetriever represents an interface for retrieving the hostname
-// of internal and external registry.
-type RegistryHostnameRetriever interface {
-	InternalRegistryHostname() (string, bool)
-	ExternalRegistryHostname() (string, bool)
+// DefaultRegistry returns the default Docker registry (host or host:port), or false if it is not available.
+type DefaultRegistry interface {
+	DefaultRegistry() (string, bool)
 }
 
-// DefaultRegistryHostnameRetriever is a default implementation of
-// RegistryHostnameRetriever.
-// The first argument is a function that lazy-loads the value of
-// OPENSHIFT_DEFAULT_REGISTRY environment variable which should be deprecated in
-// future.
-func DefaultRegistryHostnameRetriever(deprecatedDefaultRegistryEnvFn func() (string, bool), external, internal string) RegistryHostnameRetriever {
-	return &defaultRegistryHostnameRetriever{
-		deprecatedDefaultFn: deprecatedDefaultRegistryEnvFn,
-		externalHostname:    external,
-		internalHostname:    internal,
-	}
-}
+// DefaultRegistryFunc implements DefaultRegistry for a simple function.
+type DefaultRegistryFunc func() (string, bool)
 
-type defaultRegistryHostnameRetriever struct {
-	// deprecatedDefaultFn points to a function that will lazy-load the value of
-	// OPENSHIFT_DEFAULT_REGISTRY.
-	deprecatedDefaultFn func() (string, bool)
-	internalHostname    string
-	externalHostname    string
-}
-
-// InternalRegistryHostnameFn returns a function that can be used to lazy-load
-// the internal Docker Registry hostname. If the master configuration properly
-// InternalRegistryHostname is set, it will prefer that over the lazy-loaded
-// environment variable 'OPENSHIFT_DEFAULT_REGISTRY'.
-func (r *defaultRegistryHostnameRetriever) InternalRegistryHostname() (string, bool) {
-	if len(r.internalHostname) > 0 {
-		return r.internalHostname, true
-	}
-	if r.deprecatedDefaultFn != nil {
-		return r.deprecatedDefaultFn()
-	}
-	return "", false
-}
-
-// ExternalRegistryHostnameFn returns a function that can be used to retrieve an
-// external/public hostname of Docker Registry. External location can be
-// configured in master config using 'ExternalRegistryHostname' property.
-func (r *defaultRegistryHostnameRetriever) ExternalRegistryHostname() (string, bool) {
-	return r.externalHostname, len(r.externalHostname) > 0
+// DefaultRegistry implements the DefaultRegistry interface for a function.
+func (fn DefaultRegistryFunc) DefaultRegistry() (string, bool) {
+	return fn()
 }
 
 // ParseImageStreamImageName splits a string into its name component and ID component, and returns an error
@@ -145,6 +96,11 @@ func ParseImageStreamTagName(istag string) (name string, tag string, err error) 
 	return
 }
 
+// MakeImageStreamImageName creates a name for image stream image object from an image stream name and an id.
+func MakeImageStreamImageName(name, id string) string {
+	return fmt.Sprintf("%s@%s", name, id)
+}
+
 // IsRegistryDockerHub returns true if the given registry name belongs to
 // Docker hub.
 func IsRegistryDockerHub(registry string) bool {
@@ -161,7 +117,7 @@ func IsRegistryDockerHub(registry string) bool {
 func ParseDockerImageReference(spec string) (DockerImageReference, error) {
 	var ref DockerImageReference
 
-	namedRef, err := parseNamedDockerImageReference(spec)
+	namedRef, err := reference.ParseNamedDockerImageReference(spec)
 	if err != nil {
 		return ref, err
 	}
@@ -363,11 +319,6 @@ func JoinImageStreamTag(name, tag string) string {
 	return fmt.Sprintf("%s:%s", name, tag)
 }
 
-// JoinImageStreamImage creates a name for image stream image object from an image stream name and an id.
-func JoinImageStreamImage(name, id string) string {
-	return fmt.Sprintf("%s@%s", name, id)
-}
-
 // NormalizeImageStreamTag normalizes an image stream tag by defaulting to 'latest'
 // if no tag has been specified.
 func NormalizeImageStreamTag(name string) string {
@@ -377,6 +328,203 @@ func NormalizeImageStreamTag(name string) string {
 		return JoinImageStreamTag(stripped, tag)
 	}
 	return name
+}
+
+// ManifestMatchesImage returns true if the provided manifest matches the name of the image.
+func ManifestMatchesImage(image *Image, newManifest []byte) (bool, error) {
+	dgst, err := digest.ParseDigest(image.Name)
+	if err != nil {
+		return false, err
+	}
+	v, err := digest.NewDigestVerifier(dgst)
+	if err != nil {
+		return false, err
+	}
+	var canonical []byte
+
+	switch image.DockerImageManifestMediaType {
+	case schema2.MediaTypeManifest:
+		var m schema2.DeserializedManifest
+		if err := json.Unmarshal(newManifest, &m); err != nil {
+			return false, err
+		}
+		_, canonical, err = m.Payload()
+		if err != nil {
+			return false, err
+		}
+	case schema1.MediaTypeManifest, "":
+		var m schema1.SignedManifest
+		if err := json.Unmarshal(newManifest, &m); err != nil {
+			return false, err
+		}
+		canonical = m.Canonical
+	default:
+		return false, fmt.Errorf("unsupported manifest mediatype: %s", image.DockerImageManifestMediaType)
+	}
+	if _, err := v.Write(canonical); err != nil {
+		return false, err
+	}
+	return v.Verified(), nil
+}
+
+// ImageConfigMatchesImage returns true if the provided image config matches a digest
+// stored in the manifest of the image.
+func ImageConfigMatchesImage(image *Image, imageConfig []byte) (bool, error) {
+	if image.DockerImageManifestMediaType != schema2.MediaTypeManifest {
+		return false, nil
+	}
+
+	var m schema2.DeserializedManifest
+	if err := json.Unmarshal([]byte(image.DockerImageManifest), &m); err != nil {
+		return false, err
+	}
+
+	v, err := digest.NewDigestVerifier(m.Config.Digest)
+	if err != nil {
+		return false, err
+	}
+
+	if _, err := v.Write(imageConfig); err != nil {
+		return false, err
+	}
+
+	return v.Verified(), nil
+}
+
+// ImageWithMetadata mutates the given image. It parses raw DockerImageManifest data stored in the image and
+// fills its DockerImageMetadata and other fields.
+func ImageWithMetadata(image *Image) error {
+	if len(image.DockerImageManifest) == 0 {
+		return nil
+	}
+
+	if len(image.DockerImageLayers) > 0 && image.DockerImageMetadata.Size > 0 && len(image.DockerImageManifestMediaType) > 0 {
+		glog.V(5).Infof("Image metadata already filled for %s", image.Name)
+		// don't update image already filled
+		return nil
+	}
+
+	manifestData := image.DockerImageManifest
+
+	manifest := DockerImageManifest{}
+	if err := json.Unmarshal([]byte(manifestData), &manifest); err != nil {
+		return err
+	}
+
+	switch manifest.SchemaVersion {
+	case 0:
+		// legacy config object
+	case 1:
+		image.DockerImageManifestMediaType = schema1.MediaTypeManifest
+
+		if len(manifest.History) == 0 {
+			// should never have an empty history, but just in case...
+			return nil
+		}
+
+		v1Metadata := DockerV1CompatibilityImage{}
+		if err := json.Unmarshal([]byte(manifest.History[0].DockerV1Compatibility), &v1Metadata); err != nil {
+			return err
+		}
+
+		image.DockerImageLayers = make([]ImageLayer, len(manifest.FSLayers))
+		for i, layer := range manifest.FSLayers {
+			image.DockerImageLayers[i].MediaType = schema1.MediaTypeManifestLayer
+			image.DockerImageLayers[i].Name = layer.DockerBlobSum
+		}
+		if len(manifest.History) == len(image.DockerImageLayers) {
+			// This code does not work for images converted from v2 to v1, since V1Compatibility does not
+			// contain size information in this case.
+			image.DockerImageLayers[0].LayerSize = v1Metadata.Size
+			var size = DockerV1CompatibilityImageSize{}
+			for i, obj := range manifest.History[1:] {
+				size.Size = 0
+				if err := json.Unmarshal([]byte(obj.DockerV1Compatibility), &size); err != nil {
+					continue
+				}
+				image.DockerImageLayers[i+1].LayerSize = size.Size
+			}
+		} else {
+			glog.V(4).Infof("Imported image has mismatched layer count and history count, not updating image metadata: %s", image.Name)
+		}
+		// reverse order of the layers for v1 (lowest = 0, highest = i)
+		for i, j := 0, len(image.DockerImageLayers)-1; i < j; i, j = i+1, j-1 {
+			image.DockerImageLayers[i], image.DockerImageLayers[j] = image.DockerImageLayers[j], image.DockerImageLayers[i]
+		}
+
+		image.DockerImageMetadata.ID = v1Metadata.ID
+		image.DockerImageMetadata.Parent = v1Metadata.Parent
+		image.DockerImageMetadata.Comment = v1Metadata.Comment
+		image.DockerImageMetadata.Created = v1Metadata.Created
+		image.DockerImageMetadata.Container = v1Metadata.Container
+		image.DockerImageMetadata.ContainerConfig = v1Metadata.ContainerConfig
+		image.DockerImageMetadata.DockerVersion = v1Metadata.DockerVersion
+		image.DockerImageMetadata.Author = v1Metadata.Author
+		image.DockerImageMetadata.Config = v1Metadata.Config
+		image.DockerImageMetadata.Architecture = v1Metadata.Architecture
+		if len(image.DockerImageLayers) > 0 {
+			size := int64(0)
+			layerSet := sets.NewString()
+			for _, layer := range image.DockerImageLayers {
+				if layerSet.Has(layer.Name) {
+					continue
+				}
+				layerSet.Insert(layer.Name)
+				size += layer.LayerSize
+			}
+			image.DockerImageMetadata.Size = size
+		} else {
+			image.DockerImageMetadata.Size = v1Metadata.Size
+		}
+	case 2:
+		image.DockerImageManifestMediaType = schema2.MediaTypeManifest
+
+		if len(image.DockerImageConfig) == 0 {
+			return fmt.Errorf("dockerImageConfig must not be empty for manifest schema 2")
+		}
+		config := DockerImageConfig{}
+		if err := json.Unmarshal([]byte(image.DockerImageConfig), &config); err != nil {
+			return fmt.Errorf("failed to parse dockerImageConfig: %v", err)
+		}
+
+		image.DockerImageLayers = make([]ImageLayer, len(manifest.Layers))
+		for i, layer := range manifest.Layers {
+			image.DockerImageLayers[i].Name = layer.Digest
+			image.DockerImageLayers[i].LayerSize = layer.Size
+			image.DockerImageLayers[i].MediaType = layer.MediaType
+		}
+		// reverse order of the layers for v1 (lowest = 0, highest = i)
+		for i, j := 0, len(image.DockerImageLayers)-1; i < j; i, j = i+1, j-1 {
+			image.DockerImageLayers[i], image.DockerImageLayers[j] = image.DockerImageLayers[j], image.DockerImageLayers[i]
+		}
+
+		image.DockerImageMetadata.ID = manifest.Config.Digest
+		image.DockerImageMetadata.Parent = config.Parent
+		image.DockerImageMetadata.Comment = config.Comment
+		image.DockerImageMetadata.Created = config.Created
+		image.DockerImageMetadata.Container = config.Container
+		image.DockerImageMetadata.ContainerConfig = config.ContainerConfig
+		image.DockerImageMetadata.DockerVersion = config.DockerVersion
+		image.DockerImageMetadata.Author = config.Author
+		image.DockerImageMetadata.Config = config.Config
+		image.DockerImageMetadata.Architecture = config.Architecture
+		image.DockerImageMetadata.Size = int64(len(image.DockerImageConfig))
+
+		layerSet := sets.NewString(image.DockerImageMetadata.ID)
+		if len(image.DockerImageLayers) > 0 {
+			for _, layer := range image.DockerImageLayers {
+				if layerSet.Has(layer.Name) {
+					continue
+				}
+				layerSet.Insert(layer.Name)
+				image.DockerImageMetadata.Size += layer.LayerSize
+			}
+		}
+	default:
+		return fmt.Errorf("unrecognized Docker image manifest schema %d for %q (%s)", manifest.SchemaVersion, image.Name, image.DockerImageReference)
+	}
+
+	return nil
 }
 
 // DockerImageReferenceForStream returns a DockerImageReference that represents
@@ -393,48 +541,29 @@ func DockerImageReferenceForStream(stream *ImageStream) (DockerImageReference, e
 }
 
 // FollowTagReference walks through the defined tags on a stream, following any referential tags in the stream.
-// Will return multiple if the tag had at least reference, and ref and finalTag will be the last tag seen.
-// If an invalid reference is found, err will be returned.
-func FollowTagReference(stream *ImageStream, tag string) (finalTag string, ref *TagReference, multiple bool, err error) {
+// Will return ok if the tag is valid, multiple if the tag had at least reference, and ref and finalTag will be the last
+// tag seen. If a circular loop is found ok will be false.
+func FollowTagReference(stream *ImageStream, tag string) (finalTag string, ref *TagReference, ok bool, multiple bool) {
 	seen := sets.NewString()
 	for {
 		if seen.Has(tag) {
 			// circular reference
-			return tag, nil, multiple, ErrCircularReference
+			return tag, nil, false, multiple
 		}
 		seen.Insert(tag)
 
 		tagRef, ok := stream.Spec.Tags[tag]
 		if !ok {
 			// no tag at the end of the rainbow
-			return tag, nil, multiple, ErrNotFoundReference
+			return tag, nil, false, multiple
 		}
-		if tagRef.From == nil || tagRef.From.Kind != "ImageStreamTag" {
+		if tagRef.From == nil || tagRef.From.Kind != "ImageStreamTag" || strings.Contains(tagRef.From.Name, ":") {
 			// terminating tag
-			return tag, &tagRef, multiple, nil
+			return tag, &tagRef, true, multiple
 		}
 
-		if tagRef.From.Namespace != "" && tagRef.From.Namespace != stream.ObjectMeta.Namespace {
-			return tag, nil, multiple, ErrCrossImageStreamReference
-		}
-
-		// The reference needs to be followed with two format patterns:
-		// a) sameis:sometag and b) sometag
-		if strings.Contains(tagRef.From.Name, ":") {
-			name, tagref, ok := SplitImageStreamTag(tagRef.From.Name)
-			if !ok {
-				return tag, nil, multiple, ErrInvalidReference
-			}
-			if name != stream.ObjectMeta.Name {
-				// anotheris:sometag - this should not happen.
-				return tag, nil, multiple, ErrCrossImageStreamReference
-			}
-			// sameis:sometag - follow the reference as sometag
-			tag = tagref
-		} else {
-			// sometag - follow the reference
-			tag = tagRef.From.Name
-		}
+		// follow the referenec
+		tag = tagRef.From.Name
 		multiple = true
 	}
 }
@@ -451,7 +580,7 @@ func LatestImageTagEvent(stream *ImageStream, imageID string) (string, *TagEvent
 			continue
 		}
 		for i, event := range events.Items {
-			if DigestOrImageMatch(event.Image, imageID) &&
+			if digestOrImageMatch(event.Image, imageID) &&
 				(latestTagEvent == nil || latestTagEvent != nil && event.Created.After(latestTagEvent.Created.Time)) {
 				latestTagEvent = &events.Items[i]
 				latestTag = tag
@@ -712,21 +841,19 @@ func UpdateTrackingTags(stream *ImageStream, updatedTag string, updatedImage Tag
 			continue
 		}
 
+		// TODO: this is probably wrong - we should require ":<tag>", but we can't break old clients
+		tagRefName := tagRef.From.Name
+		parts := strings.Split(tagRefName, ":")
 		tag := ""
-		tagRefName := ""
-		if strings.Contains(tagRef.From.Name, ":") {
+		switch len(parts) {
+		case 2:
 			// <stream>:<tag>
-			ok := true
-			tagRefName, tag, ok = SplitImageStreamTag(tagRef.From.Name)
-			if !ok {
-				glog.V(5).Infof("tagRefName %q contains invalid reference - skipping", tagRef.From.Name)
-				continue
-			}
-		} else {
+			tagRefName = parts[0]
+			tag = parts[1]
+		default:
 			// <tag> (this stream)
-			// TODO: this is probably wrong - we should require ":<tag>", but we can't break old clients
+			tag = tagRefName
 			tagRefName = stream.Name
-			tag = tagRef.From.Name
 		}
 
 		glog.V(5).Infof("tagRefName=%q, tag=%q", tagRefName, tag)
@@ -751,8 +878,7 @@ func UpdateTrackingTags(stream *ImageStream, updatedTag string, updatedImage Tag
 	return updated
 }
 
-// DigestOrImageMatch matches the digest in the image name.
-func DigestOrImageMatch(image, imageID string) bool {
+func digestOrImageMatch(image, imageID string) bool {
 	if d, err := digest.ParseDigest(image); err == nil {
 		return strings.HasPrefix(d.Hex(), imageID) || strings.HasPrefix(image, imageID)
 	}
@@ -767,7 +893,7 @@ func ResolveImageID(stream *ImageStream, imageID string) (*TagEvent, error) {
 	for _, history := range stream.Status.Tags {
 		for i := range history.Items {
 			tagging := &history.Items[i]
-			if DigestOrImageMatch(tagging.Image, imageID) {
+			if digestOrImageMatch(tagging.Image, imageID) {
 				event = tagging
 				set.Insert(tagging.Image)
 			}
@@ -781,9 +907,9 @@ func ResolveImageID(stream *ImageStream, imageID string) (*TagEvent, error) {
 			Image:                event.Image,
 		}, nil
 	case 0:
-		return nil, kerrors.NewNotFound(Resource("imagestreamimage"), imageID)
+		return nil, errors.NewNotFound(Resource("imagestreamimage"), imageID)
 	default:
-		return nil, kerrors.NewConflict(Resource("imagestreamimage"), imageID, fmt.Errorf("multiple images match the prefix %q: %s", imageID, strings.Join(set.List(), ", ")))
+		return nil, errors.NewConflict(Resource("imagestreamimage"), imageID, fmt.Errorf("multiple images match the prefix %q: %s", imageID, strings.Join(set.List(), ", ")))
 	}
 }
 
@@ -889,7 +1015,6 @@ type prioritizedTag struct {
 	tag      string
 	priority tagPriority
 	semver   semver.Version
-	prefix   string
 }
 
 func prioritizeTag(tag string) prioritizedTag {
@@ -900,12 +1025,7 @@ func prioritizeTag(tag string) prioritizedTag {
 		}
 	}
 
-	short := tag
-	prefix := ""
-	if strings.HasPrefix(tag, "v") {
-		prefix = "v"
-		short = tag[1:]
-	}
+	short := strings.TrimLeft(tag, "v")
 
 	// 5.1.3
 	if v, err := semver.Parse(short); err == nil {
@@ -913,7 +1033,6 @@ func prioritizeTag(tag string) prioritizedTag {
 			tag:      tag,
 			priority: tagPriorityFull,
 			semver:   v,
-			prefix:   prefix,
 		}
 	}
 
@@ -924,7 +1043,6 @@ func prioritizeTag(tag string) prioritizedTag {
 				tag:      tag,
 				priority: tagPriorityMinor,
 				semver:   v,
-				prefix:   prefix,
 			}
 		}
 	}
@@ -936,7 +1054,6 @@ func prioritizeTag(tag string) prioritizedTag {
 				tag:      tag,
 				priority: tagPriorityMinor,
 				semver:   v,
-				prefix:   prefix,
 			}
 		}
 	}
@@ -945,7 +1062,6 @@ func prioritizeTag(tag string) prioritizedTag {
 	return prioritizedTag{
 		tag:      tag,
 		priority: tagPriorityOther,
-		prefix:   prefix,
 	}
 }
 
@@ -963,10 +1079,7 @@ func (t prioritizedTags) Less(i, j int) bool {
 	}
 
 	cmp := t[i].semver.Compare(t[j].semver)
-	if cmp > 0 { // the newer tag has a higher priority
-		return true
-	}
-	return cmp == 0 && t[i].prefix < t[j].prefix
+	return cmp > 0 // the newer tag has a higher priority
 }
 
 // PrioritizeTags orders a set of image tags with a few conventions:

@@ -43,8 +43,6 @@ func TestRuleList(t *testing.T) {
 }
 
 func TestRuleCreate(t *testing.T) {
-	name := "unit01"
-	namespace := "projA"
 	body := `{
 				"active": true,
 				"description": "",
@@ -61,12 +59,11 @@ func TestRuleCreate(t *testing.T) {
 	client := newTestClient(fakeRT)
 	rule, err := client.RuleCreate(
 		types.RuleCreateOptions{
-			Name:        name,
+			Name:        "unit01",
 			Description: "Unit test rule",
 			Active:      true,
 			Weight:      5,
 			RuleAction:  "add",
-			Namespace:   namespace,
 			Selector:    "storageos.driver notin (disk, filesystem)",
 			Labels: map[string]string{
 				"foo": "bar",
@@ -85,10 +82,9 @@ func TestRuleCreate(t *testing.T) {
 	if req.Method != expectedMethod {
 		t.Errorf("RuleCreate(): Wrong HTTP method. Want %s. Got %s.", expectedMethod, req.Method)
 	}
-	path, _ := namespacedPath(namespace, RuleAPIPrefix)
-	u, _ := url.Parse(client.getAPIPath(path, url.Values{}, false))
+	u, _ := url.Parse(client.getAPIPath(RuleAPIPrefix, url.Values{}, false))
 	if req.URL.Path != u.Path {
-		t.Errorf("RuleCreate(): Wrong request path. Want %q. Got %q.", path, req.URL.Path)
+		t.Errorf("RuleCreate(): Wrong request path. Want %q. Got %q.", u.Path, req.URL.Path)
 	}
 }
 

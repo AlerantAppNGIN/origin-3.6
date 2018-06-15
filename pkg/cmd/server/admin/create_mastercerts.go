@@ -18,7 +18,7 @@ import (
 	"k8s.io/kubernetes/pkg/kubectl/cmd/templates"
 	kcmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
 
-	"github.com/openshift/library-go/pkg/crypto"
+	"github.com/openshift/origin/pkg/cmd/server/crypto"
 	"github.com/openshift/origin/pkg/util/parallel"
 )
 
@@ -99,7 +99,7 @@ func NewCommandCreateMasterCerts(commandName string, fullName string, out io.Wri
 		Long:  fmt.Sprintf(masterCertLong, fullName),
 		Run: func(cmd *cobra.Command, args []string) {
 			if err := options.Validate(args); err != nil {
-				kcmdutil.CheckErr(kcmdutil.UsageErrorf(cmd, err.Error()))
+				kcmdutil.CheckErr(kcmdutil.UsageError(cmd, err.Error()))
 			}
 
 			if err := options.CreateMasterCerts(); err != nil {
@@ -183,10 +183,7 @@ func (o CreateMasterCertsOptions) CreateMasterCerts() error {
 	if err != nil {
 		return err
 	}
-
-	frontProxyOptions := o
-	frontProxyOptions.SignerName = DefaultFrontProxySignerName()
-	getFrontProxySignerCertOptions, err := frontProxyOptions.createNewSigner(FrontProxyCAFilePrefix)
+	getFrontProxySignerCertOptions, err := o.createNewSigner(FrontProxyCAFilePrefix)
 	if err != nil {
 		return err
 	}
@@ -200,7 +197,7 @@ func (o CreateMasterCertsOptions) CreateMasterCerts() error {
 		func() error { return o.createProxyClientCerts(getSignerCertOptions) },
 		func() error { return o.createServiceAccountKeys() },
 		func() error { return o.createServiceSigningCA(getSignerCertOptions) },
-		func() error { return frontProxyOptions.createAggregatorClientCerts(getFrontProxySignerCertOptions) },
+		func() error { return o.createAggregatorClientCerts(getFrontProxySignerCertOptions) },
 	)
 	return utilerrors.NewAggregate(errs)
 }

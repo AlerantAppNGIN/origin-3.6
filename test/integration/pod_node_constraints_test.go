@@ -5,18 +5,17 @@ import (
 
 	kapierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	kapi "k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/apis/batch"
-	kapi "k8s.io/kubernetes/pkg/apis/core"
 	"k8s.io/kubernetes/pkg/apis/extensions"
 	kclientset "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset"
 
-	appsapi "github.com/openshift/origin/pkg/apps/apis/apps"
-	appsclient "github.com/openshift/origin/pkg/apps/generated/internalclientset"
-	authorizationclient "github.com/openshift/origin/pkg/authorization/generated/internalclientset"
-	configapi "github.com/openshift/origin/pkg/cmd/server/apis/config"
+	"github.com/openshift/origin/pkg/client"
+	configapi "github.com/openshift/origin/pkg/cmd/server/api"
 	"github.com/openshift/origin/pkg/cmd/server/bootstrappolicy"
+	deployapi "github.com/openshift/origin/pkg/deploy/apis/apps"
 	policy "github.com/openshift/origin/pkg/oc/admin/policy"
-	pluginapi "github.com/openshift/origin/pkg/scheduler/admission/apis/podnodeconstraints"
+	pluginapi "github.com/openshift/origin/pkg/scheduler/admission/podnodeconstraints/api"
 	testutil "github.com/openshift/origin/test/util"
 	testserver "github.com/openshift/origin/test/util/server"
 )
@@ -52,17 +51,18 @@ func TestPodNodeConstraintsAdmissionPluginSetNodeSelectorNonAdmin(t *testing.T) 
 	testPodNodeConstraintsObjectCreationWithPodTemplate(t, "set node selector, regular user", kclientset, oclient, "", map[string]string{"hostname": "foo"}, true)
 }
 
-func setupClusterAdminPodNodeConstraintsTest(t *testing.T, pluginConfig *pluginapi.PodNodeConstraintsConfig) (appsclient.Interface, kclientset.Interface, func()) {
+func setupClusterAdminPodNodeConstraintsTest(t *testing.T, pluginConfig *pluginapi.PodNodeConstraintsConfig) (*client.Client, kclientset.Interface, func()) {
 	masterConfig, err := testserver.DefaultMasterOptions()
 	if err != nil {
 		t.Fatalf("error creating config: %v", err)
 	}
-	cfg := map[string]*configapi.AdmissionPluginConfig{
+	cfg := map[string]configapi.AdmissionPluginConfig{
 		"PodNodeConstraints": {
 			Configuration: pluginConfig,
 		},
 	}
 	masterConfig.AdmissionConfig.PluginConfig = cfg
+	masterConfig.KubernetesMasterConfig.AdmissionConfig.PluginConfig = cfg
 
 	kubeConfigFile, err := testserver.StartConfiguredMaster(masterConfig)
 	if err != nil {
@@ -72,7 +72,7 @@ func setupClusterAdminPodNodeConstraintsTest(t *testing.T, pluginConfig *plugina
 	if err != nil {
 		t.Fatalf("error getting client: %v", err)
 	}
-	clusterAdminClientConfig, err := testutil.GetClusterAdminClientConfig(kubeConfigFile)
+	openShiftClient, err := testutil.GetClusterAdminClient(kubeConfigFile)
 	if err != nil {
 		t.Fatalf("error getting client: %v", err)
 	}
@@ -85,31 +85,36 @@ func setupClusterAdminPodNodeConstraintsTest(t *testing.T, pluginConfig *plugina
 	if err := testserver.WaitForPodCreationServiceAccounts(kubeClientset, testutil.Namespace()); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	return appsclient.NewForConfigOrDie(clusterAdminClientConfig), kubeClientset, func() {
+	return openShiftClient, kubeClientset, func() {
 		testserver.CleanupMasterEtcd(t, masterConfig)
 	}
 }
 
-func setupUserPodNodeConstraintsTest(t *testing.T, pluginConfig *pluginapi.PodNodeConstraintsConfig, user string) (appsclient.Interface, kclientset.Interface, func()) {
+func setupUserPodNodeConstraintsTest(t *testing.T, pluginConfig *pluginapi.PodNodeConstraintsConfig, user string) (*client.Client, kclientset.Interface, func()) {
 	masterConfig, err := testserver.DefaultMasterOptions()
 	if err != nil {
 		t.Fatalf("error creating config: %v", err)
 	}
-	cfg := map[string]*configapi.AdmissionPluginConfig{
+	cfg := map[string]configapi.AdmissionPluginConfig{
 		"PodNodeConstraints": {
 			Configuration: pluginConfig,
 		},
 	}
 	masterConfig.AdmissionConfig.PluginConfig = cfg
+	masterConfig.KubernetesMasterConfig.AdmissionConfig.PluginConfig = cfg
 	kubeConfigFile, err := testserver.StartConfiguredMaster(masterConfig)
 	if err != nil {
 		t.Fatalf("error starting server: %v", err)
+	}
+	clusterAdminClient, err := testutil.GetClusterAdminClient(kubeConfigFile)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
 	clusterAdminClientConfig, err := testutil.GetClusterAdminClientConfig(kubeConfigFile)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	userkubeClientset, userClientConfig, err := testutil.GetClientForUser(clusterAdminClientConfig, user)
+	userClient, userkubeClientset, _, err := testutil.GetClientForUser(*clusterAdminClientConfig, user)
 	if err != nil {
 		t.Fatalf("error getting user/kube client: %v", err)
 	}
@@ -129,13 +134,13 @@ func setupUserPodNodeConstraintsTest(t *testing.T, pluginConfig *pluginapi.PodNo
 	addUser := &policy.RoleModificationOptions{
 		RoleNamespace:       ns.Name,
 		RoleName:            bootstrappolicy.AdminRoleName,
-		RoleBindingAccessor: policy.NewClusterRoleBindingAccessor(authorizationclient.NewForConfigOrDie(clusterAdminClientConfig).Authorization()),
+		RoleBindingAccessor: policy.NewClusterRoleBindingAccessor(clusterAdminClient),
 		Users:               []string{user},
 	}
 	if err := addUser.AddRole(); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	return appsclient.NewForConfigOrDie(userClientConfig), userkubeClientset, func() {
+	return userClient, userkubeClientset, func() {
 		testserver.CleanupMasterEtcd(t, masterConfig)
 	}
 }
@@ -208,8 +213,8 @@ func testPodNodeConstraintsJob(nodeName string, nodeSelector map[string]string) 
 	return job
 }
 
-func testPodNodeConstraintsDeploymentConfig(nodeName string, nodeSelector map[string]string) *appsapi.DeploymentConfig {
-	dc := &appsapi.DeploymentConfig{}
+func testPodNodeConstraintsDeploymentConfig(nodeName string, nodeSelector map[string]string) *deployapi.DeploymentConfig {
+	dc := &deployapi.DeploymentConfig{}
 	dc.Name = "testdc"
 	dc.Spec.Replicas = 1
 	dc.Spec.Template = &kapi.PodTemplateSpec{}
@@ -221,7 +226,7 @@ func testPodNodeConstraintsDeploymentConfig(nodeName string, nodeSelector map[st
 
 // testPodNodeConstraintsObjectCreationWithPodTemplate attempts to create different object types that contain pod templates
 // using the passed in nodeName and nodeSelector. It will use the expectError flag to determine if an error should be returned or not
-func testPodNodeConstraintsObjectCreationWithPodTemplate(t *testing.T, name string, kclientset kclientset.Interface, appsClient appsclient.Interface, nodeName string, nodeSelector map[string]string, expectError bool) {
+func testPodNodeConstraintsObjectCreationWithPodTemplate(t *testing.T, name string, kclientset kclientset.Interface, client client.Interface, nodeName string, nodeSelector map[string]string, expectError bool) {
 	checkForbiddenErr := func(objType string, err error) {
 		if err == nil && expectError {
 			t.Errorf("%s (%s): expected forbidden error but did not receive one", name, objType)
@@ -265,6 +270,6 @@ func testPodNodeConstraintsObjectCreationWithPodTemplate(t *testing.T, name stri
 
 	// DeploymentConfig
 	dc := testPodNodeConstraintsDeploymentConfig(nodeName, nodeSelector)
-	_, err = appsClient.Apps().DeploymentConfigs(testutil.Namespace()).Create(dc)
+	_, err = client.DeploymentConfigs(testutil.Namespace()).Create(dc)
 	checkForbiddenErr("dc", err)
 }

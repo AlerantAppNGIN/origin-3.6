@@ -9,11 +9,10 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"regexp"
 	"runtime"
-	"strings"
 	"time"
 
+	log "github.com/Sirupsen/logrus"
 	"github.com/docker/distribution"
 	"github.com/docker/distribution/configuration"
 	ctxu "github.com/docker/distribution/context"
@@ -37,7 +36,6 @@ import (
 	"github.com/docker/libtrust"
 	"github.com/garyburd/redigo/redis"
 	"github.com/gorilla/mux"
-	log "github.com/sirupsen/logrus"
 	"golang.org/x/net/context"
 )
 
@@ -100,7 +98,7 @@ func NewApp(ctx context.Context, config *configuration.Configuration) *App {
 	app.register(v2.RouteNameBase, func(ctx *Context, r *http.Request) http.Handler {
 		return http.HandlerFunc(apiBase)
 	})
-	app.register(v2.RouteNameManifest, manifestDispatcher)
+	app.register(v2.RouteNameManifest, imageManifestDispatcher)
 	app.register(v2.RouteNameCatalog, catalogDispatcher)
 	app.register(v2.RouteNameTags, tagsDispatcher)
 	app.register(v2.RouteNameBlob, blobDispatcher)
@@ -213,43 +211,6 @@ func NewApp(ctx context.Context, config *configuration.Configuration) *App {
 		options = append(options, storage.EnableRedirect)
 	}
 
-	if !config.Validation.Enabled {
-		config.Validation.Enabled = !config.Validation.Disabled
-	}
-
-	// configure validation
-	if config.Validation.Enabled {
-		if len(config.Validation.Manifests.URLs.Allow) == 0 && len(config.Validation.Manifests.URLs.Deny) == 0 {
-			// If Allow and Deny are empty, allow nothing.
-			options = append(options, storage.ManifestURLsAllowRegexp(regexp.MustCompile("^$")))
-		} else {
-			if len(config.Validation.Manifests.URLs.Allow) > 0 {
-				for i, s := range config.Validation.Manifests.URLs.Allow {
-					// Validate via compilation.
-					if _, err := regexp.Compile(s); err != nil {
-						panic(fmt.Sprintf("validation.manifests.urls.allow: %s", err))
-					}
-					// Wrap with non-capturing group.
-					config.Validation.Manifests.URLs.Allow[i] = fmt.Sprintf("(?:%s)", s)
-				}
-				re := regexp.MustCompile(strings.Join(config.Validation.Manifests.URLs.Allow, "|"))
-				options = append(options, storage.ManifestURLsAllowRegexp(re))
-			}
-			if len(config.Validation.Manifests.URLs.Deny) > 0 {
-				for i, s := range config.Validation.Manifests.URLs.Deny {
-					// Validate via compilation.
-					if _, err := regexp.Compile(s); err != nil {
-						panic(fmt.Sprintf("validation.manifests.urls.deny: %s", err))
-					}
-					// Wrap with non-capturing group.
-					config.Validation.Manifests.URLs.Deny[i] = fmt.Sprintf("(?:%s)", s)
-				}
-				re := regexp.MustCompile(strings.Join(config.Validation.Manifests.URLs.Deny, "|"))
-				options = append(options, storage.ManifestURLsDenyRegexp(re))
-			}
-		}
-	}
-
 	// configure storage caches
 	if cc, ok := config.Storage["cache"]; ok {
 		v, ok := cc["blobdescriptor"]
@@ -345,7 +306,7 @@ func (app *App) RegisterHealthChecks(healthRegistries ...*health.Registry) {
 		}
 
 		storageDriverCheck := func() error {
-			_, err := app.driver.Stat(app, "/") // "/" should always exist
+			_, err := app.driver.List(app, "/") // "/" should always exist
 			return err                          // any error will be treated as failure
 		}
 
@@ -405,18 +366,38 @@ func (app *App) RegisterHealthChecks(healthRegistries ...*health.Registry) {
 	}
 }
 
+type customAccessRecordsFunc func(*http.Request) []auth.Access
+
+func NoCustomAccessRecords(*http.Request) []auth.Access {
+	return []auth.Access{}
+}
+
+func NameNotRequired(*http.Request) bool {
+	return false
+}
+
+func NameRequired(*http.Request) bool {
+	return true
+}
+
 // register a handler with the application, by route name. The handler will be
 // passed through the application filters and context will be constructed at
 // request time.
 func (app *App) register(routeName string, dispatch dispatchFunc) {
+	app.RegisterRoute(app.router.GetRoute(routeName), dispatch, app.nameRequired, NoCustomAccessRecords)
+}
 
+func (app *App) RegisterRoute(route *mux.Route, dispatch dispatchFunc, nameRequired nameRequiredFunc, accessRecords customAccessRecordsFunc) {
 	// TODO(stevvooe): This odd dispatcher/route registration is by-product of
 	// some limitations in the gorilla/mux router. We are using it to keep
 	// routing consistent between the client and server, but we may want to
 	// replace it with manual routing and structure-based dispatch for better
 	// control over the request execution.
+	route.Handler(app.dispatcher(dispatch, nameRequired, accessRecords))
+}
 
-	app.router.GetRoute(routeName).Handler(app.dispatcher(dispatch))
+func (app *App) NewRoute() *mux.Route {
+	return app.router.NewRoute()
 }
 
 // configureEvents prepares the event sink for action.
@@ -431,11 +412,10 @@ func (app *App) configureEvents(configuration *configuration.Configuration) {
 
 		ctxu.GetLogger(app).Infof("configuring endpoint %v (%v), timeout=%s, headers=%v", endpoint.Name, endpoint.URL, endpoint.Timeout, endpoint.Headers)
 		endpoint := notifications.NewEndpoint(endpoint.Name, endpoint.URL, notifications.EndpointConfig{
-			Timeout:           endpoint.Timeout,
-			Threshold:         endpoint.Threshold,
-			Backoff:           endpoint.Backoff,
-			Headers:           endpoint.Headers,
-			IgnoredMediaTypes: endpoint.IgnoredMediaTypes,
+			Timeout:   endpoint.Timeout,
+			Threshold: endpoint.Threshold,
+			Backoff:   endpoint.Backoff,
+			Headers:   endpoint.Headers,
 		})
 
 		sinks = append(sinks, endpoint)
@@ -465,8 +445,6 @@ func (app *App) configureEvents(configuration *configuration.Configuration) {
 	}
 }
 
-type redisStartAtKey struct{}
-
 func (app *App) configureRedis(configuration *configuration.Configuration) {
 	if configuration.Redis.Addr == "" {
 		ctxu.GetLogger(app).Infof("redis not configured")
@@ -476,11 +454,11 @@ func (app *App) configureRedis(configuration *configuration.Configuration) {
 	pool := &redis.Pool{
 		Dial: func() (redis.Conn, error) {
 			// TODO(stevvooe): Yet another use case for contextual timing.
-			ctx := context.WithValue(app, redisStartAtKey{}, time.Now())
+			ctx := context.WithValue(app, "redis.connect.startedat", time.Now())
 
 			done := func(err error) {
 				logger := ctxu.GetLoggerWithField(ctx, "redis.connect.duration",
-					ctxu.Since(ctx, redisStartAtKey{}))
+					ctxu.Since(ctx, "redis.connect.startedat"))
 				if err != nil {
 					logger.Errorf("redis: error connecting: %v", err)
 				} else {
@@ -596,19 +574,24 @@ func (app *App) configureSecret(configuration *configuration.Configuration) {
 func (app *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close() // ensure that request body is always closed.
 
-	// Prepare the context with our own little decorations.
-	ctx := r.Context()
-	ctx = ctxu.WithRequest(ctx, r)
-	ctx, w = ctxu.WithResponseWriter(ctx, w)
-	ctx = ctxu.WithLogger(ctx, ctxu.GetRequestLogger(ctx))
-	r = r.WithContext(ctx)
+	// Instantiate an http context here so we can track the error codes
+	// returned by the request router.
+	ctx := defaultContextManager.context(app, w, r)
 
 	defer func() {
 		status, ok := ctx.Value("http.response.status").(int)
 		if ok && status >= 200 && status <= 399 {
-			ctxu.GetResponseLogger(r.Context()).Infof("response completed")
+			ctxu.GetResponseLogger(ctx).Infof("response completed")
 		}
 	}()
+	defer defaultContextManager.release(ctx)
+
+	// NOTE(stevvooe): Total hack to get instrumented responsewriter from context.
+	var err error
+	w, err = ctxu.GetResponseWriter(ctx)
+	if err != nil {
+		ctxu.GetLogger(ctx).Warnf("response writer not found in context")
+	}
 
 	// Set a header with the Docker Distribution API Version for all responses.
 	w.Header().Add("Docker-Distribution-API-Version", "registry/2.0")
@@ -626,7 +609,7 @@ type dispatchFunc func(ctx *Context, r *http.Request) http.Handler
 
 // dispatcher returns a handler that constructs a request specific context and
 // handler, using the dispatch factory function.
-func (app *App) dispatcher(dispatch dispatchFunc) http.Handler {
+func (app *App) dispatcher(dispatch dispatchFunc, nameRequired nameRequiredFunc, accessRecords customAccessRecordsFunc) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		for headerName, headerValues := range app.Config.HTTP.Headers {
 			for _, value := range headerValues {
@@ -636,19 +619,16 @@ func (app *App) dispatcher(dispatch dispatchFunc) http.Handler {
 
 		context := app.context(w, r)
 
-		if err := app.authorized(w, r, context); err != nil {
-			ctxu.GetLogger(context).Warnf("error authorizing context: %v", err)
+		if err := app.authorized(w, r, context, nameRequired, accessRecords(r)); err != nil {
+			ctxu.GetLogger(context).Errorf("error authorizing context: %v", err)
 			return
 		}
 
 		// Add username to request logging
 		context.Context = ctxu.WithLogger(context.Context, ctxu.GetLogger(context.Context, auth.UserNameKey))
 
-		// sync up context on the request.
-		r = r.WithContext(context)
-
-		if app.nameRequired(r) {
-			nameRef, err := reference.WithName(getName(context))
+		if nameRequired(r) {
+			nameRef, err := reference.ParseNamed(getName(context))
 			if err != nil {
 				ctxu.GetLogger(context).Errorf("error parsing reference from context: %v", err)
 				context.Errors = append(context.Errors, distribution.ErrRepositoryNameInvalid{
@@ -711,18 +691,6 @@ func (app *App) dispatcher(dispatch dispatchFunc) http.Handler {
 	})
 }
 
-type errCodeKey struct{}
-
-func (errCodeKey) String() string { return "err.code" }
-
-type errMessageKey struct{}
-
-func (errMessageKey) String() string { return "err.message" }
-
-type errDetailKey struct{}
-
-func (errDetailKey) String() string { return "err.detail" }
-
 func (app *App) logError(context context.Context, errors errcode.Errors) {
 	for _, e1 := range errors {
 		var c ctxu.Context
@@ -730,23 +698,23 @@ func (app *App) logError(context context.Context, errors errcode.Errors) {
 		switch e1.(type) {
 		case errcode.Error:
 			e, _ := e1.(errcode.Error)
-			c = ctxu.WithValue(context, errCodeKey{}, e.Code)
-			c = ctxu.WithValue(c, errMessageKey{}, e.Code.Message())
-			c = ctxu.WithValue(c, errDetailKey{}, e.Detail)
+			c = ctxu.WithValue(context, "err.code", e.Code)
+			c = ctxu.WithValue(c, "err.message", e.Code.Message())
+			c = ctxu.WithValue(c, "err.detail", e.Detail)
 		case errcode.ErrorCode:
 			e, _ := e1.(errcode.ErrorCode)
-			c = ctxu.WithValue(context, errCodeKey{}, e)
-			c = ctxu.WithValue(c, errMessageKey{}, e.Message())
+			c = ctxu.WithValue(context, "err.code", e)
+			c = ctxu.WithValue(c, "err.message", e.Message())
 		default:
 			// just normal go 'error'
-			c = ctxu.WithValue(context, errCodeKey{}, errcode.ErrorCodeUnknown)
-			c = ctxu.WithValue(c, errMessageKey{}, e1.Error())
+			c = ctxu.WithValue(context, "err.code", errcode.ErrorCodeUnknown)
+			c = ctxu.WithValue(c, "err.message", e1.Error())
 		}
 
 		c = ctxu.WithLogger(c, ctxu.GetLogger(c,
-			errCodeKey{},
-			errMessageKey{},
-			errDetailKey{}))
+			"err.code",
+			"err.message",
+			"err.detail"))
 		ctxu.GetResponseLogger(c).Errorf("response completed with error")
 	}
 }
@@ -754,7 +722,7 @@ func (app *App) logError(context context.Context, errors errcode.Errors) {
 // context constructs the context object for the application. This only be
 // called once per request.
 func (app *App) context(w http.ResponseWriter, r *http.Request) *Context {
-	ctx := r.Context()
+	ctx := defaultContextManager.context(app, w, r)
 	ctx = ctxu.WithVars(ctx, r)
 	ctx = ctxu.WithLogger(ctx, ctxu.GetLogger(ctx,
 		"vars.name",
@@ -782,7 +750,7 @@ func (app *App) context(w http.ResponseWriter, r *http.Request) *Context {
 // authorized checks if the request can proceed with access to the requested
 // repository. If it succeeds, the context may access the requested
 // repository. An error will be returned if access is not available.
-func (app *App) authorized(w http.ResponseWriter, r *http.Request, context *Context) error {
+func (app *App) authorized(w http.ResponseWriter, r *http.Request, context *Context, nameRequired nameRequiredFunc, customAccessRecords []auth.Access) error {
 	ctxu.GetLogger(context).Debug("authorizing request")
 	repo := getName(context)
 
@@ -791,6 +759,7 @@ func (app *App) authorized(w http.ResponseWriter, r *http.Request, context *Cont
 	}
 
 	var accessRecords []auth.Access
+	accessRecords = append(accessRecords, customAccessRecords...)
 
 	if repo != "" {
 		accessRecords = appendAccessRecords(accessRecords, r.Method, repo)
@@ -799,9 +768,10 @@ func (app *App) authorized(w http.ResponseWriter, r *http.Request, context *Cont
 			// access to the source repository.
 			accessRecords = appendAccessRecords(accessRecords, "GET", fromRepo)
 		}
-	} else {
+	}
+	if len(accessRecords) == 0 {
 		// Only allow the name not to be set on the base route.
-		if app.nameRequired(r) {
+		if nameRequired(r) {
 			// For this to be properly secured, repo must always be set for a
 			// resource that may make a modification. The only condition under
 			// which name is not set and we still allow access is when the
@@ -856,14 +826,13 @@ func (app *App) eventBridge(ctx *Context, r *http.Request) notifications.Listene
 	return notifications.NewBridge(ctx.urlBuilder, app.events.source, actor, request, app.events.sink)
 }
 
+type nameRequiredFunc func(*http.Request) bool
+
 // nameRequired returns true if the route requires a name.
 func (app *App) nameRequired(r *http.Request) bool {
 	route := mux.CurrentRoute(r)
-	if route == nil {
-		return true
-	}
 	routeName := route.GetName()
-	return routeName != v2.RouteNameBase && routeName != v2.RouteNameCatalog
+	return route == nil || (routeName != v2.RouteNameBase && routeName != v2.RouteNameCatalog)
 }
 
 // apiBase implements a simple yes-man for doing overall checks against the
@@ -902,10 +871,12 @@ func appendAccessRecords(records []auth.Access, method string, repo string) []au
 				Action:   "push",
 			})
 	case "DELETE":
+		// DELETE access requires full admin rights, which is represented
+		// as "*". This may not be ideal.
 		records = append(records,
 			auth.Access{
 				Resource: resource,
-				Action:   "delete",
+				Action:   "*",
 			})
 	}
 	return records

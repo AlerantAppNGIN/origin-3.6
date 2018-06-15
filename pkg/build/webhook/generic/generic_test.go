@@ -9,9 +9,10 @@ import (
 	"testing"
 
 	buildapi "github.com/openshift/origin/pkg/build/apis/build"
+	"github.com/openshift/origin/pkg/build/webhook"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	kapi "k8s.io/kubernetes/pkg/apis/core"
+	kapi "k8s.io/kubernetes/pkg/api"
 )
 
 var mockBuildStrategy = buildapi.BuildStrategy{
@@ -86,10 +87,189 @@ func TestVerifyRequestForMethod(t *testing.T) {
 		},
 	}
 	plugin := New()
-	revision, _, _, proceed, err := plugin.Extract(buildConfig, buildConfig.Spec.Triggers[0].GenericWebHook, req)
+	revision, _, _, proceed, err := plugin.Extract(buildConfig, "secret100", "", req)
 
 	if err == nil || !strings.Contains(err.Error(), "unsupported HTTP method") {
 		t.Errorf("Expected unsupported HTTP method, got %v!", err)
+	}
+	if proceed {
+		t.Error("Expected 'proceed' return value to be 'false'")
+	}
+	if revision != nil {
+		t.Error("Expected the 'revision' return value to be nil")
+	}
+}
+
+func TestWrongSecretMultipleGenericWebHooks(t *testing.T) {
+	req := GivenRequest("GET")
+	buildConfig := &buildapi.BuildConfig{
+		Spec: buildapi.BuildConfigSpec{
+			Triggers: []buildapi.BuildTriggerPolicy{
+				{
+					Type: buildapi.GenericWebHookBuildTriggerType,
+					GenericWebHook: &buildapi.WebHookTrigger{
+						Secret: "secret101",
+					},
+				},
+				{
+					Type: buildapi.GenericWebHookBuildTriggerType,
+					GenericWebHook: &buildapi.WebHookTrigger{
+						Secret: "secret100",
+					},
+				},
+				{
+					Type: buildapi.GenericWebHookBuildTriggerType,
+					GenericWebHook: &buildapi.WebHookTrigger{
+						Secret: "secret102",
+					},
+				},
+			},
+		},
+	}
+
+	plugin := New()
+	revision, _, _, proceed, err := plugin.Extract(buildConfig, "wrongsecret", "", req)
+
+	if err != webhook.ErrSecretMismatch {
+		t.Errorf("Expected %s, got %s", webhook.ErrSecretMismatch, err)
+	}
+
+	if proceed {
+		t.Error("Expected 'proceed' to return 'false'")
+	}
+
+	if revision != nil {
+		t.Errorf("Expected the 'revision' to be nil, go %v instead", revision)
+	}
+}
+
+func TestMatchSecretMultipleGenericWebHooks(t *testing.T) {
+	req := GivenRequestWithPayload(t, "push-generic.json")
+	buildConfig := &buildapi.BuildConfig{
+		Spec: buildapi.BuildConfigSpec{
+			Triggers: []buildapi.BuildTriggerPolicy{
+				{
+					Type: buildapi.GenericWebHookBuildTriggerType,
+					GenericWebHook: &buildapi.WebHookTrigger{
+						Secret: "secret101",
+					},
+				},
+				{
+					Type: buildapi.GenericWebHookBuildTriggerType,
+					GenericWebHook: &buildapi.WebHookTrigger{
+						Secret: "secret100",
+					},
+				},
+				{
+					Type: buildapi.GenericWebHookBuildTriggerType,
+					GenericWebHook: &buildapi.WebHookTrigger{
+						Secret: "secret102",
+					},
+				},
+			},
+			CommonSpec: buildapi.CommonSpec{
+				Source: buildapi.BuildSource{
+					Git: &buildapi.GitBuildSource{
+						Ref: "master",
+					},
+				},
+				Strategy: mockBuildStrategy,
+			},
+		},
+	}
+
+	plugin := New()
+	revision, _, _, proceed, err := plugin.Extract(buildConfig, "secret102", "", req)
+
+	if err != nil {
+		t.Errorf("Expected no error, got %s", err)
+	}
+
+	if !proceed {
+		t.Error("Expected 'proceed' to return 'true', got 'false' instead")
+	}
+
+	if revision == nil {
+		t.Errorf("Expected the 'revision' to not be nil")
+	}
+}
+
+func TestEnvVarsMultipleGenericWebHooks(t *testing.T) {
+	req := GivenRequestWithPayload(t, "push-generic-envs.json")
+	buildConfig := &buildapi.BuildConfig{
+		Spec: buildapi.BuildConfigSpec{
+			Triggers: []buildapi.BuildTriggerPolicy{
+				{
+					Type: buildapi.GenericWebHookBuildTriggerType,
+					GenericWebHook: &buildapi.WebHookTrigger{
+						Secret:   "secret101",
+						AllowEnv: true,
+					},
+				},
+				{
+					Type: buildapi.GenericWebHookBuildTriggerType,
+					GenericWebHook: &buildapi.WebHookTrigger{
+						Secret: "secret100",
+					},
+				},
+				{
+					Type: buildapi.GenericWebHookBuildTriggerType,
+					GenericWebHook: &buildapi.WebHookTrigger{
+						Secret: "secret102",
+					},
+				},
+			},
+			CommonSpec: buildapi.CommonSpec{
+				Source: buildapi.BuildSource{
+					Git: &buildapi.GitBuildSource{
+						Ref: "master",
+					},
+				},
+				Strategy: mockBuildStrategy,
+			},
+		},
+	}
+
+	plugin := New()
+	revision, envvars, _, proceed, err := plugin.Extract(buildConfig, "secret101", "", req)
+
+	if err != nil {
+		t.Errorf("Expected to be able to trigger a build without a payload error: %v", err)
+	}
+
+	if !proceed {
+		t.Error("Expected 'proceed' to return 'true'")
+	}
+
+	if revision == nil {
+		t.Errorf("Expected the 'revision' to not be nil")
+	}
+
+	if len(envvars) == 0 {
+		t.Error("Expected env vars to be set")
+	}
+
+}
+
+func TestWrongSecret(t *testing.T) {
+	req := GivenRequest("POST")
+	buildConfig := &buildapi.BuildConfig{
+		Spec: buildapi.BuildConfigSpec{
+			Triggers: []buildapi.BuildTriggerPolicy{
+				{
+					Type: buildapi.GenericWebHookBuildTriggerType,
+					GenericWebHook: &buildapi.WebHookTrigger{
+						Secret: "secret100",
+					},
+				},
+			},
+		},
+	}
+	plugin := New()
+	revision, _, _, proceed, err := plugin.Extract(buildConfig, "wrongsecret", "", req)
+
+	if err != webhook.ErrSecretMismatch {
+		t.Errorf("Expected %v, got %v!", webhook.ErrSecretMismatch, err)
 	}
 	if proceed {
 		t.Error("Expected 'proceed' return value to be 'false'")
@@ -130,7 +310,7 @@ func TestExtractWithEmptyPayload(t *testing.T) {
 		},
 	}
 	plugin := New()
-	revision, _, _, proceed, err := plugin.Extract(buildConfig, buildConfig.Spec.Triggers[0].GenericWebHook, req)
+	revision, _, _, proceed, err := plugin.Extract(buildConfig, "secret100", "", req)
 	if err != nil {
 		t.Errorf("Expected to be able to trigger a build without a payload error: %v", err)
 	}
@@ -165,7 +345,7 @@ func TestExtractWithUnmatchedRefGitPayload(t *testing.T) {
 		},
 	}
 	plugin := New()
-	build, _, _, proceed, err := plugin.Extract(buildConfig, buildConfig.Spec.Triggers[0].GenericWebHook, req)
+	build, _, _, proceed, err := plugin.Extract(buildConfig, "secret100", "", req)
 
 	matchWarning(t, err, `skipping build. Branch reference from "refs/heads/master" does not match configuration`)
 	if proceed {
@@ -199,7 +379,7 @@ func TestExtractWithGitPayload(t *testing.T) {
 		},
 	}
 	plugin := New()
-	revision, _, _, proceed, err := plugin.Extract(buildConfig, buildConfig.Spec.Triggers[0].GenericWebHook, req)
+	revision, _, _, proceed, err := plugin.Extract(buildConfig, "secret100", "", req)
 
 	if err != nil {
 		t.Errorf("Expected to be able to trigger a build without a payload error: %v", err)
@@ -235,7 +415,7 @@ func TestExtractWithGitPayloadAndUTF8Charset(t *testing.T) {
 		},
 	}
 	plugin := New()
-	revision, _, _, proceed, err := plugin.Extract(buildConfig, buildConfig.Spec.Triggers[0].GenericWebHook, req)
+	revision, _, _, proceed, err := plugin.Extract(buildConfig, "secret100", "", req)
 
 	if err != nil {
 		t.Errorf("Expected to be able to trigger a build without a payload error: %v", err)
@@ -271,7 +451,7 @@ func TestExtractWithGitRefsPayload(t *testing.T) {
 		},
 	}
 	plugin := New()
-	revision, _, _, proceed, err := plugin.Extract(buildConfig, buildConfig.Spec.Triggers[0].GenericWebHook, req)
+	revision, _, _, proceed, err := plugin.Extract(buildConfig, "secret100", "", req)
 
 	if err != nil {
 		t.Errorf("Expected to be able to trigger a build without a payload error: %v", err)
@@ -307,7 +487,7 @@ func TestExtractWithUnmatchedGitRefsPayload(t *testing.T) {
 		},
 	}
 	plugin := New()
-	revision, _, _, proceed, err := plugin.Extract(buildConfig, buildConfig.Spec.Triggers[0].GenericWebHook, req)
+	revision, _, _, proceed, err := plugin.Extract(buildConfig, "secret100", "", req)
 
 	matchWarning(t, err, `skipping build. None of the supplied refs matched "other"`)
 	if proceed {
@@ -342,7 +522,7 @@ func TestExtractWithKeyValuePairsJSON(t *testing.T) {
 		},
 	}
 	plugin := New()
-	revision, envvars, _, proceed, err := plugin.Extract(buildConfig, buildConfig.Spec.Triggers[0].GenericWebHook, req)
+	revision, envvars, _, proceed, err := plugin.Extract(buildConfig, "secret100", "", req)
 
 	if err != nil {
 		t.Errorf("Expected to be able to trigger a build without a payload error: %v", err)
@@ -383,7 +563,7 @@ func TestExtractWithKeyValuePairsYAML(t *testing.T) {
 		},
 	}
 	plugin := New()
-	revision, envvars, _, proceed, err := plugin.Extract(buildConfig, buildConfig.Spec.Triggers[0].GenericWebHook, req)
+	revision, envvars, _, proceed, err := plugin.Extract(buildConfig, "secret100", "", req)
 
 	if err != nil {
 		t.Errorf("Expected to be able to trigger a build without a payload error: %v", err)
@@ -423,7 +603,7 @@ func TestExtractWithKeyValuePairsDisabled(t *testing.T) {
 		},
 	}
 	plugin := New()
-	revision, envvars, _, proceed, err := plugin.Extract(buildConfig, buildConfig.Spec.Triggers[0].GenericWebHook, req)
+	revision, envvars, _, proceed, err := plugin.Extract(buildConfig, "secret100", "", req)
 
 	if err != nil {
 		t.Errorf("Expected to be able to trigger a build without a payload error: %v", err)
@@ -461,7 +641,7 @@ func TestGitlabPush(t *testing.T) {
 		},
 	}
 	plugin := New()
-	_, _, _, proceed, err := plugin.Extract(buildConfig, buildConfig.Spec.Triggers[0].GenericWebHook, req)
+	_, _, _, proceed, err := plugin.Extract(buildConfig, "secret100", "", req)
 
 	matchWarning(t, err, "no git information found in payload, ignoring and continuing with build")
 	if !proceed {
@@ -491,7 +671,7 @@ func TestNonJsonPush(t *testing.T) {
 		},
 	}
 	plugin := New()
-	_, _, _, proceed, err := plugin.Extract(buildConfig, buildConfig.Spec.Triggers[0].GenericWebHook, req)
+	_, _, _, proceed, err := plugin.Extract(buildConfig, "secret100", "", req)
 
 	if err != nil {
 		t.Errorf("Expected to be able to trigger a build without a payload error: %v", err)
@@ -532,7 +712,7 @@ func TestExtractWithUnmarshalError(t *testing.T) {
 		},
 	}
 	plugin := New()
-	revision, _, _, proceed, err := plugin.Extract(buildConfig, buildConfig.Spec.Triggers[0].GenericWebHook, req)
+	revision, _, _, proceed, err := plugin.Extract(buildConfig, "secret100", "", req)
 	matchWarning(t, err, `error unmarshalling payload: invalid character '\x00' looking for beginning of value, ignoring payload and continuing with build`)
 	if !proceed {
 		t.Error("Expected 'proceed' return value to be 'true'")
@@ -566,7 +746,7 @@ func TestExtractWithUnmarshalErrorYAML(t *testing.T) {
 		},
 	}
 	plugin := New()
-	revision, _, _, proceed, err := plugin.Extract(buildConfig, buildConfig.Spec.Triggers[0].GenericWebHook, req)
+	revision, _, _, proceed, err := plugin.Extract(buildConfig, "secret100", "", req)
 	matchWarning(t, err, "error converting payload to json: yaml: control characters are not allowed, ignoring payload and continuing with build")
 	if !proceed {
 		t.Error("Expected 'proceed' return value to be 'true'")
@@ -600,7 +780,7 @@ func TestExtractWithBadContentType(t *testing.T) {
 		},
 	}
 	plugin := New()
-	revision, _, _, proceed, err := plugin.Extract(buildConfig, buildConfig.Spec.Triggers[0].GenericWebHook, req)
+	revision, _, _, proceed, err := plugin.Extract(buildConfig, "secret100", "", req)
 	matchWarning(t, err, "invalid Content-Type on payload, ignoring payload and continuing with build")
 	if !proceed {
 		t.Error("Expected 'proceed' return value to be 'true'")
@@ -634,7 +814,7 @@ func TestExtractWithUnparseableContentType(t *testing.T) {
 		},
 	}
 	plugin := New()
-	revision, _, _, proceed, err := plugin.Extract(buildConfig, buildConfig.Spec.Triggers[0].GenericWebHook, req)
+	revision, _, _, proceed, err := plugin.Extract(buildConfig, "secret100", "", req)
 	if err == nil || err.Error() != "error parsing Content-Type: mime: expected token after slash" {
 		t.Errorf("Unexpected error %v", err)
 	}

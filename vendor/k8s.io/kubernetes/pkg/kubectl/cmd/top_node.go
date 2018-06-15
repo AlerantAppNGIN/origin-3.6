@@ -22,30 +22,24 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
-	"k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
-	"k8s.io/client-go/discovery"
-	corev1 "k8s.io/client-go/kubernetes/typed/core/v1"
+	"k8s.io/kubernetes/pkg/api"
+	coreclient "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset/typed/core/internalversion"
 	"k8s.io/kubernetes/pkg/kubectl/cmd/templates"
 	cmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
 	"k8s.io/kubernetes/pkg/kubectl/metricsutil"
-	"k8s.io/kubernetes/pkg/kubectl/util/i18n"
-	metricsapi "k8s.io/metrics/pkg/apis/metrics"
-	metricsV1beta1api "k8s.io/metrics/pkg/apis/metrics/v1beta1"
-	metricsclientset "k8s.io/metrics/pkg/client/clientset_generated/clientset"
+	"k8s.io/kubernetes/pkg/util/i18n"
 )
 
 // TopNodeOptions contains all the options for running the top-node cli command.
 type TopNodeOptions struct {
 	ResourceName    string
 	Selector        string
-	NodeClient      corev1.CoreV1Interface
+	NodeClient      coreclient.NodesGetter
 	HeapsterOptions HeapsterTopOptions
 	Client          *metricsutil.HeapsterMetricsClient
 	Printer         *metricsutil.TopCmdPrinter
-	DiscoveryClient discovery.DiscoveryInterface
-	MetricsClient   metricsclientset.Interface
 }
 
 type HeapsterTopOptions struct {
@@ -95,8 +89,7 @@ func NewCmdTopNode(f cmdutil.Factory, options *TopNodeOptions, out io.Writer) *c
 	}
 
 	cmd := &cobra.Command{
-		Use: "node [NAME | -l label]",
-		DisableFlagsInUseLine: true,
+		Use:     "node [NAME | -l label]",
 		Short:   i18n.T("Display Resource (CPU/Memory/Storage) usage of nodes"),
 		Long:    topNodeLong,
 		Example: topNodeExample,
@@ -105,7 +98,7 @@ func NewCmdTopNode(f cmdutil.Factory, options *TopNodeOptions, out io.Writer) *c
 				cmdutil.CheckErr(err)
 			}
 			if err := options.Validate(); err != nil {
-				cmdutil.CheckErr(cmdutil.UsageErrorf(cmd, "%v", err))
+				cmdutil.CheckErr(cmdutil.UsageError(cmd, err.Error()))
 			}
 			if err := options.RunTopNode(); err != nil {
 				cmdutil.CheckErr(err)
@@ -113,37 +106,25 @@ func NewCmdTopNode(f cmdutil.Factory, options *TopNodeOptions, out io.Writer) *c
 		},
 		Aliases: []string{"nodes", "no"},
 	}
-	cmd.Flags().StringVarP(&options.Selector, "selector", "l", options.Selector, "Selector (label query) to filter on, supports '=', '==', and '!='.(e.g. -l key1=value1,key2=value2)")
+	cmd.Flags().StringVarP(&options.Selector, "selector", "l", "", "Selector (label query) to filter on, supports '=', '==', and '!='.")
 	options.HeapsterOptions.Bind(cmd.Flags())
 	return cmd
 }
 
 func (o *TopNodeOptions) Complete(f cmdutil.Factory, cmd *cobra.Command, args []string, out io.Writer) error {
+	var err error
 	if len(args) == 1 {
 		o.ResourceName = args[0]
 	} else if len(args) > 1 {
-		return cmdutil.UsageErrorf(cmd, "%s", cmd.Use)
+		return cmdutil.UsageError(cmd, cmd.Use)
 	}
 
-	clientset, err := f.KubernetesClientSet()
+	clientset, err := f.ClientSet()
 	if err != nil {
 		return err
 	}
-
-	o.DiscoveryClient = clientset.DiscoveryClient
-
-	config, err := f.ClientConfig()
-	if err != nil {
-		return err
-	}
-	o.MetricsClient, err = metricsclientset.NewForConfig(config)
-	if err != nil {
-		return err
-	}
-
-	o.NodeClient = clientset.CoreV1()
-	o.Client = metricsutil.NewHeapsterMetricsClient(clientset.CoreV1(), o.HeapsterOptions.Namespace, o.HeapsterOptions.Scheme, o.HeapsterOptions.Service, o.HeapsterOptions.Port)
-
+	o.NodeClient = clientset.Core()
+	o.Client = metricsutil.NewHeapsterMetricsClient(clientset.Core(), o.HeapsterOptions.Namespace, o.HeapsterOptions.Scheme, o.HeapsterOptions.Service, o.HeapsterOptions.Port)
 	o.Printer = metricsutil.NewTopCmdPrinter(out)
 	return nil
 }
@@ -151,6 +132,12 @@ func (o *TopNodeOptions) Complete(f cmdutil.Factory, cmd *cobra.Command, args []
 func (o *TopNodeOptions) Validate() error {
 	if len(o.ResourceName) > 0 && len(o.Selector) > 0 {
 		return errors.New("only one of NAME or --selector can be provided")
+	}
+	if len(o.Selector) > 0 {
+		_, err := labels.Parse(o.Selector)
+		if err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -164,32 +151,15 @@ func (o TopNodeOptions) RunTopNode() error {
 			return err
 		}
 	}
-
-	apiGroups, err := o.DiscoveryClient.ServerGroups()
+	metrics, err := o.Client.GetNodeMetrics(o.ResourceName, selector)
 	if err != nil {
 		return err
 	}
-
-	metricsAPIAvailable := SupportedMetricsAPIVersionAvailable(apiGroups)
-
-	metrics := &metricsapi.NodeMetricsList{}
-	if metricsAPIAvailable {
-		metrics, err = getNodeMetricsFromMetricsAPI(o.MetricsClient, o.ResourceName, selector)
-		if err != nil {
-			return err
-		}
-	} else {
-		metrics, err = o.Client.GetNodeMetrics(o.ResourceName, selector.String())
-		if err != nil {
-			return err
-		}
-	}
-
-	if len(metrics.Items) == 0 {
+	if len(metrics) == 0 {
 		return errors.New("metrics not available yet")
 	}
 
-	var nodes []v1.Node
+	var nodes []api.Node
 	if len(o.ResourceName) > 0 {
 		node, err := o.NodeClient.Nodes().Get(o.ResourceName, metav1.GetOptions{})
 		if err != nil {
@@ -206,36 +176,11 @@ func (o TopNodeOptions) RunTopNode() error {
 		nodes = append(nodes, nodeList.Items...)
 	}
 
-	allocatable := make(map[string]v1.ResourceList)
+	allocatable := make(map[string]api.ResourceList)
 
 	for _, n := range nodes {
 		allocatable[n.Name] = n.Status.Allocatable
 	}
 
-	return o.Printer.PrintNodeMetrics(metrics.Items, allocatable)
-}
-
-func getNodeMetricsFromMetricsAPI(metricsClient metricsclientset.Interface, resourceName string, selector labels.Selector) (*metricsapi.NodeMetricsList, error) {
-	var err error
-	versionedMetrics := &metricsV1beta1api.NodeMetricsList{}
-	mc := metricsClient.Metrics()
-	nm := mc.NodeMetricses()
-	if resourceName != "" {
-		m, err := nm.Get(resourceName, metav1.GetOptions{})
-		if err != nil {
-			return nil, err
-		}
-		versionedMetrics.Items = []metricsV1beta1api.NodeMetrics{*m}
-	} else {
-		versionedMetrics, err = nm.List(metav1.ListOptions{LabelSelector: selector.String()})
-		if err != nil {
-			return nil, err
-		}
-	}
-	metrics := &metricsapi.NodeMetricsList{}
-	err = metricsV1beta1api.Convert_v1beta1_NodeMetricsList_To_metrics_NodeMetricsList(versionedMetrics, metrics, nil)
-	if err != nil {
-		return nil, err
-	}
-	return metrics, nil
+	return o.Printer.PrintNodeMetrics(metrics, allocatable)
 }

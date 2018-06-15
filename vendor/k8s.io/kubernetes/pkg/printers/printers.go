@@ -21,6 +21,7 @@ import (
 	"io/ioutil"
 	"os"
 
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
@@ -28,8 +29,12 @@ import (
 // a printer or an error. The printer is agnostic to schema versions, so you must
 // send arguments to PrintObj in the version you wish them to be shown using a
 // VersionedPrinter (typically when generic is true).
-func GetStandardPrinter(typer runtime.ObjectTyper, encoder runtime.Encoder, decoders []runtime.Decoder, options PrintOptions) (ResourcePrinter, error) {
-	format, formatArgument, allowMissingTemplateKeys := options.OutputFormatType, options.OutputFormatArgument, options.AllowMissingKeys
+func GetStandardPrinter(outputOpts *OutputOptions, noHeaders bool, mapper meta.RESTMapper, typer runtime.ObjectTyper, encoder runtime.Encoder, decoders []runtime.Decoder, options PrintOptions) (ResourcePrinter, error) {
+	if outputOpts == nil {
+		return nil, fmt.Errorf("no output options specified")
+	}
+
+	format, formatArgument, allowMissingTemplateKeys := outputOpts.FmtType, outputOpts.FmtArg, outputOpts.AllowMissingKeys
 
 	var printer ResourcePrinter
 	switch format {
@@ -44,6 +49,7 @@ func GetStandardPrinter(typer runtime.ObjectTyper, encoder runtime.Encoder, deco
 		printer = &NamePrinter{
 			Typer:    typer,
 			Decoders: decoders,
+			Mapper:   mapper,
 		}
 
 	case "template", "go-template":
@@ -85,7 +91,7 @@ func GetStandardPrinter(typer runtime.ObjectTyper, encoder runtime.Encoder, deco
 
 	case "jsonpath-file":
 		if len(formatArgument) == 0 {
-			return nil, fmt.Errorf("jsonpath file format specified but no template file given")
+			return nil, fmt.Errorf("jsonpath file format specified but no template file file given")
 		}
 		data, err := ioutil.ReadFile(formatArgument)
 		if err != nil {
@@ -100,7 +106,7 @@ func GetStandardPrinter(typer runtime.ObjectTyper, encoder runtime.Encoder, deco
 
 	case "custom-columns":
 		var err error
-		if printer, err = NewCustomColumnsPrinterFromSpec(formatArgument, decoders[0], options.NoHeaders); err != nil {
+		if printer, err = NewCustomColumnsPrinterFromSpec(formatArgument, decoders[0], noHeaders); err != nil {
 			return nil, err
 		}
 
@@ -118,7 +124,7 @@ func GetStandardPrinter(typer runtime.ObjectTyper, encoder runtime.Encoder, deco
 		fallthrough
 	case "":
 
-		printer = NewHumanReadablePrinter(encoder, decoders[0], options)
+		printer = NewHumanReadablePrinterFn(encoder, decoders[0], options)
 	default:
 		return nil, fmt.Errorf("output format %q not recognized", format)
 	}

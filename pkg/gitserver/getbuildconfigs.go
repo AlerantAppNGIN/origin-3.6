@@ -9,15 +9,15 @@ import (
 	restclient "k8s.io/client-go/rest"
 
 	buildapi "github.com/openshift/origin/pkg/build/apis/build"
-	buildclient "github.com/openshift/origin/pkg/build/generated/internalclientset"
+	"github.com/openshift/origin/pkg/client"
 )
 
 const gitRepositoryAnnotationKey = "openshift.io/git-repository"
 
-func GetRepositoryBuildConfigs(c buildclient.Interface, name string, out io.Writer) error {
+func GetRepositoryBuildConfigs(c client.Interface, name string, out io.Writer) error {
 
 	ns := os.Getenv("POD_NAMESPACE")
-	buildConfigList, err := c.Build().BuildConfigs(ns).List(metav1.ListOptions{})
+	buildConfigList, err := c.BuildConfigs(ns).List(metav1.ListOptions{})
 	if err != nil {
 		return err
 	}
@@ -52,15 +52,14 @@ func GetRepositoryBuildConfigs(c buildclient.Interface, name string, out io.Writ
 	return nil
 }
 
-// GetClient returns a build client.
-func GetClient() (buildclient.Interface, error) {
+func GetClient() (client.Interface, error) {
 	clientConfig, err := restclient.InClusterConfig()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get client config: %v", err)
 	}
-	buildClient, err := buildclient.NewForConfig(clientConfig)
+	osClient, err := client.New(clientConfig)
 	if err != nil {
 		return nil, fmt.Errorf("error obtaining OpenShift client: %v", err)
 	}
-	return buildClient, nil
+	return osClient, nil
 }

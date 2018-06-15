@@ -4,19 +4,20 @@ import (
 	"fmt"
 	"strings"
 
+	"k8s.io/apimachinery/pkg/conversion"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	kutilerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/apimachinery/pkg/util/sets"
 	kauthorizer "k8s.io/apiserver/pkg/authorization/authorizer"
+	kapi "k8s.io/kubernetes/pkg/api"
 	kauthorizationapi "k8s.io/kubernetes/pkg/apis/authorization"
-	kapi "k8s.io/kubernetes/pkg/apis/core"
 	"k8s.io/kubernetes/pkg/apis/rbac"
 	rbaclisters "k8s.io/kubernetes/pkg/client/listers/rbac/internalversion"
 	authorizerrbac "k8s.io/kubernetes/plugin/pkg/auth/authorizer/rbac"
 
-	oauthapi "github.com/openshift/api/oauth/v1"
 	authorizationapi "github.com/openshift/origin/pkg/authorization/apis/authorization"
 	imageapi "github.com/openshift/origin/pkg/image/apis/image"
+	oauthapi "github.com/openshift/origin/pkg/oauth/apis/oauth"
 	projectapi "github.com/openshift/origin/pkg/project/apis/project"
 	userapi "github.com/openshift/origin/pkg/user/apis/user"
 )
@@ -24,7 +25,7 @@ import (
 // ScopesToRules takes the scopes and return the rules back.  We ALWAYS add the discovery rules and it is possible to get some rules and and
 // an error since errors aren't fatal to evaluation
 func ScopesToRules(scopes []string, namespace string, clusterRoleGetter rbaclisters.ClusterRoleLister) ([]rbac.PolicyRule, error) {
-	rules := append([]rbac.PolicyRule{}, authorizationapi.DiscoveryRule)
+	rules := append([]rbac.PolicyRule{}, authorizationapi.RbacDiscoveryRule)
 
 	errors := []error{}
 	for _, scope := range scopes {
@@ -148,19 +149,6 @@ func DefaultSupportedScopes() []string {
 
 func DefaultSupportedScopesMap() map[string]string {
 	return defaultSupportedScopesMap
-}
-
-func DescribeScopes(scopes []string) map[string]string {
-	ret := map[string]string{}
-	for _, s := range scopes {
-		val, ok := defaultSupportedScopesMap[s]
-		if ok {
-			ret[s] = val
-		} else {
-			ret[s] = ""
-		}
-	}
-	return ret
 }
 
 // user:<scope name>
@@ -434,6 +422,9 @@ func (e clusterRoleEvaluator) ResolveGettableNamespaces(scope string, clusterRol
 	return []string{}, nil
 }
 
+// TODO: direct deep copy needing a cloner is something that should be fixed upstream
+var localCloner = conversion.NewCloner()
+
 func remove(array []string, item string) []string {
 	newar := array[:0]
 	for _, element := range array {
@@ -452,14 +443,15 @@ func removeEscalatingResources(in rbac.PolicyRule) rbac.PolicyRule {
 	var ruleCopy *rbac.PolicyRule
 
 	for _, resource := range escalatingScopeResources {
-		if !(has(in.APIGroups, resource.Group) && has(in.Resources, resource.Resource)) {
+		if !(has(getAPIGroupLegacy(in), resource.Group) && has(in.Resources, resource.Resource)) {
 			continue
 		}
 
 		if ruleCopy == nil {
 			// we're using a cache of cache of an object that uses pointers to data.  I'm pretty sure we need to do a copy to avoid
 			// muddying the cache
-			ruleCopy = in.DeepCopy()
+			ruleCopy = &rbac.PolicyRule{}
+			rbac.DeepCopy_rbac_PolicyRule(&in, ruleCopy, localCloner)
 		}
 
 		ruleCopy.Resources = remove(ruleCopy.Resources, resource.Resource)
@@ -470,6 +462,14 @@ func removeEscalatingResources(in rbac.PolicyRule) rbac.PolicyRule {
 	}
 
 	return in
+}
+
+func getAPIGroupLegacy(rule rbac.PolicyRule) []string {
+	if len(rule.APIGroups) == 0 {
+		// this was done for backwards compatibility in the authorizer
+		return []string{""}
+	}
+	return rule.APIGroups
 }
 
 func ValidateScopeRestrictions(client *oauthapi.OAuthClient, scopes ...string) error {
@@ -499,7 +499,7 @@ func validateScopeRestrictions(client *oauthapi.OAuthClient, scope string) error
 
 	for _, restriction := range client.ScopeRestrictions {
 		if len(restriction.ExactValues) > 0 {
-			if err := validateLiteralScopeRestrictions(scope, restriction.ExactValues); err != nil {
+			if err := ValidateLiteralScopeRestrictions(scope, restriction.ExactValues); err != nil {
 				errs = append(errs, err)
 				continue
 			}
@@ -510,7 +510,7 @@ func validateScopeRestrictions(client *oauthapi.OAuthClient, scope string) error
 			if !clusterRoleEvaluatorInstance.Handles(scope) {
 				continue
 			}
-			if err := validateClusterRoleScopeRestrictions(scope, *restriction.ClusterRole); err != nil {
+			if err := ValidateClusterRoleScopeRestrictions(scope, *restriction.ClusterRole); err != nil {
 				errs = append(errs, err)
 				continue
 			}
@@ -526,7 +526,7 @@ func validateScopeRestrictions(client *oauthapi.OAuthClient, scope string) error
 	return kutilerrors.NewAggregate(errs)
 }
 
-func validateLiteralScopeRestrictions(scope string, literals []string) error {
+func ValidateLiteralScopeRestrictions(scope string, literals []string) error {
 	for _, literal := range literals {
 		if literal == scope {
 			return nil
@@ -536,7 +536,7 @@ func validateLiteralScopeRestrictions(scope string, literals []string) error {
 	return fmt.Errorf("%v not found in %v", scope, literals)
 }
 
-func validateClusterRoleScopeRestrictions(scope string, restriction oauthapi.ClusterRoleScopeRestriction) error {
+func ValidateClusterRoleScopeRestrictions(scope string, restriction oauthapi.ClusterRoleScopeRestriction) error {
 	role, namespace, escalating, err := clusterRoleEvaluatorInstance.parseScope(scope)
 	if err != nil {
 		return err

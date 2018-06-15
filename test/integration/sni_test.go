@@ -11,7 +11,7 @@ import (
 
 	knet "k8s.io/apimachinery/pkg/util/net"
 
-	configapi "github.com/openshift/origin/pkg/cmd/server/apis/config"
+	configapi "github.com/openshift/origin/pkg/cmd/server/api"
 	"github.com/openshift/origin/pkg/cmd/util"
 	testserver "github.com/openshift/origin/test/util/server"
 )

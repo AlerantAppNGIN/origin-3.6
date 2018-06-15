@@ -15,25 +15,23 @@ import (
 
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	kapi "k8s.io/kubernetes/pkg/apis/core"
+	kapi "k8s.io/kubernetes/pkg/api"
 	kclientset "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset"
 	"k8s.io/kubernetes/pkg/kubectl/cmd/templates"
 	kcmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
 	"k8s.io/kubernetes/pkg/kubectl/resource"
 
-	appsapi "github.com/openshift/origin/pkg/apps/apis/apps"
-	appsinternalclient "github.com/openshift/origin/pkg/apps/client/internalversion"
-	appsclientinternal "github.com/openshift/origin/pkg/apps/generated/internalclientset"
-	appsclient "github.com/openshift/origin/pkg/apps/generated/internalclientset/typed/apps/internalversion"
-	appsutil "github.com/openshift/origin/pkg/apps/util"
+	"github.com/openshift/origin/pkg/client"
+	"github.com/openshift/origin/pkg/cmd/util/clientcmd"
+	deployapi "github.com/openshift/origin/pkg/deploy/apis/apps"
+	deployutil "github.com/openshift/origin/pkg/deploy/util"
 	"github.com/openshift/origin/pkg/oc/cli/describe"
-	"github.com/openshift/origin/pkg/oc/cli/util/clientcmd"
 )
 
 // DeployOptions holds all the options for the `deploy` command
 type DeployOptions struct {
 	out             io.Writer
-	appsClient      appsclient.AppsInterface
+	osClient        client.Interface
 	kubeClient      kclientset.Interface
 	builder         *resource.Builder
 	namespace       string
@@ -108,15 +106,13 @@ func NewCmdDeploy(fullName string, f *clientcmd.Factory, out io.Writer) *cobra.C
 		Long:       fmt.Sprintf(deployLong, fullName),
 		Example:    fmt.Sprintf(deployExample, fullName),
 		SuggestFor: []string{"deployment"},
-		Deprecated: "use the oc rollout latest and oc rollout status",
-		Hidden:     true,
 		Run: func(cmd *cobra.Command, args []string) {
 			if err := options.Complete(f, args, out); err != nil {
 				kcmdutil.CheckErr(err)
 			}
 
 			if err := options.Validate(); err != nil {
-				kcmdutil.CheckErr(kcmdutil.UsageErrorf(cmd, err.Error()))
+				kcmdutil.CheckErr(kcmdutil.UsageError(cmd, err.Error()))
 			}
 
 			if err := options.RunDeploy(); err != nil {
@@ -143,25 +139,16 @@ func (o *DeployOptions) Complete(f *clientcmd.Factory, args []string, out io.Wri
 	}
 	var err error
 
-	o.kubeClient, err = f.ClientSet()
+	o.osClient, o.kubeClient, err = f.Clients()
 	if err != nil {
 		return err
 	}
-	clientConfig, err := f.ClientConfig()
-	if err != nil {
-		return err
-	}
-	client, err := appsclientinternal.NewForConfig(clientConfig)
-	if err != nil {
-		return err
-	}
-	o.appsClient = client.Apps()
 	o.namespace, _, err = f.DefaultNamespace()
 	if err != nil {
 		return err
 	}
 
-	o.builder = f.NewBuilder()
+	o.builder = f.NewBuilder(true)
 	o.out = out
 
 	if len(args) > 0 {
@@ -203,7 +190,6 @@ func (o DeployOptions) Validate() error {
 
 func (o DeployOptions) RunDeploy() error {
 	r := o.builder.
-		Internal().
 		NamespaceParam(o.namespace).
 		ResourceNames("deploymentconfigs", o.deploymentConfigName).
 		SingleResourceType().
@@ -212,7 +198,7 @@ func (o DeployOptions) RunDeploy() error {
 	if err != nil {
 		return err
 	}
-	config, ok := resultObj.(*appsapi.DeploymentConfig)
+	config, ok := resultObj.(*deployapi.DeploymentConfig)
 	if !ok {
 		return fmt.Errorf("%s is not a valid deployment config", o.deploymentConfigName)
 	}
@@ -230,7 +216,7 @@ func (o DeployOptions) RunDeploy() error {
 		if o.follow {
 			return o.getLogs(config)
 		}
-		describer := describe.NewLatestDeploymentsDescriber(o.appsClient, o.kubeClient, -1)
+		describer := describe.NewLatestDeploymentsDescriber(o.osClient, o.kubeClient, -1)
 		desc, err := describer.Describe(config.Namespace, config.Name)
 		if err != nil {
 			return err
@@ -243,7 +229,7 @@ func (o DeployOptions) RunDeploy() error {
 
 // deploy launches a new deployment unless there's already a deployment
 // process in progress for config.
-func (o DeployOptions) deploy(config *appsapi.DeploymentConfig) error {
+func (o DeployOptions) deploy(config *deployapi.DeploymentConfig) error {
 	if config.Spec.Paused {
 		return fmt.Errorf("cannot deploy a paused deployment config")
 	}
@@ -252,29 +238,29 @@ func (o DeployOptions) deploy(config *appsapi.DeploymentConfig) error {
 	// Clients should be acting either on spec or on annotations and status updates should be a
 	// responsibility of the main controller. We need to start by unplugging this assumption from
 	// our client tools.
-	deploymentName := appsutil.LatestDeploymentNameForConfig(config)
+	deploymentName := deployutil.LatestDeploymentNameForConfig(config)
 	deployment, err := o.kubeClient.Core().ReplicationControllers(config.Namespace).Get(deploymentName, metav1.GetOptions{})
-	if err == nil && !appsutil.IsTerminatedDeployment(deployment) {
+	if err == nil && !deployutil.IsTerminatedDeployment(deployment) {
 		// Reject attempts to start a concurrent deployment.
 		return fmt.Errorf("#%d is already in progress (%s).\nOptionally, you can cancel this deployment using 'oc rollout cancel dc/%s'.",
-			config.Status.LatestVersion, appsutil.DeploymentStatusFor(deployment), config.Name)
+			config.Status.LatestVersion, deployutil.DeploymentStatusFor(deployment), config.Name)
 	}
 	if err != nil && !kerrors.IsNotFound(err) {
 		return err
 	}
 
-	request := &appsapi.DeploymentRequest{
+	request := &deployapi.DeploymentRequest{
 		Name:   config.Name,
 		Latest: false,
 		Force:  true,
 	}
 
-	dc, err := o.appsClient.DeploymentConfigs(config.Namespace).Instantiate(config.Name, request)
+	dc, err := o.osClient.DeploymentConfigs(config.Namespace).Instantiate(request)
 	// Pre 1.4 servers don't support the instantiate endpoint. Fallback to incrementing
 	// latestVersion on them.
 	if kerrors.IsNotFound(err) || kerrors.IsForbidden(err) {
 		config.Status.LatestVersion++
-		dc, err = o.appsClient.DeploymentConfigs(config.Namespace).Update(config)
+		dc, err = o.osClient.DeploymentConfigs(config.Namespace).Update(config)
 	}
 	if err != nil {
 		if kerrors.IsBadRequest(err) {
@@ -293,7 +279,7 @@ func (o DeployOptions) deploy(config *appsapi.DeploymentConfig) error {
 // retry resets the status of the latest deployment to New, which will cause
 // the deployment to be retried. An error is returned if the deployment is not
 // currently in a failed state.
-func (o DeployOptions) retry(config *appsapi.DeploymentConfig) error {
+func (o DeployOptions) retry(config *deployapi.DeploymentConfig) error {
 	if config.Spec.Paused {
 		return fmt.Errorf("cannot retry a paused deployment config")
 	}
@@ -305,7 +291,7 @@ func (o DeployOptions) retry(config *appsapi.DeploymentConfig) error {
 	// Clients should be acting either on spec or on annotations and status updates should be a
 	// responsibility of the main controller. We need to start by unplugging this assumption from
 	// our client tools.
-	deploymentName := appsutil.LatestDeploymentNameForConfig(config)
+	deploymentName := deployutil.LatestDeploymentNameForConfig(config)
 	deployment, err := o.kubeClient.Core().ReplicationControllers(config.Namespace).Get(deploymentName, metav1.GetOptions{})
 	if err != nil {
 		if kerrors.IsNotFound(err) {
@@ -314,9 +300,9 @@ func (o DeployOptions) retry(config *appsapi.DeploymentConfig) error {
 		return err
 	}
 
-	if !appsutil.IsFailedDeployment(deployment) {
-		message := fmt.Sprintf("#%d is %s; only failed deployments can be retried.\n", config.Status.LatestVersion, appsutil.DeploymentStatusFor(deployment))
-		if appsutil.IsCompleteDeployment(deployment) {
+	if !deployutil.IsFailedDeployment(deployment) {
+		message := fmt.Sprintf("#%d is %s; only failed deployments can be retried.\n", config.Status.LatestVersion, deployutil.DeploymentStatusFor(deployment))
+		if deployutil.IsCompleteDeployment(deployment) {
 			message += fmt.Sprintf("You can start a new deployment with 'oc deploy --latest dc/%s'.", config.Name)
 		} else {
 			message += fmt.Sprintf("Optionally, you can cancel this deployment with 'oc rollout cancel dc/%s'.", config.Name)
@@ -326,7 +312,7 @@ func (o DeployOptions) retry(config *appsapi.DeploymentConfig) error {
 	}
 
 	// Delete the deployer pod as well as the deployment hooks pods, if any
-	pods, err := o.kubeClient.Core().Pods(config.Namespace).List(metav1.ListOptions{LabelSelector: appsutil.DeployerPodSelector(deploymentName).String()})
+	pods, err := o.kubeClient.Core().Pods(config.Namespace).List(metav1.ListOptions{LabelSelector: deployutil.DeployerPodSelector(deploymentName).String()})
 	if err != nil {
 		return fmt.Errorf("failed to list deployer/hook pods for deployment #%d: %v", config.Status.LatestVersion, err)
 	}
@@ -337,10 +323,10 @@ func (o DeployOptions) retry(config *appsapi.DeploymentConfig) error {
 		}
 	}
 
-	deployment.Annotations[appsapi.DeploymentStatusAnnotation] = string(appsapi.DeploymentStatusNew)
+	deployment.Annotations[deployapi.DeploymentStatusAnnotation] = string(deployapi.DeploymentStatusNew)
 	// clear out the cancellation flag as well as any previous status-reason annotation
-	delete(deployment.Annotations, appsapi.DeploymentStatusReasonAnnotation)
-	delete(deployment.Annotations, appsapi.DeploymentCancelledAnnotation)
+	delete(deployment.Annotations, deployapi.DeploymentStatusReasonAnnotation)
+	delete(deployment.Annotations, deployapi.DeploymentCancelledAnnotation)
 	_, err = o.kubeClient.Core().ReplicationControllers(deployment.Namespace).Update(deployment)
 	if err != nil {
 		return err
@@ -355,11 +341,11 @@ func (o DeployOptions) retry(config *appsapi.DeploymentConfig) error {
 
 // cancel cancels any deployment process in progress for config.
 // TODO: this code will be deprecated
-func (o DeployOptions) cancel(config *appsapi.DeploymentConfig) error {
+func (o DeployOptions) cancel(config *deployapi.DeploymentConfig) error {
 	if config.Spec.Paused {
 		return fmt.Errorf("cannot cancel a paused deployment config")
 	}
-	deploymentList, err := o.kubeClient.Core().ReplicationControllers(config.Namespace).List(metav1.ListOptions{LabelSelector: appsutil.ConfigSelector(config.Name).String()})
+	deploymentList, err := o.kubeClient.Core().ReplicationControllers(config.Namespace).List(metav1.ListOptions{LabelSelector: deployutil.ConfigSelector(config.Name).String()})
 	if err != nil {
 		return err
 	}
@@ -371,29 +357,29 @@ func (o DeployOptions) cancel(config *appsapi.DeploymentConfig) error {
 	for i := range deploymentList.Items {
 		deployments = append(deployments, &deploymentList.Items[i])
 	}
-	sort.Sort(appsutil.ByLatestVersionDesc(deployments))
+	sort.Sort(deployutil.ByLatestVersionDesc(deployments))
 	failedCancellations := []string{}
 	anyCancelled := false
 	for _, deployment := range deployments {
-		status := appsutil.DeploymentStatusFor(deployment)
+		status := deployutil.DeploymentStatusFor(deployment)
 		switch status {
-		case appsapi.DeploymentStatusNew,
-			appsapi.DeploymentStatusPending,
-			appsapi.DeploymentStatusRunning:
+		case deployapi.DeploymentStatusNew,
+			deployapi.DeploymentStatusPending,
+			deployapi.DeploymentStatusRunning:
 
-			if appsutil.IsDeploymentCancelled(deployment) {
+			if deployutil.IsDeploymentCancelled(deployment) {
 				continue
 			}
 
-			deployment.Annotations[appsapi.DeploymentCancelledAnnotation] = appsapi.DeploymentCancelledAnnotationValue
-			deployment.Annotations[appsapi.DeploymentStatusReasonAnnotation] = appsapi.DeploymentCancelledByUser
+			deployment.Annotations[deployapi.DeploymentCancelledAnnotation] = deployapi.DeploymentCancelledAnnotationValue
+			deployment.Annotations[deployapi.DeploymentStatusReasonAnnotation] = deployapi.DeploymentCancelledByUser
 			_, err := o.kubeClient.Core().ReplicationControllers(deployment.Namespace).Update(deployment)
 			if err == nil {
 				fmt.Fprintf(o.out, "Cancelled deployment #%d\n", config.Status.LatestVersion)
 				anyCancelled = true
 			} else {
-				fmt.Fprintf(o.out, "Couldn't cancel deployment #%d (status: %s): %v\n", appsutil.DeploymentVersionFor(deployment), status, err)
-				failedCancellations = append(failedCancellations, strconv.FormatInt(appsutil.DeploymentVersionFor(deployment), 10))
+				fmt.Fprintf(o.out, "Couldn't cancel deployment #%d (status: %s): %v\n", deployutil.DeploymentVersionFor(deployment), status, err)
+				failedCancellations = append(failedCancellations, strconv.FormatInt(deployutil.DeploymentVersionFor(deployment), 10))
 			}
 		}
 	}
@@ -403,13 +389,13 @@ func (o DeployOptions) cancel(config *appsapi.DeploymentConfig) error {
 	if !anyCancelled {
 		latest := deployments[0]
 		maybeCancelling := ""
-		if appsutil.IsDeploymentCancelled(latest) && !appsutil.IsTerminatedDeployment(latest) {
+		if deployutil.IsDeploymentCancelled(latest) && !deployutil.IsTerminatedDeployment(latest) {
 			maybeCancelling = " (cancelling)"
 		}
 		timeAt := strings.ToLower(units.HumanDuration(time.Now().Sub(latest.CreationTimestamp.Time)))
 		fmt.Fprintf(o.out, "No deployments are in progress (latest deployment #%d %s%s %s ago)\n",
-			appsutil.DeploymentVersionFor(latest),
-			strings.ToLower(string(appsutil.DeploymentStatusFor(latest))),
+			deployutil.DeploymentVersionFor(latest),
+			strings.ToLower(string(deployutil.DeploymentStatusFor(latest))),
 			maybeCancelling,
 			timeAt)
 	}
@@ -417,10 +403,10 @@ func (o DeployOptions) cancel(config *appsapi.DeploymentConfig) error {
 }
 
 // reenableTriggers enables all image triggers and then persists config.
-func (o DeployOptions) reenableTriggers(config *appsapi.DeploymentConfig) error {
+func (o DeployOptions) reenableTriggers(config *deployapi.DeploymentConfig) error {
 	enabled := []string{}
 	for _, trigger := range config.Spec.Triggers {
-		if trigger.Type == appsapi.DeploymentTriggerOnImageChange {
+		if trigger.Type == deployapi.DeploymentTriggerOnImageChange {
 			trigger.ImageChangeParams.Automatic = true
 			enabled = append(enabled, trigger.ImageChangeParams.From.Name)
 		}
@@ -429,7 +415,7 @@ func (o DeployOptions) reenableTriggers(config *appsapi.DeploymentConfig) error 
 		fmt.Fprintln(o.out, "No image triggers found to enable")
 		return nil
 	}
-	_, err := o.appsClient.DeploymentConfigs(config.Namespace).Update(config)
+	_, err := o.osClient.DeploymentConfigs(config.Namespace).Update(config)
 	if err != nil {
 		return err
 	}
@@ -437,12 +423,11 @@ func (o DeployOptions) reenableTriggers(config *appsapi.DeploymentConfig) error 
 	return nil
 }
 
-func (o DeployOptions) getLogs(config *appsapi.DeploymentConfig) error {
-	opts := appsapi.DeploymentLogOptions{
+func (o DeployOptions) getLogs(config *deployapi.DeploymentConfig) error {
+	opts := deployapi.DeploymentLogOptions{
 		Follow: true,
 	}
-	logClient := appsinternalclient.NewRolloutLogClient(o.appsClient.RESTClient(), config.Namespace)
-	readCloser, err := logClient.Logs(config.Name, opts).Stream()
+	readCloser, err := o.osClient.DeploymentLogs(config.Namespace).Get(config.Name, opts).Stream()
 	if err != nil {
 		return err
 	}

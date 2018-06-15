@@ -18,7 +18,6 @@ package progress
 
 import (
 	"container/list"
-	"context"
 	"fmt"
 	"io"
 	"sync/atomic"
@@ -76,16 +75,16 @@ type reader struct {
 
 	pos  int64
 	size int64
-	bps  uint64
 
-	ch  chan<- Report
-	ctx context.Context
+	bps uint64
+
+	ch chan<- Report
 }
 
-func NewReader(ctx context.Context, s Sinker, r io.Reader, size int64) *reader {
+func NewReader(s Sinker, r io.Reader, size int64) *reader {
 	pr := reader{
-		r:    r,
-		ctx:  ctx,
+		r: r,
+
 		size: size,
 	}
 
@@ -112,10 +111,7 @@ func (r *reader) Read(b []byte) (int, error) {
 		bps:  &r.bps,
 	}
 
-	select {
-	case r.ch <- q:
-	case <-r.ctx.Done():
-	}
+	r.ch <- q
 
 	return n, err
 }
@@ -131,11 +127,8 @@ func (r *reader) Done(err error) {
 		err:  err,
 	}
 
-	select {
-	case r.ch <- q:
-		close(r.ch)
-	case <-r.ctx.Done():
-	}
+	r.ch <- q
+	close(r.ch)
 }
 
 // newBpsLoop returns a sink that monitors and stores throughput.

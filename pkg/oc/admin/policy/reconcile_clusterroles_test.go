@@ -4,19 +4,20 @@ import (
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	kapihelper "k8s.io/kubernetes/pkg/apis/core/helper"
-	"k8s.io/kubernetes/pkg/apis/rbac"
+	"k8s.io/apimachinery/pkg/util/sets"
+	kapihelper "k8s.io/kubernetes/pkg/api/helper"
+
+	authorizationapi "github.com/openshift/origin/pkg/authorization/apis/authorization"
 )
 
-func role(rules []rbac.PolicyRule, labels map[string]string, annotations map[string]string) *rbac.ClusterRole {
-	return &rbac.ClusterRole{Rules: rules, ObjectMeta: metav1.ObjectMeta{Labels: labels, Annotations: annotations}}
+func role(rules []authorizationapi.PolicyRule, labels map[string]string, annotations map[string]string) *authorizationapi.ClusterRole {
+	return &authorizationapi.ClusterRole{Rules: rules, ObjectMeta: metav1.ObjectMeta{Labels: labels, Annotations: annotations}}
 }
 
-func rules(resources ...string) []rbac.PolicyRule {
-	r := []rbac.PolicyRule{}
+func rules(resources ...string) []authorizationapi.PolicyRule {
+	r := []authorizationapi.PolicyRule{}
 	for _, resource := range resources {
-		// rbacregistryvalidation.Covers() needs non-empty APIGroups
-		r = append(r, rbac.NewRule("get").Groups("testgroup").Resources(resource).RuleOrDie())
+		r = append(r, authorizationapi.PolicyRule{Verbs: sets.NewString("get"), Resources: sets.NewString(resource)})
 	}
 	return r
 }
@@ -25,11 +26,11 @@ type ss map[string]string
 
 func TestComputeReconciledRole(t *testing.T) {
 	tests := map[string]struct {
-		expectedRole *rbac.ClusterRole
-		actualRole   *rbac.ClusterRole
+		expectedRole *authorizationapi.ClusterRole
+		actualRole   *authorizationapi.ClusterRole
 		union        bool
 
-		expectedReconciledRole       *rbac.ClusterRole
+		expectedReconciledRole       *authorizationapi.ClusterRole
 		expectedReconciliationNeeded bool
 	}{
 		"empty": {

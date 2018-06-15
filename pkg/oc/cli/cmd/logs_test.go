@@ -10,19 +10,21 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/watch"
 	kcmd "k8s.io/kubernetes/pkg/kubectl/cmd"
 
-	appsapi "github.com/openshift/origin/pkg/apps/apis/apps"
 	buildapi "github.com/openshift/origin/pkg/build/apis/build"
-	buildfake "github.com/openshift/origin/pkg/build/generated/internalclientset/fake"
-	"github.com/openshift/origin/pkg/oc/cli/util/clientcmd"
+	buildclient "github.com/openshift/origin/pkg/client"
+	"github.com/openshift/origin/pkg/cmd/util/clientcmd"
+	deployapi "github.com/openshift/origin/pkg/deploy/apis/apps"
 )
 
 // TestLogsFlagParity makes sure that our copied flags don't slip during rebases
 func TestLogsFlagParity(t *testing.T) {
-	kubeCmd := kcmd.NewCmdLogs(nil, ioutil.Discard, ioutil.Discard)
+	kubeCmd := kcmd.NewCmdLogs(nil, ioutil.Discard)
 	f := clientcmd.NewFactory(nil)
-	originCmd := NewCmdLogs("oc", "logs", f, ioutil.Discard, ioutil.Discard)
+	originCmd := NewCmdLogs("oc", "logs", f, ioutil.Discard)
 
 	kubeCmd.LocalFlags().VisitAll(func(kubeFlag *pflag.Flag) {
 		originFlag := originCmd.LocalFlags().Lookup(kubeFlag.Name)
@@ -37,6 +39,54 @@ func TestLogsFlagParity(t *testing.T) {
 	})
 }
 
+type fakeBuildClient struct {
+	build *buildapi.Build
+}
+
+func (f *fakeBuildClient) List(opts metav1.ListOptions) (*buildapi.BuildList, error) {
+	return nil, nil
+}
+
+func (f *fakeBuildClient) Get(names string, opts metav1.GetOptions) (*buildapi.Build, error) {
+	return f.build, nil
+}
+
+func (f *fakeBuildClient) Create(build *buildapi.Build) (*buildapi.Build, error) {
+	return nil, nil
+}
+
+func (f *fakeBuildClient) Update(build *buildapi.Build) (*buildapi.Build, error) {
+	return nil, nil
+}
+
+func (f *fakeBuildClient) Delete(name string) error {
+	return nil
+}
+
+func (f *fakeBuildClient) Watch(opts metav1.ListOptions) (watch.Interface, error) {
+	return nil, nil
+}
+
+func (f *fakeBuildClient) Clone(request *buildapi.BuildRequest) (*buildapi.Build, error) {
+	return nil, nil
+}
+
+func (f *fakeBuildClient) UpdateDetails(build *buildapi.Build) (*buildapi.Build, error) {
+	return nil, nil
+}
+
+func (f *fakeBuildClient) Patch(name string, pt types.PatchType, data []byte, subresources ...string) (*buildapi.Build, error) {
+	return nil, nil
+}
+
+type fakeNamespacer struct {
+	client buildclient.BuildInterface
+}
+
+func (f *fakeNamespacer) Builds(namespace string) buildclient.BuildInterface {
+	return f.client
+}
+
 type fakeWriter struct {
 	data []byte
 }
@@ -49,8 +99,7 @@ func (f *fakeWriter) Write(p []byte) (n int, err error) {
 func TestRunLogForPipelineStrategy(t *testing.T) {
 	bld := buildapi.Build{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:        "foo-0",
-			Namespace:   "foo",
+			Name:        "foo",
 			Annotations: map[string]string{buildapi.BuildJenkinsBlueOceanLogURLAnnotation: "https://foo"},
 		},
 		Spec: buildapi.BuildSpec{
@@ -62,7 +111,12 @@ func TestRunLogForPipelineStrategy(t *testing.T) {
 		},
 	}
 
-	fakebc := buildfake.NewSimpleClientset(&bld)
+	fakebc := fakeBuildClient{
+		build: &bld,
+	}
+	fakenamespacer := fakeNamespacer{
+		client: &fakebc,
+	}
 	fakewriter := fakeWriter{}
 
 	testCases := []struct {
@@ -73,10 +127,6 @@ func TestRunLogForPipelineStrategy(t *testing.T) {
 		},
 		{
 			o: &buildapi.BuildConfig{
-				ObjectMeta: metav1.ObjectMeta{
-					Namespace: "foo",
-					Name:      "foo",
-				},
 				Spec: buildapi.BuildConfigSpec{
 					CommonSpec: buildapi.CommonSpec{
 						Strategy: buildapi.BuildStrategy{
@@ -91,11 +141,10 @@ func TestRunLogForPipelineStrategy(t *testing.T) {
 	for _, tc := range testCases {
 		opts := OpenShiftLogsOptions{
 			KubeLogOptions: &kcmd.LogsOptions{
-				Object:    tc.o,
-				Namespace: "foo",
-				Out:       &fakewriter,
+				Object: tc.o,
+				Out:    &fakewriter,
 			},
-			Client: fakebc.Build(),
+			Client: &fakenamespacer,
 		}
 		err := opts.RunLog()
 		if err != nil {
@@ -163,7 +212,7 @@ func TestIsPipelineBuild(t *testing.T) {
 			isPipeline: false,
 		},
 		{
-			o:          &appsapi.DeploymentConfig{},
+			o:          &deployapi.DeploymentConfig{},
 			isPipeline: false,
 		},
 	}

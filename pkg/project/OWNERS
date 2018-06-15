@@ -4,6 +4,9 @@ reviewers:
   - liggitt
   - derekwaynecarr
   - mfojtik
+  - soltysh
+  - pweil-
+  - csrwng
   - enj
 approvers:
   - deads2k
@@ -11,4 +14,3 @@ approvers:
   - liggitt
   - derekwaynecarr
   - mfojtik
-  - enj

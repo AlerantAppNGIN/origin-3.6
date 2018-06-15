@@ -7,7 +7,7 @@ import (
 	. "github.com/onsi/gomega"
 )
 
-var _ = Describe("[Area:Networking] services", func() {
+var _ = Describe("[networking] services", func() {
 	Context("basic functionality", func() {
 		f1 := e2e.NewDefaultFramework("net-services1")
 
@@ -20,7 +20,7 @@ var _ = Describe("[Area:Networking] services", func() {
 		})
 	})
 
-	InNonIsolatingContext(func() {
+	InSingleTenantContext(func() {
 		f1 := e2e.NewDefaultFramework("net-services1")
 		f2 := e2e.NewDefaultFramework("net-services2")
 
@@ -33,7 +33,7 @@ var _ = Describe("[Area:Networking] services", func() {
 		})
 	})
 
-	InIsolatingContext(func() {
+	InMultiTenantContext(func() {
 		f1 := e2e.NewDefaultFramework("net-services1")
 		f2 := e2e.NewDefaultFramework("net-services2")
 

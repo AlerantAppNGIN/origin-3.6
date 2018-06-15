@@ -3,9 +3,9 @@ package templaterouter
 import (
 	"crypto/md5"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"text/template"
 	"time"
 
@@ -14,16 +14,10 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/watch"
-	kapi "k8s.io/kubernetes/pkg/apis/core"
-	kapihelper "k8s.io/kubernetes/pkg/apis/core/helper"
+	kapi "k8s.io/kubernetes/pkg/api"
 
 	routeapi "github.com/openshift/origin/pkg/route/apis/route"
 	unidlingapi "github.com/openshift/origin/pkg/unidling/api"
-)
-
-const (
-	// endpointsKeySeparator is used to uniquely generate key/ID for endpoints
-	endpointsKeySeparator = "/"
 )
 
 // TemplatePlugin implements the router.Plugin interface to provide
@@ -97,26 +91,30 @@ type routerInterface interface {
 	Commit()
 }
 
-// createTemplateWithHelper generates a new template with a map helper function.
-func createTemplateWithHelper(t *template.Template) (*template.Template, error) {
-	funcMap := template.FuncMap{
-		"generateHAProxyMap": func(data templateData) []string {
-			return generateHAProxyMap(filepath.Base(t.Name()), data)
-		},
+func env(name, defaultValue string) string {
+	if envValue := os.Getenv(name); envValue != "" {
+		return envValue
 	}
 
-	clone, err := t.Clone()
-	if err != nil {
-		return nil, err
-	}
-
-	return clone.Funcs(funcMap), nil
+	return defaultValue
 }
 
 // NewTemplatePlugin creates a new TemplatePlugin.
 func NewTemplatePlugin(cfg TemplatePluginConfig, lookupSvc ServiceLookup) (*TemplatePlugin, error) {
 	templateBaseName := filepath.Base(cfg.TemplatePath)
-	masterTemplate, err := template.New("config").Funcs(helperFunctions).ParseFiles(cfg.TemplatePath)
+	globalFuncs := template.FuncMap{
+		"endpointsForAlias":        endpointsForAlias,        //returns the list of valid endpoints
+		"processEndpointsForAlias": processEndpointsForAlias, //returns the list of valid endpoints after processing them
+		"env":          env,          //tries to get an environment variable if it can't return a default
+		"matchPattern": matchPattern, //anchors provided regular expression and evaluates against given string
+		"isInteger":    isInteger,    //determines if a given variable is an integer
+		"matchValues":  matchValues,  //compares a given string to a list of allowed strings
+
+		"genSubdomainWildcardRegexp": genSubdomainWildcardRegexp, //generates a regular expression matching the subdomain for hosts (and paths) with a wildcard policy
+		"generateRouteRegexp":        generateRouteRegexp,        //generates a regular expression matching the route hosts (and paths)
+		"genCertificateHostName":     genCertificateHostName,     //generates host name to use for serving/matching certificates
+	}
+	masterTemplate, err := template.New("config").Funcs(globalFuncs).ParseFiles(cfg.TemplatePath)
 	if err != nil {
 		return nil, err
 	}
@@ -127,12 +125,7 @@ func NewTemplatePlugin(cfg TemplatePluginConfig, lookupSvc ServiceLookup) (*Temp
 			continue
 		}
 
-		templateWithHelper, err := createTemplateWithHelper(template)
-		if err != nil {
-			return nil, err
-		}
-
-		templates[template.Name()] = templateWithHelper
+		templates[template.Name()] = template
 	}
 
 	peerKey := ""
@@ -165,7 +158,7 @@ func NewTemplatePlugin(cfg TemplatePluginConfig, lookupSvc ServiceLookup) (*Temp
 func (p *TemplatePlugin) HandleEndpoints(eventType watch.EventType, endpoints *kapi.Endpoints) error {
 	key := endpointsKey(endpoints)
 
-	glog.V(4).Infof("Processing %d Endpoints for %s/%s (%v)", len(endpoints.Subsets), endpoints.Namespace, endpoints.Name, eventType)
+	glog.V(4).Infof("Processing %d Endpoints for Name: %v (%v)", len(endpoints.Subsets), endpoints.Name, eventType)
 
 	for i, s := range endpoints.Subsets {
 		glog.V(4).Infof("  Subset %d : %#v", i, s)
@@ -225,28 +218,14 @@ func (p *TemplatePlugin) Commit() error {
 
 // endpointsKey returns the internal router key to use for the given Endpoints.
 func endpointsKey(endpoints *kapi.Endpoints) string {
-	return endpointsKeyFromParts(endpoints.Namespace, endpoints.Name)
-}
-
-func endpointsKeyFromParts(namespace, name string) string {
-	return fmt.Sprintf("%s%s%s", namespace, endpointsKeySeparator, name)
-}
-
-func getPartsFromEndpointsKey(key string) (string, string) {
-	tokens := strings.SplitN(key, endpointsKeySeparator, 2)
-	if len(tokens) != 2 {
-		glog.Errorf("Expected separator %q not found in endpoints key %q", endpointsKeySeparator, key)
-	}
-	namespace := tokens[0]
-	name := tokens[1]
-	return namespace, name
+	return fmt.Sprintf("%s/%s", endpoints.Namespace, endpoints.Name)
 }
 
 // peerServiceKey may be used by the underlying router when handling endpoints to identify
 // endpoints that belong to its peers.  THIS MUST FOLLOW THE KEY STRATEGY OF endpointsKey.  It
 // receives a NamespacedName that is created from the service that is added by the oadm command
 func peerEndpointsKey(namespacedName ktypes.NamespacedName) string {
-	return endpointsKeyFromParts(namespacedName.Namespace, namespacedName.Name)
+	return fmt.Sprintf("%s/%s", namespacedName.Namespace, namespacedName.Name)
 }
 
 // createRouterEndpoints creates openshift router endpoints based on k8s endpoints
@@ -261,7 +240,7 @@ func createRouterEndpoints(endpoints *kapi.Endpoints, excludeUDP bool, lookupSvc
 			return []Endpoint{}
 		}
 
-		if !kapihelper.IsServiceIPSet(service) {
+		if service.Spec.ClusterIP == "" {
 			utilruntime.HandleError(fmt.Errorf("headless service %s/%s was marked as idled, but cannot setup unidling without a cluster IP", endpoints.Namespace, endpoints.Name))
 			return []Endpoint{}
 		}
@@ -289,7 +268,7 @@ func createRouterEndpoints(endpoints *kapi.Endpoints, excludeUDP bool, lookupSvc
 
 	out := make([]Endpoint, 0, len(endpoints.Subsets)*4)
 
-	// Now build the actual endpoints we pass to the template
+	// TODO: review me for sanity
 	for _, s := range subsets {
 		for _, p := range s.Ports {
 			if excludeUDP && p.Protocol == kapi.ProtocolUDP {

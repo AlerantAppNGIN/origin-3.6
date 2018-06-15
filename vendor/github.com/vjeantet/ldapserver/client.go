@@ -92,9 +92,6 @@ func (c *client) serve() {
 		if c.srv.ReadTimeout != 0 {
 			c.rwc.SetReadDeadline(time.Now().Add(c.srv.ReadTimeout))
 		}
-		if c.srv.WriteTimeout != 0 {
-			c.rwc.SetWriteDeadline(time.Now().Add(c.srv.WriteTimeout))
-		}
 
 		//Read client input as a ASN1/BER binary message
 		messagePacket, err := readMessagePacket(c.br)
@@ -210,10 +207,10 @@ func (w responseWriterImpl) Write(lr response) {
 func (c *client) ProcessRequestMessage(m Message) {
 	defer c.wg.Done()
 
-	m.Done = make(chan bool, 2)
 	c.requestList[m.MessageID] = m
-
 	defer delete(c.requestList, m.MessageID)
+
+	m.Done = make(chan bool)
 
 	var w responseWriterImpl
 	w.chanOut = c.chanOut

@@ -3,26 +3,26 @@ package top
 import (
 	"fmt"
 	"io"
-	"sort"
 	"strings"
 
-	units "github.com/docker/go-units"
 	"github.com/spf13/cobra"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
-	kapi "k8s.io/kubernetes/pkg/apis/core"
+	kapi "k8s.io/kubernetes/pkg/api"
+	kclientset "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset"
 	"k8s.io/kubernetes/pkg/kubectl/cmd/templates"
 	kcmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
 
-	appsapi "github.com/openshift/origin/pkg/apps/apis/apps"
+	"github.com/openshift/origin/pkg/api/graph"
+	kubegraph "github.com/openshift/origin/pkg/api/kubegraph/nodes"
 	buildapi "github.com/openshift/origin/pkg/build/apis/build"
+	"github.com/openshift/origin/pkg/client"
+	"github.com/openshift/origin/pkg/cmd/util/clientcmd"
+	deployapi "github.com/openshift/origin/pkg/deploy/apis/apps"
 	imageapi "github.com/openshift/origin/pkg/image/apis/image"
-	imageclientinternal "github.com/openshift/origin/pkg/image/generated/internalclientset"
-	"github.com/openshift/origin/pkg/oc/cli/util/clientcmd"
-	"github.com/openshift/origin/pkg/oc/graph/genericgraph"
-	imagegraph "github.com/openshift/origin/pkg/oc/graph/imagegraph/nodes"
-	kubegraph "github.com/openshift/origin/pkg/oc/graph/kubegraph/nodes"
+
+	imagegraph "github.com/openshift/origin/pkg/image/graph/nodes"
 )
 
 const (
@@ -67,39 +67,31 @@ type TopImagesOptions struct {
 	Pods    *kapi.PodList
 
 	// helpers
-	out io.Writer
+	out      io.Writer
+	osClient client.Interface
+	kClient  kclientset.Interface
 }
 
 // Complete turns a partially defined TopImagesOptions into a solvent structure
 // which can be validated and used for showing limits usage.
 func (o *TopImagesOptions) Complete(f *clientcmd.Factory, cmd *cobra.Command, args []string, out io.Writer) error {
-	kClient, err := f.ClientSet()
+	osClient, kClient, err := f.Clients()
 	if err != nil {
 		return err
 	}
-
-	clientConfig, err := f.ClientConfig()
-	if err != nil {
-		return err
-	}
-	imageClient, err := imageclientinternal.NewForConfig(clientConfig)
-	if err != nil {
-		return err
-	}
-
 	namespace := cmd.Flag("namespace").Value.String()
 	if len(namespace) == 0 {
 		namespace = metav1.NamespaceAll
 	}
 	o.out = out
 
-	allImages, err := imageClient.Image().Images().List(metav1.ListOptions{})
+	allImages, err := osClient.Images().List(metav1.ListOptions{})
 	if err != nil {
 		return err
 	}
 	o.Images = allImages
 
-	allStreams, err := imageClient.Image().ImageStreams(namespace).List(metav1.ListOptions{})
+	allStreams, err := osClient.ImageStreams(namespace).List(metav1.ListOptions{})
 	if err != nil {
 		return err
 	}
@@ -154,13 +146,13 @@ func (i imageInfo) PrintLine(out io.Writer) {
 	printArray(out, shortParents)
 	printArray(out, i.Usage)
 	printBool(out, i.Metadata)
-	printValue(out, units.BytesSize(float64(i.Storage)))
+	printSize(out, i.Storage)
 }
 
 // imagesTop generates Image information from a graph and returns this as a list
 // of imageInfo array.
 func (o TopImagesOptions) imagesTop() []Info {
-	g := genericgraph.New()
+	g := graph.New()
 	addImagesToGraph(g, o.Images)
 	addImageStreamsToGraph(g, o.Streams)
 	addPodsToGraph(g, o.Pods)
@@ -184,16 +176,6 @@ func (o TopImagesOptions) imagesTop() []Info {
 			Storage:         storage,
 		})
 	}
-	sort.Slice(infos, func(i, j int) bool {
-		a, b := infos[i].(imageInfo), infos[j].(imageInfo)
-		if len(a.ImageStreamTags) < len(b.ImageStreamTags) {
-			return false
-		}
-		if len(a.ImageStreamTags) > len(b.ImageStreamTags) {
-			return true
-		}
-		return a.Storage > b.Storage
-	})
 
 	return infos
 }
@@ -215,7 +197,7 @@ func getStorage(image *imageapi.Image) int64 {
 	return storage
 }
 
-func getImageStreamTags(g genericgraph.Graph, node *imagegraph.ImageNode) []string {
+func getImageStreamTags(g graph.Graph, node *imagegraph.ImageNode) []string {
 	istags := []string{}
 	for _, e := range g.InboundEdges(node, ImageStreamImageEdgeKind) {
 		streamNode, ok := e.From().(*imagegraph.ImageStreamNode)
@@ -240,7 +222,7 @@ func getTags(stream *imageapi.ImageStream, image *imageapi.Image) []string {
 	return tags
 }
 
-func getImageParents(g genericgraph.Graph, node *imagegraph.ImageNode) []string {
+func getImageParents(g graph.Graph, node *imagegraph.ImageNode) []string {
 	parents := []string{}
 	for _, e := range g.InboundEdges(node, ParentImageEdgeKind) {
 		imageNode, ok := e.From().(*imagegraph.ImageNode)
@@ -252,7 +234,7 @@ func getImageParents(g genericgraph.Graph, node *imagegraph.ImageNode) []string 
 	return parents
 }
 
-func getImageUsage(g genericgraph.Graph, node *imagegraph.ImageNode) []string {
+func getImageUsage(g graph.Graph, node *imagegraph.ImageNode) []string {
 	usage := []string{}
 	for _, e := range g.InboundEdges(node, PodImageEdgeKind) {
 		podNode, ok := e.From().(*kubegraph.PodNode)
@@ -273,10 +255,10 @@ func getController(pod *kapi.Pod) string {
 	if bc, ok := pod.Annotations[buildapi.BuildAnnotation]; ok {
 		return fmt.Sprintf("Build: %s/%s", pod.Namespace, bc)
 	}
-	if dc, ok := pod.Annotations[appsapi.DeploymentAnnotation]; ok {
+	if dc, ok := pod.Annotations[deployapi.DeploymentAnnotation]; ok {
 		return fmt.Sprintf("Deployment: %s/%s", pod.Namespace, dc)
 	}
-	if dc, ok := pod.Annotations[appsapi.DeploymentPodAnnotation]; ok {
+	if dc, ok := pod.Annotations[deployapi.DeploymentPodAnnotation]; ok {
 		return fmt.Sprintf("Deployer: %s/%s", pod.Namespace, dc)
 	}
 

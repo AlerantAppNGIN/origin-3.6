@@ -12,9 +12,8 @@ import (
 	"k8s.io/apiserver/pkg/authentication/user"
 	apirequest "k8s.io/apiserver/pkg/endpoints/request"
 	"k8s.io/apiserver/pkg/registry/rest"
-	"k8s.io/kubernetes/pkg/api/legacyscheme"
+	kapi "k8s.io/kubernetes/pkg/api"
 	kapiref "k8s.io/kubernetes/pkg/api/ref"
-	kapi "k8s.io/kubernetes/pkg/apis/core"
 	clientset "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset"
 	"k8s.io/kubernetes/pkg/serviceaccount"
 
@@ -42,7 +41,7 @@ func (r *REST) New() runtime.Object {
 }
 
 // Create registers a given new PodSecurityPolicySubjectReview instance to r.registry.
-func (r *REST) Create(ctx apirequest.Context, obj runtime.Object, _ rest.ValidateObjectFunc, _ bool) (runtime.Object, error) {
+func (r *REST) Create(ctx apirequest.Context, obj runtime.Object, _ bool) (runtime.Object, error) {
 	pspsr, ok := obj.(*securityapi.PodSecurityPolicySubjectReview)
 	if !ok {
 		return nil, kapierrors.NewBadRequest(fmt.Sprintf("not a PodSecurityPolicySubjectReview: %#v", obj))
@@ -58,7 +57,7 @@ func (r *REST) Create(ctx apirequest.Context, obj runtime.Object, _ rest.Validat
 	}
 
 	userInfo := &user.DefaultInfo{Name: pspsr.Spec.User, Groups: pspsr.Spec.Groups}
-	matchedConstraints, err := r.sccMatcher.FindApplicableSCCs(userInfo, ns)
+	matchedConstraints, err := r.sccMatcher.FindApplicableSCCs(userInfo)
 	if err != nil {
 		return nil, kapierrors.NewBadRequest(fmt.Sprintf("unable to find SecurityContextConstraints: %v", err))
 	}
@@ -66,7 +65,7 @@ func (r *REST) Create(ctx apirequest.Context, obj runtime.Object, _ rest.Validat
 	saName := pspsr.Spec.Template.Spec.ServiceAccountName
 	if len(saName) > 0 {
 		saUserInfo := serviceaccount.UserInfo(ns, saName, "")
-		saConstraints, err := r.sccMatcher.FindApplicableSCCs(saUserInfo, ns)
+		saConstraints, err := r.sccMatcher.FindApplicableSCCs(saUserInfo)
 		if err != nil {
 			return nil, kapierrors.NewBadRequest(fmt.Sprintf("unable to find SecurityContextConstraints: %v", err))
 		}
@@ -106,7 +105,7 @@ func FillPodSecurityPolicySubjectReviewStatus(s *securityapi.PodSecurityPolicySu
 		s.Reason = "CantAssignSecurityContextConstraintProvider"
 		return false, fmt.Errorf("unable to assign SecurityContextConstraints provider: %v", errs.ToAggregate())
 	}
-	ref, err := kapiref.GetReference(legacyscheme.Scheme, constraint)
+	ref, err := kapiref.GetReference(kapi.Scheme, constraint)
 	if err != nil {
 		s.Reason = "CantObtainReference"
 		return false, fmt.Errorf("unable to get SecurityContextConstraints reference: %v", err)

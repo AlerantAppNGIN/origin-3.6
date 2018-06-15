@@ -25,13 +25,7 @@ function os::build::image() {
 		# available, falling back to the last commit
 		# if no release commit is recorded
 		local release_commit
-		release_commit="${OS_RELEASE_COMMIT-}"
-		if [[ -z "${release_commit}" && -f "${OS_OUTPUT_RELEASEPATH}/.commit" ]]; then
-			release_commit="$( cat "${OS_OUTPUT_RELEASEPATH}/.commit" )"
-		fi
-		if [[ -z "${release_commit}" ]]; then
-			release_commit="$( git log -1 --pretty=%h )"
-		fi
+		release_commit="${OS_RELEASE_COMMIT:-"$( git log -1 --pretty=%h )"}"
 		extra_tag="${tag}:${release_commit}"
 
 		tag="${tag}:latest"
@@ -134,7 +128,7 @@ function os::build::image::internal::docker() {
 	local options=()
 
 	if ! docker build ${OS_BUILD_IMAGE_ARGS:-} -t "${tag}" "${directory}"; then
-		return 1
+		return "$?"
 	fi
 
 	if [[ -n "${extra_tag}" ]]; then

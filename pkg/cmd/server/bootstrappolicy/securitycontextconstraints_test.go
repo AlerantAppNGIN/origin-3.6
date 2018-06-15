@@ -2,26 +2,22 @@ package bootstrappolicy
 
 import (
 	"reflect"
-	"sort"
 	"testing"
 
 	"k8s.io/apiserver/pkg/authentication/serviceaccount"
 
 	securityapi "github.com/openshift/origin/pkg/security/apis/security"
-	scc "github.com/openshift/origin/pkg/security/securitycontextconstraints"
-	sccutil "github.com/openshift/origin/pkg/security/securitycontextconstraints/util"
 )
 
 func TestBootstrappedConstraints(t *testing.T) {
-	// ordering of expectedConstraintNames is important, we check it against scc.ByPriority
-	expectedConstraintNames := []string{
-		SecurityContextConstraintsAnyUID,
+	expectedConstraints := []string{
+		SecurityContextConstraintPrivileged,
 		SecurityContextConstraintRestricted,
 		SecurityContextConstraintNonRoot,
 		SecurityContextConstraintHostMountAndAnyUID,
-		SecurityContextConstraintsHostNetwork,
 		SecurityContextConstraintHostNS,
-		SecurityContextConstraintPrivileged,
+		SecurityContextConstraintsAnyUID,
+		SecurityContextConstraintsHostNetwork,
 	}
 	expectedGroups, expectedUsers := getExpectedAccess()
 	expectedVolumes := []securityapi.FSType{securityapi.FSTypeEmptyDir, securityapi.FSTypeSecret, securityapi.FSTypeDownwardAPI, securityapi.FSTypeConfigMap, securityapi.FSTypePersistentVolumeClaim}
@@ -29,16 +25,11 @@ func TestBootstrappedConstraints(t *testing.T) {
 	groups, users := GetBoostrapSCCAccess(DefaultOpenShiftInfraNamespace)
 	bootstrappedConstraints := GetBootstrapSecurityContextConstraints(groups, users)
 
-	if len(expectedConstraintNames) != len(bootstrappedConstraints) {
-		t.Errorf("unexpected number of constraints: found %d, wanted %d", len(bootstrappedConstraints), len(expectedConstraintNames))
+	if len(expectedConstraints) != len(bootstrappedConstraints) {
+		t.Errorf("unexpected number of constraints: found %d, wanted %d", len(bootstrappedConstraints), len(expectedConstraints))
 	}
 
-	sort.Sort(scc.ByPriority(bootstrappedConstraints))
-
-	for i, constraint := range bootstrappedConstraints {
-		if constraint.Name != expectedConstraintNames[i] {
-			t.Errorf("unexpected contraint no. %d (by priority).  Found %v, wanted %v", i, constraint.Name, expectedConstraintNames[i])
-		}
+	for _, constraint := range bootstrappedConstraints {
 		g := expectedGroups[constraint.Name]
 		if !reflect.DeepEqual(g, constraint.Groups) {
 			t.Errorf("unexpected group access for %s.  Found %v, wanted %v", constraint.Name, constraint.Groups, g)
@@ -50,7 +41,7 @@ func TestBootstrappedConstraints(t *testing.T) {
 		}
 
 		for _, expectedVolume := range expectedVolumes {
-			if !sccutil.SCCAllowsFSType(constraint, expectedVolume) {
+			if !supportsFSType(expectedVolume, &constraint) {
 				t.Errorf("%s does not support %v which is required for all default SCCs", constraint.Name, expectedVolume)
 			}
 		}
@@ -83,7 +74,7 @@ func TestBootstrappedConstraintsWithAddedUser(t *testing.T) {
 
 func getExpectedAccess() (map[string][]string, map[string][]string) {
 	groups := map[string][]string{
-		SecurityContextConstraintPrivileged: {ClusterAdminGroup, NodesGroup, MastersGroup},
+		SecurityContextConstraintPrivileged: {ClusterAdminGroup, NodesGroup},
 		SecurityContextConstraintsAnyUID:    {ClusterAdminGroup},
 		SecurityContextConstraintRestricted: {AuthenticatedGroup},
 	}
@@ -91,8 +82,17 @@ func getExpectedAccess() (map[string][]string, map[string][]string) {
 	buildControllerUsername := serviceaccount.MakeUsername(DefaultOpenShiftInfraNamespace, InfraBuildControllerServiceAccountName)
 	pvRecyclerControllerUsername := serviceaccount.MakeUsername(DefaultOpenShiftInfraNamespace, InfraPersistentVolumeRecyclerControllerServiceAccountName)
 	users := map[string][]string{
-		SecurityContextConstraintPrivileged:         {SystemAdminUsername, buildControllerUsername},
+		SecurityContextConstraintPrivileged:         {buildControllerUsername},
 		SecurityContextConstraintHostMountAndAnyUID: {pvRecyclerControllerUsername},
 	}
 	return groups, users
+}
+
+func supportsFSType(fsType securityapi.FSType, scc *securityapi.SecurityContextConstraints) bool {
+	for _, v := range scc.Volumes {
+		if v == securityapi.FSTypeAll || v == fsType {
+			return true
+		}
+	}
+	return false
 }

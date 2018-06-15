@@ -23,7 +23,6 @@ import (
 
 	"github.com/golang/glog"
 
-	"k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -35,6 +34,7 @@ import (
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	corelisters "k8s.io/client-go/listers/core/v1"
+	"k8s.io/client-go/pkg/api/v1"
 )
 
 const (
@@ -53,13 +53,13 @@ const (
 // Register registers a plugin
 func Register(plugins *admission.Plugins) {
 	plugins.Register(PluginName, func(config io.Reader) (admission.Interface, error) {
-		return NewLifecycle(sets.NewString(metav1.NamespaceDefault, metav1.NamespaceSystem, metav1.NamespacePublic, "openshift", "openshift-infra"))
+		return NewLifecycle(sets.NewString(metav1.NamespaceDefault, metav1.NamespaceSystem, metav1.NamespacePublic))
 	})
 }
 
-// Lifecycle is an implementation of admission.Interface.
+// lifecycle is an implementation of admission.Interface.
 // It enforces life-cycle constraints around a Namespace depending on its Phase
-type Lifecycle struct {
+type lifecycle struct {
 	*admission.Handler
 	client             kubernetes.Interface
 	immortalNamespaces sets.String
@@ -69,21 +69,32 @@ type Lifecycle struct {
 	forceLiveLookupCache *utilcache.LRUExpireCache
 }
 
-var _ = initializer.WantsExternalKubeInformerFactory(&Lifecycle{})
-var _ = initializer.WantsExternalKubeClientSet(&Lifecycle{})
+type forceLiveLookupEntry struct {
+	expiry time.Time
+}
 
-func (l *Lifecycle) Admit(a admission.Attributes) error {
+var _ = initializer.WantsExternalKubeInformerFactory(&lifecycle{})
+var _ = initializer.WantsExternalKubeClientSet(&lifecycle{})
+
+func makeNamespaceKey(namespace string) *v1.Namespace {
+	return &v1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      namespace,
+			Namespace: "",
+		},
+	}
+}
+
+func (l *lifecycle) Admit(a admission.Attributes) error {
 	// prevent deletion of immortal namespaces
 	if a.GetOperation() == admission.Delete && a.GetKind().GroupKind() == v1.SchemeGroupVersion.WithKind("Namespace").GroupKind() && l.immortalNamespaces.Has(a.GetName()) {
 		return errors.NewForbidden(a.GetResource().GroupResource(), a.GetName(), fmt.Errorf("this namespace may not be deleted"))
 	}
 
-	// always allow non-namespaced resources
-	if len(a.GetNamespace()) == 0 && a.GetKind().GroupKind() != v1.SchemeGroupVersion.WithKind("Namespace").GroupKind() {
-		return nil
-	}
-
-	if a.GetKind().GroupKind() == v1.SchemeGroupVersion.WithKind("Namespace").GroupKind() {
+	// if we're here, then we've already passed authentication, so we're allowed to do what we're trying to do
+	// if we're here, then the API server has found a route, which means that if we have a non-empty namespace
+	// its a namespaced resource.
+	if len(a.GetNamespace()) == 0 || a.GetKind().GroupKind() == v1.SchemeGroupVersion.WithKind("Namespace").GroupKind() {
 		// if a namespace is deleted, we want to prevent all further creates into it
 		// while it is undergoing termination.  to reduce incidences where the cache
 		// is slow to update, we add the namespace into a force live lookup list to ensure
@@ -91,7 +102,6 @@ func (l *Lifecycle) Admit(a admission.Attributes) error {
 		if a.GetOperation() == admission.Delete {
 			l.forceLiveLookupCache.Add(a.GetName(), true, forceLiveLookupTTL)
 		}
-		// allow all operations to namespaces
 		return nil
 	}
 
@@ -152,7 +162,7 @@ func (l *Lifecycle) Admit(a admission.Attributes) error {
 	// refuse to operate on non-existent namespaces
 	if !exists || forceLiveLookup {
 		// as a last resort, make a call directly to storage
-		namespace, err = l.client.CoreV1().Namespaces().Get(a.GetNamespace(), metav1.GetOptions{})
+		namespace, err = l.client.Core().Namespaces().Get(a.GetNamespace(), metav1.GetOptions{})
 		switch {
 		case errors.IsNotFound(err):
 			return err
@@ -169,40 +179,37 @@ func (l *Lifecycle) Admit(a admission.Attributes) error {
 		}
 
 		// TODO: This should probably not be a 403
-		return admission.NewForbidden(a, fmt.Errorf("unable to create new content in namespace %s because it is being terminated", a.GetNamespace()))
+		return admission.NewForbidden(a, fmt.Errorf("unable to create new content in namespace %s because it is being terminated.", a.GetNamespace()))
 	}
 
 	return nil
 }
 
-// NewLifecycle creates a new namespace Lifecycle admission control handler
-func NewLifecycle(immortalNamespaces sets.String) (*Lifecycle, error) {
+// NewLifecycle creates a new namespace lifecycle admission control handler
+func NewLifecycle(immortalNamespaces sets.String) (admission.Interface, error) {
 	return newLifecycleWithClock(immortalNamespaces, clock.RealClock{})
 }
 
-func newLifecycleWithClock(immortalNamespaces sets.String, clock utilcache.Clock) (*Lifecycle, error) {
+func newLifecycleWithClock(immortalNamespaces sets.String, clock utilcache.Clock) (admission.Interface, error) {
 	forceLiveLookupCache := utilcache.NewLRUExpireCacheWithClock(100, clock)
-	return &Lifecycle{
+	return &lifecycle{
 		Handler:              admission.NewHandler(admission.Create, admission.Update, admission.Delete),
 		immortalNamespaces:   immortalNamespaces,
 		forceLiveLookupCache: forceLiveLookupCache,
 	}, nil
 }
 
-// SetExternalKubeInformerFactory implements the WantsExternalKubeInformerFactory interface.
-func (l *Lifecycle) SetExternalKubeInformerFactory(f informers.SharedInformerFactory) {
+func (l *lifecycle) SetExternalKubeInformerFactory(f informers.SharedInformerFactory) {
 	namespaceInformer := f.Core().V1().Namespaces()
 	l.namespaceLister = namespaceInformer.Lister()
 	l.SetReadyFunc(namespaceInformer.Informer().HasSynced)
 }
 
-// SetExternalKubeClientSet implements the WantsExternalKubeClientSet interface.
-func (l *Lifecycle) SetExternalKubeClientSet(client kubernetes.Interface) {
+func (l *lifecycle) SetExternalKubeClientSet(client kubernetes.Interface) {
 	l.client = client
 }
 
-// ValidateInitialization implements the InitializationValidator interface.
-func (l *Lifecycle) ValidateInitialization() error {
+func (l *lifecycle) Validate() error {
 	if l.namespaceLister == nil {
 		return fmt.Errorf("missing namespaceLister")
 	}
@@ -215,19 +222,13 @@ func (l *Lifecycle) ValidateInitialization() error {
 // accessReviewResources are resources which give a view into permissions in a namespace.  Users must be allowed to create these
 // resources because returning "not found" errors allows someone to search for the "people I'm going to fire in 2017" namespace.
 var accessReviewResources = map[schema.GroupResource]bool{
-	{Group: "authorization.k8s.io", Resource: "localsubjectaccessreviews"}:                            true,
-	schema.GroupResource{Group: "", Resource: "subjectaccessreviews"}:                                 true,
-	schema.GroupResource{Group: "", Resource: "localsubjectaccessreviews"}:                            true,
-	schema.GroupResource{Group: "", Resource: "resourceaccessreviews"}:                                true,
-	schema.GroupResource{Group: "", Resource: "localresourceaccessreviews"}:                           true,
-	schema.GroupResource{Group: "", Resource: "selfsubjectrulesreviews"}:                              true,
-	schema.GroupResource{Group: "", Resource: "subjectrulesreviews"}:                                  true,
-	schema.GroupResource{Group: "authorization.openshift.io", Resource: "subjectaccessreviews"}:       true,
-	schema.GroupResource{Group: "authorization.openshift.io", Resource: "localsubjectaccessreviews"}:  true,
-	schema.GroupResource{Group: "authorization.openshift.io", Resource: "resourceaccessreviews"}:      true,
-	schema.GroupResource{Group: "authorization.openshift.io", Resource: "localresourceaccessreviews"}: true,
-	schema.GroupResource{Group: "authorization.openshift.io", Resource: "selfsubjectrulesreviews"}:    true,
-	schema.GroupResource{Group: "authorization.openshift.io", Resource: "subjectrulesreviews"}:        true,
+	{Group: "authorization.k8s.io", Resource: "localsubjectaccessreviews"}:  true,
+	schema.GroupResource{Group: "", Resource: "subjectaccessreviews"}:       true,
+	schema.GroupResource{Group: "", Resource: "localsubjectaccessreviews"}:  true,
+	schema.GroupResource{Group: "", Resource: "resourceaccessreviews"}:      true,
+	schema.GroupResource{Group: "", Resource: "localresourceaccessreviews"}: true,
+	schema.GroupResource{Group: "", Resource: "selfsubjectrulesreviews"}:    true,
+	schema.GroupResource{Group: "", Resource: "subjectrulesreviews"}:        true,
 }
 
 func isAccessReview(a admission.Attributes) bool {

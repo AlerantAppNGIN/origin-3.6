@@ -12,24 +12,10 @@ import (
 	routeapi "github.com/openshift/origin/pkg/route/apis/route"
 )
 
-// certificateFile represents a certificate file.
-type certificateFile struct {
-	certDir string
-	id      string
-}
-
-// Tag generates a certificate file tag/name. This is used to index into the
-// the map of deleted certificates.
-func (cf certificateFile) Tag() string {
-	return filepath.Join(cf.certDir, cf.id+".pem")
-}
-
 // simpleCertificateManager is the default implementation of a certificateManager
 type simpleCertificateManager struct {
 	cfg *certificateManagerConfig
 	w   certificateWriter
-
-	deletedCertificates map[string]certificateFile
 }
 
 // newSimpleCertificateManager should be used to create a new cert manager.  It will return an error
@@ -41,7 +27,7 @@ func newSimpleCertificateManager(cfg *certificateManagerConfig, w certificateWri
 	if w == nil {
 		return nil, fmt.Errorf("certificate manager requires a certificate writer")
 	}
-	return &simpleCertificateManager{cfg, w, make(map[string]certificateFile, 0)}, nil
+	return &simpleCertificateManager{cfg, w}, nil
 }
 
 // validateCertManagerConfig ensures that the key functions and directories are set as well as
@@ -95,8 +81,6 @@ func (cm *simpleCertificateManager) WriteCertificatesForConfig(config *ServiceAl
 					buffer.Write([]byte(caCertObj.Contents))
 				}
 
-				certFile := certificateFile{certDir: cm.cfg.certDir, id: certObj.ID}
-				delete(cm.deletedCertificates, certFile.Tag())
 				if err := cm.w.WriteCertificate(cm.cfg.certDir, certObj.ID, buffer.Bytes()); err != nil {
 					return err
 				}
@@ -108,8 +92,6 @@ func (cm *simpleCertificateManager) WriteCertificatesForConfig(config *ServiceAl
 			destCert, ok := config.Certificates[destCertKey]
 
 			if ok {
-				destCertFile := certificateFile{certDir: cm.cfg.caCertDir, id: destCert.ID}
-				delete(cm.deletedCertificates, destCertFile.Tag())
 				if err := cm.w.WriteCertificate(cm.cfg.caCertDir, destCert.ID, []byte(destCert.Contents)); err != nil {
 					return err
 				}
@@ -119,7 +101,7 @@ func (cm *simpleCertificateManager) WriteCertificatesForConfig(config *ServiceAl
 	return nil
 }
 
-// DeleteCertificatesForConfig will delete all certificates for the ServiceAliasConfig
+// deleteCertificatesForConfig will delete all certificates for the ServiceAliasConfig
 func (cm *simpleCertificateManager) DeleteCertificatesForConfig(config *ServiceAliasConfig) error {
 	if config == nil {
 		return nil
@@ -130,8 +112,10 @@ func (cm *simpleCertificateManager) DeleteCertificatesForConfig(config *ServiceA
 			certObj, ok := config.Certificates[certKey]
 
 			if ok {
-				certFile := certificateFile{certDir: cm.cfg.certDir, id: certObj.ID}
-				cm.deletedCertificates[certFile.Tag()] = certFile
+				err := cm.w.DeleteCertificate(cm.cfg.certDir, certObj.ID)
+				if err != nil {
+					return err
+				}
 			}
 		}
 
@@ -140,35 +124,13 @@ func (cm *simpleCertificateManager) DeleteCertificatesForConfig(config *ServiceA
 			destCert, ok := config.Certificates[destCertKey]
 
 			if ok {
-				destCertFile := certificateFile{certDir: cm.cfg.caCertDir, id: destCert.ID}
-				cm.deletedCertificates[destCertFile.Tag()] = destCertFile
+				err := cm.w.DeleteCertificate(cm.cfg.caCertDir, destCert.ID)
+				if err != nil {
+					return err
+				}
 			}
 		}
 	}
-	return nil
-}
-
-// Commit applies any pending changes made to the certificateManager.
-func (cm *simpleCertificateManager) Commit() error {
-	// Deletion of certificates that are being referenced in backends or
-	// config is problematic in that the template router will not
-	// reload because the config is invalid, so we _do_ need to "stage"
-	// or commit the removals. Remove all the deleted certificates.
-	for _, certFile := range cm.deletedCertificates {
-		err := cm.w.DeleteCertificate(certFile.certDir, certFile.id)
-		if err != nil {
-			// Log a warning if the delete fails but proceed on.
-			glog.Warningf("Ignoring error deleting certificate file %v: %v", certFile.Tag(), err)
-		}
-	}
-
-	cm.deletedCertificates = make(map[string]certificateFile, 0)
-
-	// If we decide to stage the certificate writes, we can flush the
-	// write to the disk here. Today, the certificate writes are done
-	// just before this function is called. The tradeoff is storing a
-	// copy in memory until we commit.
-
 	return nil
 }
 

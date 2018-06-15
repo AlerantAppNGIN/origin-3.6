@@ -5,14 +5,11 @@ import (
 	"k8s.io/apiserver/pkg/registry/generic"
 	"k8s.io/apiserver/pkg/registry/generic/registry"
 	"k8s.io/apiserver/pkg/registry/rest"
-	"k8s.io/apiserver/pkg/storage"
-	"k8s.io/kubernetes/pkg/printers"
-	printerstorage "k8s.io/kubernetes/pkg/printers/storage"
+	kapi "k8s.io/kubernetes/pkg/api"
 
 	oauthapi "github.com/openshift/origin/pkg/oauth/apis/oauth"
 	"github.com/openshift/origin/pkg/oauth/registry/oauthclient"
 	"github.com/openshift/origin/pkg/oauth/registry/oauthclientauthorization"
-	printersinternal "github.com/openshift/origin/pkg/printers/internalversion"
 	"github.com/openshift/origin/pkg/util/restoptions"
 )
 
@@ -28,21 +25,18 @@ func NewREST(optsGetter restoptions.Getter, clientGetter oauthclient.Getter) (*R
 	strategy := oauthclientauthorization.NewStrategy(clientGetter)
 
 	store := &registry.Store{
+		Copier:                   kapi.Scheme,
 		NewFunc:                  func() runtime.Object { return &oauthapi.OAuthClientAuthorization{} },
 		NewListFunc:              func() runtime.Object { return &oauthapi.OAuthClientAuthorizationList{} },
+		PredicateFunc:            oauthclientauthorization.Matcher,
 		DefaultQualifiedResource: oauthapi.Resource("oauthclientauthorizations"),
-
-		TableConvertor: printerstorage.TableConvertor{TablePrinter: printers.NewTablePrinter().With(printersinternal.AddHandlers)},
 
 		CreateStrategy: strategy,
 		UpdateStrategy: strategy,
 		DeleteStrategy: strategy,
 	}
 
-	options := &generic.StoreOptions{
-		RESTOptions: optsGetter,
-		AttrFunc:    storage.AttrFunc(storage.DefaultNamespaceScopedAttr).WithFieldMutation(oauthapi.OAuthClientAuthorizationFieldSelector),
-	}
+	options := &generic.StoreOptions{RESTOptions: optsGetter, AttrFunc: oauthclientauthorization.GetAttrs}
 	if err := store.CompleteWithOptions(options); err != nil {
 		return nil, err
 	}

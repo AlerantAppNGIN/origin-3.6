@@ -2,7 +2,7 @@ package security
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	kapi "k8s.io/kubernetes/pkg/apis/core"
+	kapi "k8s.io/kubernetes/pkg/api"
 )
 
 // AllowAllCapabilities can be used as a value for the
@@ -12,7 +12,6 @@ var AllowAllCapabilities kapi.Capability = "*"
 
 // +genclient
 // +genclient:nonNamespaced
-// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 
 // SecurityContextConstraints governs the ability to make requests that affect the SecurityContext
 // that will be applied to a container.
@@ -46,11 +45,6 @@ type SecurityContextConstraints struct {
 	// of a VolumeSource (azureFile, configMap, emptyDir).  To allow all volumes you may use "*".
 	// To allow no volumes, set to ["none"].
 	Volumes []FSType
-	// AllowedFlexVolumes is a whitelist of allowed Flexvolumes.  Empty or nil indicates that all
-	// Flexvolumes may be used.  This parameter is effective only when the usage of the Flexvolumes
-	// is allowed in the "Volumes" field.
-	// +optional
-	AllowedFlexVolumes []AllowedFlexVolume
 	// AllowHostNetwork determines if the policy allows the use of HostNetwork in the pod spec.
 	AllowHostNetwork bool
 	// AllowHostPorts determines if the policy allows host ports in the containers.
@@ -120,12 +114,6 @@ var (
 	FSTypeAll                   FSType = "*"
 	FSTypeNone                  FSType = "none"
 )
-
-// AllowedFlexVolume represents a single Flexvolume that is allowed to be used.
-type AllowedFlexVolume struct {
-	// Driver is the name of the Flexvolume driver.
-	Driver string
-}
 
 // SELinuxContextStrategyOptions defines the strategy type and any options used to create the strategy.
 type SELinuxContextStrategyOptions struct {
@@ -217,8 +205,6 @@ const (
 	SupplementalGroupsStrategyRunAsAny SupplementalGroupsStrategyType = "RunAsAny"
 )
 
-// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
-
 // SecurityContextConstraintsList is a list of SecurityContextConstraints objects
 type SecurityContextConstraintsList struct {
 	metav1.TypeMeta
@@ -226,10 +212,6 @@ type SecurityContextConstraintsList struct {
 
 	Items []SecurityContextConstraints
 }
-
-// +genclient
-// +genclient:onlyVerbs=create
-// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 
 // PodSecurityPolicySubjectReview checks whether a particular user/SA tuple can create the PodTemplateSpec.
 type PodSecurityPolicySubjectReview struct {
@@ -273,10 +255,6 @@ type PodSecurityPolicySubjectReviewStatus struct {
 	Template kapi.PodTemplateSpec
 }
 
-// +genclient
-// +genclient:onlyVerbs=create
-// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
-
 // PodSecurityPolicySelfSubjectReview checks whether this user/SA tuple can create the PodTemplateSpec.
 type PodSecurityPolicySelfSubjectReview struct {
 	metav1.TypeMeta
@@ -293,10 +271,6 @@ type PodSecurityPolicySelfSubjectReviewSpec struct {
 	// Template is the PodTemplateSpec to check.
 	Template kapi.PodTemplateSpec
 }
-
-// +genclient
-// +genclient:onlyVerbs=create
-// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 
 // PodSecurityPolicyReview checks which service accounts (not users, since that would be cluster-wide) can create the `PodTemplateSpec` in question.
 type PodSecurityPolicyReview struct {
@@ -336,33 +310,4 @@ type ServiceAccountPodSecurityPolicyReviewStatus struct {
 
 	// Name contains the allowed and the denied ServiceAccount name
 	Name string
-}
-
-// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
-
-// RangeAllocation is used so we can easily expose a RangeAllocation typed for security group
-type RangeAllocation struct {
-	metav1.TypeMeta
-	// +optional
-	metav1.ObjectMeta
-
-	// range is a string representing a unique label for a range of uids, "1000000000-2000000000/10000".
-	Range string
-
-	// data is a byte array representing the serialized state of a range allocation.  It is a bitmap
-	// with each bit set to one to represent a range is taken.
-	Data []byte
-}
-
-// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
-
-// RangeAllocationList is a list of RangeAllocations objects
-type RangeAllocationList struct {
-	metav1.TypeMeta
-
-	// More info: http://releases.k8s.io/HEAD/docs/devel/api-conventions.md#metadata
-	metav1.ListMeta
-
-	// List of RangeAllocations.
-	Items []RangeAllocation
 }

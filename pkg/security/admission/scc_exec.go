@@ -5,10 +5,8 @@ import (
 	"io"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apiserver/pkg/admission"
-	"k8s.io/apiserver/pkg/admission/initializer"
-	"k8s.io/apiserver/pkg/authorization/authorizer"
-	kapi "k8s.io/kubernetes/pkg/apis/core"
+	admission "k8s.io/apiserver/pkg/admission"
+	kapi "k8s.io/kubernetes/pkg/api"
 	kclientset "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset"
 	kadmission "k8s.io/kubernetes/pkg/kubeapiserver/admission"
 
@@ -24,12 +22,9 @@ func RegisterSCCExecRestrictions(plugins *admission.Plugins) {
 		})
 }
 
-var (
-	_ = admission.Interface(&sccExecRestrictions{})
-	_ = initializer.WantsAuthorizer(&sccExecRestrictions{})
-	_ = oadmission.WantsSecurityInformer(&sccExecRestrictions{})
-	_ = kadmission.WantsInternalKubeClientSet(&sccExecRestrictions{})
-)
+var _ admission.Interface = &sccExecRestrictions{}
+var _ = oadmission.WantsSecurityInformer(&constraint{})
+var _ = kadmission.WantsInternalKubeClientSet(&sccExecRestrictions{})
 
 // sccExecRestrictions is an implementation of admission.Interface which says no to a pod/exec on
 // a pod that the user would not be allowed to create
@@ -82,11 +77,7 @@ func (d *sccExecRestrictions) SetSecurityInformers(informers securityinformer.Sh
 	d.constraintAdmission.SetSecurityInformers(informers)
 }
 
-func (d *sccExecRestrictions) SetAuthorizer(authorizer authorizer.Authorizer) {
-	d.constraintAdmission.SetAuthorizer(authorizer)
-}
-
 // Validate defines actions to validate sccExecRestrictions
-func (d *sccExecRestrictions) ValidateInitialization() error {
-	return d.constraintAdmission.ValidateInitialization()
+func (d *sccExecRestrictions) Validate() error {
+	return d.constraintAdmission.Validate()
 }

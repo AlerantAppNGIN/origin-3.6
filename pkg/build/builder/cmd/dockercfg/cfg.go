@@ -9,7 +9,7 @@ import (
 	"github.com/golang/glog"
 	"github.com/spf13/pflag"
 
-	kapi "k8s.io/kubernetes/pkg/apis/core"
+	kapi "k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/credentialprovider"
 )
 

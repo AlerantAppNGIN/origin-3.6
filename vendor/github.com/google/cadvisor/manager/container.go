@@ -29,7 +29,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/cadvisor/accelerators"
 	"github.com/google/cadvisor/cache/memory"
 	"github.com/google/cadvisor/collector"
 	"github.com/google/cadvisor/container"
@@ -40,7 +39,6 @@ import (
 
 	units "github.com/docker/go-units"
 	"github.com/golang/glog"
-	"k8s.io/utils/clock"
 )
 
 // Housekeeping interval.
@@ -66,11 +64,8 @@ type containerData struct {
 	housekeepingInterval     time.Duration
 	maxHousekeepingInterval  time.Duration
 	allowDynamicHousekeeping bool
-	infoLastUpdatedTime      time.Time
-	statsLastUpdatedTime     time.Time
+	lastUpdatedTime          time.Time
 	lastErrorTime            time.Time
-	//  used to track time
-	clock clock.Clock
 
 	// Decay value used for load average smoothing. Interval length of 10 seconds is used.
 	loadDecay float64
@@ -81,14 +76,8 @@ type containerData struct {
 	// Tells the container to stop.
 	stop chan bool
 
-	// Tells the container to immediately collect stats
-	onDemandChan chan chan struct{}
-
 	// Runs custom metric collectors.
 	collectorManager collector.CollectorManager
-
-	// nvidiaCollector updates stats for Nvidia GPUs attached to the container.
-	nvidiaCollector accelerators.AcceleratorCollector
 }
 
 // jitter returns a time.Duration between duration and duration + maxFactor * duration,
@@ -117,43 +106,16 @@ func (c *containerData) Stop() error {
 }
 
 func (c *containerData) allowErrorLogging() bool {
-	if c.clock.Since(c.lastErrorTime) > time.Minute {
-		c.lastErrorTime = c.clock.Now()
+	if time.Since(c.lastErrorTime) > time.Minute {
+		c.lastErrorTime = time.Now()
 		return true
 	}
 	return false
 }
 
-// OnDemandHousekeeping performs housekeeping on the container and blocks until it has completed.
-// It is designed to be used in conjunction with periodic housekeeping, and will cause the timer for
-// periodic housekeeping to reset.  This should be used sparingly, as calling OnDemandHousekeeping frequently
-// can have serious performance costs.
-func (c *containerData) OnDemandHousekeeping(maxAge time.Duration) {
-	if c.clock.Since(c.statsLastUpdatedTime) > maxAge {
-		housekeepingFinishedChan := make(chan struct{})
-		c.onDemandChan <- housekeepingFinishedChan
-		select {
-		case <-c.stop:
-		case <-housekeepingFinishedChan:
-		}
-	}
-}
-
-// notifyOnDemand notifies all calls to OnDemandHousekeeping that housekeeping is finished
-func (c *containerData) notifyOnDemand() {
-	for {
-		select {
-		case finishedChan := <-c.onDemandChan:
-			close(finishedChan)
-		default:
-			return
-		}
-	}
-}
-
 func (c *containerData) GetInfo(shouldUpdateSubcontainers bool) (*containerInfo, error) {
 	// Get spec and subcontainers.
-	if c.clock.Since(c.infoLastUpdatedTime) > 5*time.Second {
+	if time.Since(c.lastUpdatedTime) > 5*time.Second {
 		err := c.updateSpec()
 		if err != nil {
 			return nil, err
@@ -164,7 +126,7 @@ func (c *containerData) GetInfo(shouldUpdateSubcontainers bool) (*containerInfo,
 				return nil, err
 			}
 		}
-		c.infoLastUpdatedTime = c.clock.Now()
+		c.lastUpdatedTime = time.Now()
 	}
 	// Make a copy of the info for the user.
 	c.lock.Lock()
@@ -344,7 +306,7 @@ func (c *containerData) GetProcessList(cadvisorContainer string, inHostNamespace
 	return processes, nil
 }
 
-func newContainerData(containerName string, memoryCache *memory.InMemoryCache, handler container.ContainerHandler, logUsage bool, collectorManager collector.CollectorManager, maxHousekeepingInterval time.Duration, allowDynamicHousekeeping bool, clock clock.Clock) (*containerData, error) {
+func newContainerData(containerName string, memoryCache *memory.InMemoryCache, handler container.ContainerHandler, logUsage bool, collectorManager collector.CollectorManager, maxHousekeepingInterval time.Duration, allowDynamicHousekeeping bool) (*containerData, error) {
 	if memoryCache == nil {
 		return nil, fmt.Errorf("nil memory storage")
 	}
@@ -366,8 +328,6 @@ func newContainerData(containerName string, memoryCache *memory.InMemoryCache, h
 		loadAvg:                  -1.0, // negative value indicates uninitialized.
 		stop:                     make(chan bool, 1),
 		collectorManager:         collectorManager,
-		onDemandChan:             make(chan chan struct{}, 100),
-		clock:                    clock,
 	}
 	cont.info.ContainerReference = ref
 
@@ -377,7 +337,8 @@ func newContainerData(containerName string, memoryCache *memory.InMemoryCache, h
 		// Create cpu load reader.
 		loadReader, err := cpuload.New()
 		if err != nil {
-			glog.Warningf("Could not initialize cpu load reader for %q: %s", ref.Name, err)
+			// TODO(rjnagal): Promote to warning once we support cpu load inside namespaces.
+			glog.Infof("Could not initialize cpu load reader for %q: %s", ref.Name, err)
 		} else {
 			cont.loadReader = loadReader
 		}
@@ -397,7 +358,7 @@ func newContainerData(containerName string, memoryCache *memory.InMemoryCache, h
 }
 
 // Determine when the next housekeeping should occur.
-func (self *containerData) nextHousekeepingInterval() time.Duration {
+func (self *containerData) nextHousekeeping(lastHousekeeping time.Time) time.Time {
 	if self.allowDynamicHousekeeping {
 		var empty time.Time
 		stats, err := self.memoryCache.RecentStats(self.info.Name, empty, empty, 2)
@@ -420,7 +381,7 @@ func (self *containerData) nextHousekeepingInterval() time.Duration {
 		}
 	}
 
-	return jitter(self.housekeepingInterval, 1.0)
+	return lastHousekeeping.Add(jitter(self.housekeepingInterval, 1.0))
 }
 
 // TODO(vmarmol): Implement stats collecting as a custom collector.
@@ -446,19 +407,24 @@ func (c *containerData) housekeeping() {
 
 	// Housekeep every second.
 	glog.V(3).Infof("Start housekeeping for container %q\n", c.info.Name)
-	houseKeepingTimer := c.clock.NewTimer(0 * time.Second)
-	defer houseKeepingTimer.Stop()
+	lastHousekeeping := time.Now()
 	for {
-		if !c.housekeepingTick(houseKeepingTimer.C(), longHousekeeping) {
+		select {
+		case <-c.stop:
+			// Stop housekeeping when signaled.
 			return
-		}
-		// Stop and drain the timer so that it is safe to reset it
-		if !houseKeepingTimer.Stop() {
-			select {
-			case <-houseKeepingTimer.C():
-			default:
+		default:
+			// Perform housekeeping.
+			start := time.Now()
+			c.housekeepingTick()
+
+			// Log if housekeeping took too long.
+			duration := time.Since(start)
+			if duration >= longHousekeeping {
+				glog.V(3).Infof("[%s] Housekeeping took %s", c.info.Name, duration)
 			}
 		}
+
 		// Log usage if asked to do so.
 		if c.logUsage {
 			const numSamples = 60
@@ -466,7 +432,7 @@ func (c *containerData) housekeeping() {
 			stats, err := c.memoryCache.RecentStats(c.info.Name, empty, empty, numSamples)
 			if err != nil {
 				if c.allowErrorLogging() {
-					glog.Warningf("[%s] Failed to get recent stats for logging usage: %v", c.info.Name, err)
+					glog.Infof("[%s] Failed to get recent stats for logging usage: %v", c.info.Name, err)
 				}
 			} else if len(stats) < numSamples {
 				// Ignore, not enough stats yet.
@@ -482,39 +448,29 @@ func (c *containerData) housekeeping() {
 				instantUsageInCores := float64(stats[numSamples-1].Cpu.Usage.Total-stats[numSamples-2].Cpu.Usage.Total) / float64(stats[numSamples-1].Timestamp.Sub(stats[numSamples-2].Timestamp).Nanoseconds())
 				usageInCores := float64(usageCpuNs) / float64(stats[numSamples-1].Timestamp.Sub(stats[0].Timestamp).Nanoseconds())
 				usageInHuman := units.HumanSize(float64(usageMemory))
-				// Don't set verbosity since this is already protected by the logUsage flag.
 				glog.Infof("[%s] %.3f cores (average: %.3f cores), %s of memory", c.info.Name, instantUsageInCores, usageInCores, usageInHuman)
 			}
 		}
-		houseKeepingTimer.Reset(c.nextHousekeepingInterval())
+
+		next := c.nextHousekeeping(lastHousekeeping)
+
+		// Schedule the next housekeeping. Sleep until that time.
+		if time.Now().Before(next) {
+			time.Sleep(next.Sub(time.Now()))
+		} else {
+			next = time.Now()
+		}
+		lastHousekeeping = next
 	}
 }
 
-func (c *containerData) housekeepingTick(timer <-chan time.Time, longHousekeeping time.Duration) bool {
-	select {
-	case <-c.stop:
-		// Stop housekeeping when signaled.
-		return false
-	case finishedChan := <-c.onDemandChan:
-		// notify the calling function once housekeeping has completed
-		defer close(finishedChan)
-	case <-timer:
-	}
-	start := c.clock.Now()
+func (c *containerData) housekeepingTick() {
 	err := c.updateStats()
 	if err != nil {
 		if c.allowErrorLogging() {
-			glog.Warningf("Failed to update stats for container \"%s\": %s", c.info.Name, err)
+			glog.Infof("Failed to update stats for container \"%s\": %s", c.info.Name, err)
 		}
 	}
-	// Log if housekeeping took too long.
-	duration := c.clock.Since(start)
-	if duration >= longHousekeeping {
-		glog.V(3).Infof("[%s] Housekeeping took %s", c.info.Name, duration)
-	}
-	c.notifyOnDemand()
-	c.statsLastUpdatedTime = c.clock.Now()
-	return true
 }
 
 func (c *containerData) updateSpec() error {
@@ -590,7 +546,7 @@ func (c *containerData) updateStats() error {
 	var customStatsErr error
 	cm := c.collectorManager.(*collector.GenericCollectorManager)
 	if len(cm.Collectors) > 0 {
-		if cm.NextCollectionTime.Before(c.clock.Now()) {
+		if cm.NextCollectionTime.Before(time.Now()) {
 			customStats, err := c.updateCustomStats()
 			if customStats != nil {
 				stats.CustomMetrics = customStats
@@ -599,12 +555,6 @@ func (c *containerData) updateStats() error {
 				customStatsErr = err
 			}
 		}
-	}
-
-	var nvidiaStatsErr error
-	if c.nvidiaCollector != nil {
-		// This updates the Accelerators field of the stats struct
-		nvidiaStatsErr = c.nvidiaCollector.UpdateStats(stats)
 	}
 
 	ref, err := c.handler.ContainerReference()
@@ -621,9 +571,6 @@ func (c *containerData) updateStats() error {
 	}
 	if statsErr != nil {
 		return statsErr
-	}
-	if nvidiaStatsErr != nil {
-		return nvidiaStatsErr
 	}
 	return customStatsErr
 }

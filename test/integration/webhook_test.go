@@ -10,14 +10,12 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	restclient "k8s.io/client-go/rest"
-	kapi "k8s.io/kubernetes/pkg/apis/core"
+	kapi "k8s.io/kubernetes/pkg/api"
 
-	buildapiv1 "github.com/openshift/api/build/v1"
 	buildapi "github.com/openshift/origin/pkg/build/apis/build"
-	buildclient "github.com/openshift/origin/pkg/build/generated/internalclientset"
+	buildapiv1 "github.com/openshift/origin/pkg/build/apis/build/v1"
 	"github.com/openshift/origin/pkg/cmd/server/bootstrappolicy"
 	imageapi "github.com/openshift/origin/pkg/image/apis/image"
-	imageclient "github.com/openshift/origin/pkg/image/generated/internalclientset"
 	testutil "github.com/openshift/origin/test/util"
 	testserver "github.com/openshift/origin/test/util/server"
 )
@@ -33,11 +31,10 @@ func TestWebhook(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unable to get kubeClient: %v", err)
 	}
-	clusterAdminClientConfig, err := testutil.GetClusterAdminClientConfig(clusterAdminKubeConfig)
+	osClient, err := testutil.GetClusterAdminClient(clusterAdminKubeConfig)
 	if err != nil {
 		t.Fatalf("unable to get osClient: %v", err)
 	}
-	clusterAdminBuildClient := buildclient.NewForConfigOrDie(clusterAdminClientConfig).Build()
 
 	kubeClient.Core().Namespaces().Create(&kapi.Namespace{
 		ObjectMeta: metav1.ObjectMeta{Name: testutil.Namespace()},
@@ -49,7 +46,7 @@ func TestWebhook(t *testing.T) {
 
 	// create buildconfig
 	buildConfig := mockBuildConfigImageParms("originalimage", "imagestream", "validtag")
-	if _, err := clusterAdminBuildClient.BuildConfigs(testutil.Namespace()).Create(buildConfig); err != nil {
+	if _, err := osClient.BuildConfigs(testutil.Namespace()).Create(buildConfig); err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
 
@@ -109,7 +106,7 @@ func TestWebhook(t *testing.T) {
 				t.Fatalf("unexpected error: %v", err)
 			}
 
-			body := postFile(clusterAdminBuildClient.RESTClient(), test.HeaderFunc, test.Payload, clusterAdminClientConfig.Host+s, http.StatusOK, t)
+			body := postFile(osClient.RESTClient.Client, test.HeaderFunc, test.Payload, clusterAdminClientConfig.Host+s, http.StatusOK, t)
 			if len(body) == 0 {
 				t.Fatalf("%s: Webhook did not return expected Build object.", test.Name)
 			}
@@ -120,7 +117,7 @@ func TestWebhook(t *testing.T) {
 				t.Fatalf("%s: Unable to unmarshal returned body into a Build object: %v", test.Name, err)
 			}
 
-			actual, err := clusterAdminBuildClient.Builds(testutil.Namespace()).Get(returnedBuild.Name, metav1.GetOptions{})
+			actual, err := osClient.Builds(testutil.Namespace()).Get(returnedBuild.Name, metav1.GetOptions{})
 			if err != nil {
 				t.Errorf("Created build not found in cluster: %v", err)
 			}
@@ -134,21 +131,21 @@ func TestWebhook(t *testing.T) {
 }
 
 func TestWebhookGitHubPushWithImage(t *testing.T) {
-	const registryHostname = "registry:3000"
-	testutil.SetAdditionalAllowedRegistries(registryHostname)
-
 	masterConfig, clusterAdminKubeConfig, err := testserver.StartTestMaster()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	defer testserver.CleanupMasterEtcd(t, masterConfig)
 
+	clusterAdminClient, err := testutil.GetClusterAdminClient(clusterAdminKubeConfig)
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+
 	clusterAdminClientConfig, err := testutil.GetClusterAdminClientConfig(clusterAdminKubeConfig)
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
-	clusterAdminImageClient := imageclient.NewForConfigOrDie(clusterAdminClientConfig).Image()
-	clusterAdminBuildClient := buildclient.NewForConfigOrDie(clusterAdminClientConfig).Build()
 
 	err = testutil.CreateNamespace(clusterAdminKubeConfig, testutil.Namespace())
 	if err != nil {
@@ -168,18 +165,18 @@ func TestWebhookGitHubPushWithImage(t *testing.T) {
 	imageStream := &imageapi.ImageStream{
 		ObjectMeta: metav1.ObjectMeta{Name: "image-stream"},
 		Spec: imageapi.ImageStreamSpec{
-			DockerImageRepository: registryHostname + "/integration/imagestream",
+			DockerImageRepository: "registry:3000/integration/imagestream",
 			Tags: map[string]imageapi.TagReference{
 				"validtag": {
 					From: &kapi.ObjectReference{
 						Kind: "DockerImage",
-						Name: registryHostname + "/integration/imagestream:success",
+						Name: "registry:3000/integration/imagestream:success",
 					},
 				},
 			},
 		},
 	}
-	if _, err := clusterAdminImageClient.ImageStreams(testutil.Namespace()).Create(imageStream); err != nil {
+	if _, err := clusterAdminClient.ImageStreams(testutil.Namespace()).Create(imageStream); err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
 
@@ -190,17 +187,17 @@ func TestWebhookGitHubPushWithImage(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{
 				Name: "myimage",
 			},
-			DockerImageReference: registryHostname + "/integration/imagestream:success",
+			DockerImageReference: "registry:3000/integration/imagestream:success",
 		},
 	}
-	if _, err := clusterAdminImageClient.ImageStreamMappings(testutil.Namespace()).Create(ism); err != nil {
+	if err := clusterAdminClient.ImageStreamMappings(testutil.Namespace()).Create(ism); err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
 
 	// create buildconfig
 	buildConfig := mockBuildConfigImageParms("originalimage", "imagestream", "validtag")
 
-	if _, err := clusterAdminBuildClient.BuildConfigs(testutil.Namespace()).Create(buildConfig); err != nil {
+	if _, err := clusterAdminClient.BuildConfigs(testutil.Namespace()).Create(buildConfig); err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
 
@@ -211,7 +208,7 @@ func TestWebhookGitHubPushWithImage(t *testing.T) {
 	} {
 
 		// trigger build event sending push notification
-		body := postFile(clusterAdminBuildClient.RESTClient(), githubHeaderFunc, "github/testdata/pushevent.json", clusterAdminClientConfig.Host+s, http.StatusOK, t)
+		body := postFile(clusterAdminClient.RESTClient.Client, githubHeaderFunc, "github/testdata/pushevent.json", clusterAdminClientConfig.Host+s, http.StatusOK, t)
 		if len(body) == 0 {
 			t.Errorf("Webhook did not return Build in body")
 		}
@@ -224,7 +221,7 @@ func TestWebhookGitHubPushWithImage(t *testing.T) {
 			t.Errorf("Webhook returned incomplete or wrong Build")
 		}
 
-		actual, err := clusterAdminBuildClient.Builds(testutil.Namespace()).Get(returnedBuild.Name, metav1.GetOptions{})
+		actual, err := clusterAdminClient.Builds(testutil.Namespace()).Get(returnedBuild.Name, metav1.GetOptions{})
 		if err != nil {
 			t.Errorf("Created build not found in cluster: %v", err)
 		}
@@ -247,20 +244,21 @@ func TestWebhookGitHubPushWithImage(t *testing.T) {
 }
 
 func TestWebhookGitHubPushWithImageStream(t *testing.T) {
-	const registryHostname = "registry:3000"
-	testutil.SetAdditionalAllowedRegistries(registryHostname)
 	masterConfig, clusterAdminKubeConfig, err := testserver.StartTestMaster()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	defer testserver.CleanupMasterEtcd(t, masterConfig)
 
+	clusterAdminClient, err := testutil.GetClusterAdminClient(clusterAdminKubeConfig)
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+
 	clusterAdminClientConfig, err := testutil.GetClusterAdminClientConfig(clusterAdminKubeConfig)
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
-	clusterAdminImageClient := imageclient.NewForConfigOrDie(clusterAdminClientConfig).Image()
-	clusterAdminBuildClient := buildclient.NewForConfigOrDie(clusterAdminClientConfig).Build()
 
 	clusterAdminKubeClient, err := testutil.GetClusterAdminKubeClient(clusterAdminKubeConfig)
 	if err != nil {
@@ -280,18 +278,18 @@ func TestWebhookGitHubPushWithImageStream(t *testing.T) {
 	imageStream := &imageapi.ImageStream{
 		ObjectMeta: metav1.ObjectMeta{Name: "image-stream"},
 		Spec: imageapi.ImageStreamSpec{
-			DockerImageRepository: registryHostname + "/integration/imagestream",
+			DockerImageRepository: "registry:3000/integration/imagestream",
 			Tags: map[string]imageapi.TagReference{
 				"validtag": {
 					From: &kapi.ObjectReference{
 						Kind: "DockerImage",
-						Name: registryHostname + "/integration/imagestream:success",
+						Name: "registry:3000/integration/imagestream:success",
 					},
 				},
 			},
 		},
 	}
-	if _, err := clusterAdminImageClient.ImageStreams(testutil.Namespace()).Create(imageStream); err != nil {
+	if _, err := clusterAdminClient.ImageStreams(testutil.Namespace()).Create(imageStream); err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
 
@@ -302,50 +300,46 @@ func TestWebhookGitHubPushWithImageStream(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{
 				Name: "myimage",
 			},
-			DockerImageReference: registryHostname + "/integration/imagestream:success",
+			DockerImageReference: "registry:3000/integration/imagestream:success",
 		},
 	}
-	if _, err := clusterAdminImageClient.ImageStreamMappings(testutil.Namespace()).Create(ism); err != nil {
+	if err := clusterAdminClient.ImageStreamMappings(testutil.Namespace()).Create(ism); err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
 
 	// create buildconfig
 	buildConfig := mockBuildConfigImageStreamParms("originalimage", "image-stream", "validtag")
 
-	if _, err := clusterAdminBuildClient.BuildConfigs(testutil.Namespace()).Create(buildConfig); err != nil {
+	if _, err := clusterAdminClient.BuildConfigs(testutil.Namespace()).Create(buildConfig); err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
 
-	watch, err := clusterAdminBuildClient.Builds(testutil.Namespace()).Watch(metav1.ListOptions{})
+	watch, err := clusterAdminClient.Builds(testutil.Namespace()).Watch(metav1.ListOptions{})
 	if err != nil {
 		t.Fatalf("Couldn't subscribe to builds: %v", err)
 	}
 	defer watch.Stop()
 
-	s := "/oapi/v1/namespaces/" + testutil.Namespace() + "/buildconfigs/pushbuild/webhooks/secret101/github"
+	for _, s := range []string{
+		"/oapi/v1/namespaces/" + testutil.Namespace() + "/buildconfigs/pushbuild/webhooks/secret101/github",
+	} {
 
-	// trigger build event sending push notification
-	postFile(clusterAdminBuildClient.RESTClient(), githubHeaderFunc, "github/testdata/pushevent.json", clusterAdminClientConfig.Host+s, http.StatusOK, t)
+		// trigger build event sending push notification
+		postFile(clusterAdminClient.RESTClient.Client, githubHeaderFunc, "github/testdata/pushevent.json", clusterAdminClientConfig.Host+s, http.StatusOK, t)
 
-	var build *buildapi.Build
+		event := <-watch.ResultChan()
+		actual := event.Object.(*buildapi.Build)
 
-Loop:
-	for {
-		select {
-		case <-time.After(10 * time.Second):
-			t.Fatalf("timed out waiting for build event")
-		case event := <-watch.ResultChan():
-			actual := event.Object.(*buildapi.Build)
-			t.Logf("Saw build object %#v", actual)
-			if actual.Status.Phase != buildapi.BuildPhasePending {
-				continue
-			}
-			build = actual
-			break Loop
+		// FIXME: I think the build creation is fast and in some situlation we miss
+		// the BuildPhaseNew here. Note that this is not a bug, in future we should
+		// move this to use go routine to capture all events.
+		if actual.Status.Phase != buildapi.BuildPhaseNew && actual.Status.Phase != buildapi.BuildPhasePending {
+			t.Errorf("Expected %s or %s, got %s", buildapi.BuildPhaseNew, buildapi.BuildPhasePending, actual.Status.Phase)
 		}
-	}
-	if build.Spec.Strategy.SourceStrategy.From.Name != registryHostname+"/integration/imagestream:success" {
-		t.Errorf("Expected %s, got %s", registryHostname+"/integration/imagestream:success", build.Spec.Strategy.SourceStrategy.From.Name)
+
+		if actual.Spec.Strategy.SourceStrategy.From.Name != "registry:3000/integration/imagestream:success" {
+			t.Errorf("Expected %s, got %s", "registry:3000/integration/imagestream:success", actual.Spec.Strategy.SourceStrategy.From.Name)
+		}
 	}
 }
 
@@ -360,11 +354,10 @@ func TestWebhookGitHubPing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unable to get kubeClient: %v", err)
 	}
-	clusterAdminClientConfig, err := testutil.GetClusterAdminClientConfig(clusterAdminKubeConfig)
+	osClient, err := testutil.GetClusterAdminClient(clusterAdminKubeConfig)
 	if err != nil {
 		t.Fatalf("unable to get osClient: %v", err)
 	}
-	clusterAdminBuildClient := buildclient.NewForConfigOrDie(clusterAdminClientConfig).Build()
 
 	kubeClient.Core().Namespaces().Create(&kapi.Namespace{
 		ObjectMeta: metav1.ObjectMeta{Name: testutil.Namespace()},
@@ -372,11 +365,11 @@ func TestWebhookGitHubPing(t *testing.T) {
 
 	// create buildconfig
 	buildConfig := mockBuildConfigImageParms("originalimage", "imagestream", "validtag")
-	if _, err := clusterAdminBuildClient.BuildConfigs(testutil.Namespace()).Create(buildConfig); err != nil {
+	if _, err := osClient.BuildConfigs(testutil.Namespace()).Create(buildConfig); err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
 
-	watch, err := clusterAdminBuildClient.Builds(testutil.Namespace()).Watch(metav1.ListOptions{})
+	watch, err := osClient.Builds(testutil.Namespace()).Watch(metav1.ListOptions{})
 	if err != nil {
 		t.Fatalf("Couldn't subscribe to builds: %v", err)
 	}
@@ -393,7 +386,7 @@ func TestWebhookGitHubPing(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 
-		postFile(clusterAdminBuildClient.RESTClient(), githubHeaderFuncPing, "github/testdata/pingevent.json", clusterAdminClientConfig.Host+s, http.StatusOK, t)
+		postFile(osClient.RESTClient.Client, githubHeaderFuncPing, "github/testdata/pingevent.json", clusterAdminClientConfig.Host+s, http.StatusOK, t)
 
 		// TODO: improve negative testing
 		timer := time.NewTimer(time.Second * 5)
@@ -407,7 +400,7 @@ func TestWebhookGitHubPing(t *testing.T) {
 	}
 }
 
-func postFile(client restclient.Interface, headerFunc func(*http.Header), filename, url string, expStatusCode int, t *testing.T) []byte {
+func postFile(client restclient.HTTPClient, headerFunc func(*http.Header), filename, url string, expStatusCode int, t *testing.T) []byte {
 	data, err := ioutil.ReadFile("../../pkg/build/webhook/" + filename)
 	if err != nil {
 		t.Fatalf("Failed to open %s: %v", filename, err)
@@ -417,7 +410,7 @@ func postFile(client restclient.Interface, headerFunc func(*http.Header), filena
 		t.Fatalf("Error creating POST request: %v", err)
 	}
 	headerFunc(&req.Header)
-	resp, err := client.(*restclient.RESTClient).Client.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatalf("Failed posting webhook: %v", err)
 	}

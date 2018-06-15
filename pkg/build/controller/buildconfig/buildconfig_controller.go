@@ -2,31 +2,29 @@ package controller
 
 import (
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/golang/glog"
-	clientv1 "k8s.io/api/core/v1"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
-	kexternalclientset "k8s.io/client-go/kubernetes"
 	v1core "k8s.io/client-go/kubernetes/typed/core/v1"
+	clientv1 "k8s.io/client-go/pkg/api/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/workqueue"
-	"k8s.io/kubernetes/pkg/api/legacyscheme"
-	kapi "k8s.io/kubernetes/pkg/apis/core"
+	kapi "k8s.io/kubernetes/pkg/api"
+	kexternalclientset "k8s.io/kubernetes/pkg/client/clientset_generated/clientset"
 	kcontroller "k8s.io/kubernetes/pkg/controller"
 
 	buildapi "github.com/openshift/origin/pkg/build/apis/build"
 	buildclient "github.com/openshift/origin/pkg/build/client"
 	buildutil "github.com/openshift/origin/pkg/build/controller/common"
 	buildinformer "github.com/openshift/origin/pkg/build/generated/informers/internalversion/build/internalversion"
-	buildinternalclient "github.com/openshift/origin/pkg/build/generated/internalclientset"
 	buildlister "github.com/openshift/origin/pkg/build/generated/listers/build/internalversion"
 	buildgenerator "github.com/openshift/origin/pkg/build/generator"
+	osclient "github.com/openshift/origin/pkg/client"
 )
 
 const (
@@ -66,13 +64,13 @@ type BuildConfigController struct {
 	recorder record.EventRecorder
 }
 
-func NewBuildConfigController(buildInternalClient buildinternalclient.Interface, kubeExternalClient kexternalclientset.Interface, buildConfigInformer buildinformer.BuildConfigInformer, buildInformer buildinformer.BuildInformer) *BuildConfigController {
+func NewBuildConfigController(openshiftClient osclient.Interface, kubeExternalClient kexternalclientset.Interface, buildConfigInformer buildinformer.BuildConfigInformer, buildInformer buildinformer.BuildInformer) *BuildConfigController {
 	eventBroadcaster := record.NewBroadcaster()
-	eventBroadcaster.StartRecordingToSink(&v1core.EventSinkImpl{Interface: kubeExternalClient.CoreV1().Events("")})
+	eventBroadcaster.StartRecordingToSink(&v1core.EventSinkImpl{Interface: v1core.New(kubeExternalClient.Core().RESTClient()).Events("")})
 
-	buildClient := buildclient.NewClientBuildClient(buildInternalClient)
+	buildClient := buildclient.NewOSClientBuildClient(openshiftClient)
 	buildConfigGetter := buildConfigInformer.Lister()
-	buildConfigInstantiator := buildclient.NewClientBuildConfigInstantiatorClient(buildInternalClient)
+	buildConfigInstantiator := buildclient.NewOSClientBuildConfigInstantiatorClient(openshiftClient)
 	buildLister := buildInformer.Lister()
 
 	c := &BuildConfigController{
@@ -84,7 +82,7 @@ func NewBuildConfigController(buildInternalClient buildinternalclient.Interface,
 		buildConfigInformer: buildConfigInformer.Informer(),
 
 		queue:    workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter()),
-		recorder: eventBroadcaster.NewRecorder(legacyscheme.Scheme, clientv1.EventSource{Component: "buildconfig-controller"}),
+		recorder: eventBroadcaster.NewRecorder(kapi.Scheme, clientv1.EventSource{Component: "buildconfig-controller"}),
 	}
 
 	c.buildConfigInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
@@ -137,11 +135,7 @@ func (c *BuildConfigController) handleBuildConfig(bc *buildapi.BuildConfig) erro
 		} else if buildgenerator.IsFatal(err) || kerrors.IsNotFound(err) || kerrors.IsBadRequest(err) || kerrors.IsForbidden(err) {
 			instantiateErr = fmt.Errorf("gave up on Build for BuildConfig %s due to fatal error: %v", bcDesc(bc), err)
 			utilruntime.HandleError(instantiateErr)
-			// Fixes https://github.com/openshift/origin/issues/16557
-			// Caused by a race condition between the ImageChangeTrigger and BuildConfigChangeTrigger
-			if !strings.Contains(instantiateErr.Error(), "does not match the build request LastVersion(0)") {
-				c.recorder.Event(bc, kapi.EventTypeWarning, "BuildConfigInstantiateFailed", instantiateErr.Error())
-			}
+			c.recorder.Event(bc, kapi.EventTypeWarning, "BuildConfigInstantiateFailed", instantiateErr.Error())
 			return &configControllerFatalError{err.Error()}
 		} else {
 			instantiateErr = fmt.Errorf("error instantiating Build from BuildConfig %s: %v", bcDesc(bc), err)

@@ -7,69 +7,46 @@ import (
 	"k8s.io/apiserver/pkg/registry/generic"
 	"k8s.io/apiserver/pkg/registry/generic/registry"
 	"k8s.io/apiserver/pkg/registry/rest"
-	"k8s.io/apiserver/pkg/storage"
-	authorizationclient "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset/typed/authorization/internalversion"
-	"k8s.io/kubernetes/pkg/printers"
-	printerstorage "k8s.io/kubernetes/pkg/printers/storage"
+	kapi "k8s.io/kubernetes/pkg/api"
 
+	"github.com/openshift/origin/pkg/authorization/registry/subjectaccessreview"
 	imageadmission "github.com/openshift/origin/pkg/image/admission"
 	imageapi "github.com/openshift/origin/pkg/image/apis/image"
-	"github.com/openshift/origin/pkg/image/apis/image/validation/whitelist"
 	"github.com/openshift/origin/pkg/image/registry/imagestream"
-	printersinternal "github.com/openshift/origin/pkg/printers/internalversion"
 	"github.com/openshift/origin/pkg/util/restoptions"
 )
 
 // REST implements a RESTStorage for image streams against etcd.
 type REST struct {
 	*registry.Store
+	subjectAccessReviewRegistry subjectaccessreview.Registry
 }
 
 var _ rest.StandardStorage = &REST{}
-var _ rest.ShortNamesProvider = &REST{}
-var _ rest.CategoriesProvider = &REST{}
-
-// Categories implements the CategoriesProvider interface. Returns a list of categories a resource is part of.
-func (r *REST) Categories() []string {
-	return []string{"all"}
-}
-
-// ShortNames implements the ShortNamesProvider interface. Returns a list of short names for a resource.
-func (r *REST) ShortNames() []string {
-	return []string{"is"}
-}
 
 // NewREST returns a new REST.
-func NewREST(
-	optsGetter restoptions.Getter,
-	registryHostname imageapi.RegistryHostnameRetriever,
-	subjectAccessReviewRegistry authorizationclient.SubjectAccessReviewInterface,
-	limitVerifier imageadmission.LimitVerifier,
-	registryWhitelister whitelist.RegistryWhitelister,
-) (*REST, *StatusREST, *InternalREST, error) {
+func NewREST(optsGetter restoptions.Getter, defaultRegistry imageapi.DefaultRegistry, subjectAccessReviewRegistry subjectaccessreview.Registry, limitVerifier imageadmission.LimitVerifier) (*REST, *StatusREST, *InternalREST, error) {
 	store := registry.Store{
+		Copier:                   kapi.Scheme,
 		NewFunc:                  func() runtime.Object { return &imageapi.ImageStream{} },
 		NewListFunc:              func() runtime.Object { return &imageapi.ImageStreamList{} },
+		PredicateFunc:            imagestream.Matcher,
 		DefaultQualifiedResource: imageapi.Resource("imagestreams"),
-
-		TableConvertor: printerstorage.TableConvertor{TablePrinter: printers.NewTablePrinter().With(printersinternal.AddHandlers)},
 	}
 
 	rest := &REST{
 		Store: &store,
+		subjectAccessReviewRegistry: subjectAccessReviewRegistry,
 	}
 	// strategy must be able to load image streams across namespaces during tag verification
-	strategy := imagestream.NewStrategy(registryHostname, subjectAccessReviewRegistry, limitVerifier, registryWhitelister, rest)
+	strategy := imagestream.NewStrategy(defaultRegistry, subjectAccessReviewRegistry, limitVerifier, rest)
 
 	store.CreateStrategy = strategy
 	store.UpdateStrategy = strategy
 	store.DeleteStrategy = strategy
 	store.Decorator = strategy.Decorate
 
-	options := &generic.StoreOptions{
-		RESTOptions: optsGetter,
-		AttrFunc:    storage.AttrFunc(storage.DefaultNamespaceScopedAttr).WithFieldMutation(imageapi.ImageStreamSelector),
-	}
+	options := &generic.StoreOptions{RESTOptions: optsGetter, AttrFunc: imagestream.GetAttrs}
 	if err := store.CompleteWithOptions(options); err != nil {
 		return nil, nil, nil, err
 	}
@@ -112,8 +89,8 @@ func (r *StatusREST) Get(ctx apirequest.Context, name string, options *metav1.Ge
 }
 
 // Update alters the status subset of an object.
-func (r *StatusREST) Update(ctx apirequest.Context, name string, objInfo rest.UpdatedObjectInfo, createValidation rest.ValidateObjectFunc, updateValidation rest.ValidateObjectUpdateFunc) (runtime.Object, bool, error) {
-	return r.store.Update(ctx, name, objInfo, createValidation, updateValidation)
+func (r *StatusREST) Update(ctx apirequest.Context, name string, objInfo rest.UpdatedObjectInfo) (runtime.Object, bool, error) {
+	return r.store.Update(ctx, name, objInfo)
 }
 
 // InternalREST implements the REST endpoint for changing both the spec and status of an image stream.
@@ -129,20 +106,11 @@ func (r *InternalREST) New() runtime.Object {
 }
 
 // Create alters both the spec and status of the object.
-func (r *InternalREST) Create(ctx apirequest.Context, obj runtime.Object, createValidation rest.ValidateObjectFunc, _ bool) (runtime.Object, error) {
-	return r.store.Create(ctx, obj, createValidation, false)
+func (r *InternalREST) Create(ctx apirequest.Context, obj runtime.Object, _ bool) (runtime.Object, error) {
+	return r.store.Create(ctx, obj, false)
 }
 
 // Update alters both the spec and status of the object.
-func (r *InternalREST) Update(ctx apirequest.Context, name string, objInfo rest.UpdatedObjectInfo, createValidation rest.ValidateObjectFunc, updateValidation rest.ValidateObjectUpdateFunc) (runtime.Object, bool, error) {
-	return r.store.Update(ctx, name, objInfo, createValidation, updateValidation)
-}
-
-// LegacyREST allows us to wrap and alter some behavior
-type LegacyREST struct {
-	*REST
-}
-
-func (r *LegacyREST) Categories() []string {
-	return []string{}
+func (r *InternalREST) Update(ctx apirequest.Context, name string, objInfo rest.UpdatedObjectInfo) (runtime.Object, bool, error) {
+	return r.store.Update(ctx, name, objInfo)
 }

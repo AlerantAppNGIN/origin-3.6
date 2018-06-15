@@ -6,8 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	kvalidation "k8s.io/kubernetes/pkg/apis/core/validation"
-	kcmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
+	kvalidation "k8s.io/kubernetes/pkg/api/validation"
 )
 
 // pathSpec represents a path (remote or local) given as a source or destination
@@ -47,21 +46,10 @@ func (s *pathSpec) Validate() error {
 	return nil
 }
 
-// isPathForPod receives a path and returns true
-// if it matches a <podName>:/path format
-func isPathForPod(path string) bool {
-	parts := strings.SplitN(path, ":", 2)
-	if len(parts) == 1 || (isWindows() && len(parts[0]) == 1) {
-		return false
-	}
-
-	return true
-}
-
 // parsePathSpec parses a string argument into a pathSpec object
 func parsePathSpec(path string) (*pathSpec, error) {
 	parts := strings.SplitN(path, ":", 2)
-	if !isPathForPod(path) {
+	if len(parts) == 1 || (isWindows() && len(parts[0]) == 1) {
 		return &pathSpec{
 			Path: path,
 		}, nil
@@ -73,47 +61,6 @@ func parsePathSpec(path string) (*pathSpec, error) {
 		PodName: parts[0],
 		Path:    parts[1],
 	}, nil
-}
-
-// resolveResourceKindPath determines if a given path contains a resource
-// formatted as resource/kind, and returns the resource name without the
-// <kind/> segment, ensuring that the resource is of type Pod, if it exists.
-func resolveResourceKindPath(f kcmdutil.Factory, path, namespace string) (string, error) {
-	parts := strings.SplitN(path, ":", 2)
-	if !isPathForPod(path) {
-		return path, nil
-	}
-
-	podName := parts[0]
-
-	// if the specified pod name is given in the <kind>/<name> format
-	// validate the podName without the <kind/> segment.
-	if podSegs := strings.Split(podName, "/"); len(podSegs) > 1 {
-		podName = podSegs[1]
-	}
-
-	r := f.NewBuilder().
-		Internal().
-		NamespaceParam(namespace).
-		SingleResourceType().
-		ResourceNames("pods", podName).
-		Do()
-
-	if err := r.Err(); err != nil {
-		return "", err
-	}
-	infos, err := r.Infos()
-	if err != nil {
-		return "", err
-	}
-
-	// if there were no errors, we should expect
-	// one resource to exist
-	if len(infos) == 0 || infos[0].Mapping.Resource != "pods" {
-		return "", fmt.Errorf("error: expected resource to be of type pod, got %q", infos[0].Mapping.Resource)
-	}
-
-	return fmt.Sprintf("%s:%s", podName, parts[1]), nil
 }
 
 // convertWindowsPath converts a windows native path to a path that can be used by

@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 //
-// File contains DN parsing functionality
+// File contains DN parsing functionallity
 //
 // https://tools.ietf.org/html/rfc4514
 //
@@ -52,7 +52,7 @@ import (
 	"fmt"
 	"strings"
 
-	"gopkg.in/asn1-ber.v1"
+	ber "gopkg.in/asn1-ber.v1"
 )
 
 // AttributeTypeAndValue represents an attributeTypeAndValue from https://tools.ietf.org/html/rfc4514
@@ -143,9 +143,6 @@ func ParseDN(str string) (*DN, error) {
 			}
 		} else if char == ',' || char == '+' {
 			// We're done with this RDN or value, push it
-			if len(attribute.Type) == 0 {
-				return nil, errors.New("incomplete type, value pair")
-			}
 			attribute.Value = stringFromBuffer()
 			rdn.Attributes = append(rdn.Attributes, attribute)
 			attribute = new(AttributeTypeAndValue)

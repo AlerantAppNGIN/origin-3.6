@@ -3,8 +3,6 @@ package describe
 import (
 	"bytes"
 	"fmt"
-	"io"
-	"net/url"
 	"regexp"
 	"strings"
 	"text/tabwriter"
@@ -15,14 +13,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/sets"
-	"k8s.io/client-go/rest"
-	api "k8s.io/kubernetes/pkg/apis/core"
+	"k8s.io/kubernetes/pkg/api"
 
 	authorizationapi "github.com/openshift/origin/pkg/authorization/apis/authorization"
 	buildapi "github.com/openshift/origin/pkg/build/apis/build"
-	buildinternalclient "github.com/openshift/origin/pkg/build/client/internalversion"
+	"github.com/openshift/origin/pkg/client"
 	imageapi "github.com/openshift/origin/pkg/image/apis/image"
-	templateapi "github.com/openshift/origin/pkg/template/apis/template"
 )
 
 const emptyString = "<none>"
@@ -165,15 +161,25 @@ type DescribeWebhook struct {
 
 // webhookDescribe returns a map of webhook trigger types and its corresponding
 // information.
-func webHooksDescribe(triggers []buildapi.BuildTriggerPolicy, name, namespace string, c rest.Interface) map[string][]DescribeWebhook {
+func webHooksDescribe(triggers []buildapi.BuildTriggerPolicy, name, namespace string, cli client.BuildConfigsNamespacer) map[string][]DescribeWebhook {
 	result := map[string][]DescribeWebhook{}
 
 	for _, trigger := range triggers {
+		var webHookTrigger string
 		var allowEnv *bool
 
 		switch trigger.Type {
-		case buildapi.GitHubWebHookBuildTriggerType, buildapi.GitLabWebHookBuildTriggerType, buildapi.BitbucketWebHookBuildTriggerType:
+		case buildapi.GitHubWebHookBuildTriggerType:
+			webHookTrigger = trigger.GitHubWebHook.Secret
+
+		case buildapi.GitLabWebHookBuildTriggerType:
+			webHookTrigger = trigger.GitLabWebHook.Secret
+
+		case buildapi.BitbucketWebHookBuildTriggerType:
+			webHookTrigger = trigger.BitbucketWebHook.Secret
+
 		case buildapi.GenericWebHookBuildTriggerType:
+			webHookTrigger = trigger.GenericWebHook.Secret
 			allowEnv = &trigger.GenericWebHook.AllowEnv
 
 		default:
@@ -181,13 +187,16 @@ func webHooksDescribe(triggers []buildapi.BuildTriggerPolicy, name, namespace st
 		}
 		webHookDesc := result[string(trigger.Type)]
 
+		if len(webHookTrigger) == 0 {
+			continue
+		}
+
 		var urlStr string
-		webhookClient := buildinternalclient.NewWebhookURLClient(c, namespace)
-		u, err := webhookClient.WebHookURL(name, &trigger)
+		url, err := cli.BuildConfigs(namespace).WebHookURL(name, &trigger)
 		if err != nil {
 			urlStr = fmt.Sprintf("<error: %s>", err.Error())
 		} else {
-			urlStr, _ = url.PathUnescape(u.String())
+			urlStr = url.String()
 		}
 
 		webHookDesc = append(webHookDesc,
@@ -244,7 +253,7 @@ func formatImageStreamTags(out *tabwriter.Writer, stream *imageapi.ImageStream) 
 	var localReferences sets.String
 	var referentialTags map[string]sets.String
 	for k := range stream.Spec.Tags {
-		if target, _, multiple, err := imageapi.FollowTagReference(stream, k); err == nil && multiple {
+		if target, _, ok, multiple := imageapi.FollowTagReference(stream, k); ok && multiple {
 			if referentialTags == nil {
 				referentialTags = make(map[string]sets.String)
 			}
@@ -291,7 +300,7 @@ func formatImageStreamTags(out *tabwriter.Writer, stream *imageapi.ImageStream) 
 			}
 			scheduled, insecure = tagRef.ImportPolicy.Scheduled, tagRef.ImportPolicy.Insecure
 			gen := imageapi.LatestObservedTagGeneration(stream, tag)
-			importing = !tagRef.Reference && tagRef.Generation != nil && *tagRef.Generation > gen
+			importing = !tagRef.Reference && tagRef.Generation != nil && *tagRef.Generation != gen
 		}
 
 		//   updates whenever tag :5.2 is changed
@@ -331,10 +340,8 @@ func formatImageStreamTags(out *tabwriter.Writer, stream *imageapi.ImageStream) 
 		}
 
 		switch {
-		case !hasSpecTag:
-			fmt.Fprintf(out, "  no spec tag\n")
-		case tagRef.From == nil:
-			fmt.Fprintf(out, "  tag without source image\n")
+		case !hasSpecTag || tagRef.From == nil:
+			fmt.Fprintf(out, "  pushed image\n")
 		case tagRef.From.Kind == "ImageStreamTag":
 			switch {
 			case tagRef.Reference:
@@ -450,23 +457,4 @@ func roleBindingRestrictionType(rbr *authorizationapi.RoleBindingRestriction) st
 		return "ServiceAccount"
 	}
 	return ""
-}
-
-// PrintTemplateParameters the Template parameters with their default values
-func PrintTemplateParameters(params []templateapi.Parameter, output io.Writer) error {
-	w := tabwriter.NewWriter(output, 20, 5, 3, ' ', 0)
-	defer w.Flush()
-	parameterColumns := []string{"NAME", "DESCRIPTION", "GENERATOR", "VALUE"}
-	fmt.Fprintf(w, "%s\n", strings.Join(parameterColumns, "\t"))
-	for _, p := range params {
-		value := p.Value
-		if len(p.Generate) != 0 {
-			value = p.From
-		}
-		_, err := fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", p.Name, p.Description, p.Generate, value)
-		if err != nil {
-			return err
-		}
-	}
-	return nil
 }

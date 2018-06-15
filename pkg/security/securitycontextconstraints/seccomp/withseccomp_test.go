@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	api "k8s.io/kubernetes/pkg/apis/core"
+	"k8s.io/kubernetes/pkg/api"
 )
 
 func TestNewWithSeccompProfile(t *testing.T) {

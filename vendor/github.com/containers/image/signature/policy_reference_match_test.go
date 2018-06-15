@@ -1,7 +1,6 @@
 package signature
 
 import (
-	"context"
 	"fmt"
 	"testing"
 
@@ -64,7 +63,7 @@ func (ref refImageMock) Close() error {
 func (ref refImageMock) Manifest() ([]byte, string, error) {
 	panic("unexpected call to a mock function")
 }
-func (ref refImageMock) Signatures(context.Context) ([][]byte, error) {
+func (ref refImageMock) Signatures() ([][]byte, error) {
 	panic("unexpected call to a mock function")
 }
 
@@ -329,7 +328,7 @@ func (ref forbiddenImageMock) Close() error {
 func (ref forbiddenImageMock) Manifest() ([]byte, string, error) {
 	panic("unexpected call to a mock function")
 }
-func (ref forbiddenImageMock) Signatures(context.Context) ([][]byte, error) {
+func (ref forbiddenImageMock) Signatures() ([][]byte, error) {
 	panic("unexpected call to a mock function")
 }
 

@@ -65,9 +65,6 @@ func rsyncFlagsFromOptions(o *RsyncOptions) []string {
 	if o.Delete {
 		flags = append(flags, "--delete")
 	}
-	if o.Compress {
-		flags = append(flags, "-z")
-	}
 	if len(o.RsyncInclude) > 0 {
 		for _, include := range o.RsyncInclude {
 			flags = append(flags, fmt.Sprintf("--include=%s", include))
@@ -100,9 +97,6 @@ func rsyncSpecificFlags(o *RsyncOptions) []string {
 	}
 	if o.RsyncNoPerms {
 		flags = append(flags, "--no-perms")
-	}
-	if o.Compress {
-		flags = append(flags, "-z")
 	}
 	return flags
 }

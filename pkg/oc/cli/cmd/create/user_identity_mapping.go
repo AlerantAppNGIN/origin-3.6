@@ -6,15 +6,15 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime"
-	kapi "k8s.io/kubernetes/pkg/apis/core"
+	kapi "k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/kubectl/cmd/templates"
 	cmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
 
-	"github.com/openshift/origin/pkg/oc/cli/util/clientcmd"
+	"github.com/openshift/origin/pkg/client"
+	"github.com/openshift/origin/pkg/cmd/util/clientcmd"
 	userapi "github.com/openshift/origin/pkg/user/apis/user"
-	userclientinternal "github.com/openshift/origin/pkg/user/generated/internalclientset"
-	userclient "github.com/openshift/origin/pkg/user/generated/internalclientset/typed/user/internalversion"
 )
 
 const UserIdentityMappingRecommendedName = "useridentitymapping"
@@ -35,10 +35,11 @@ type CreateUserIdentityMappingOptions struct {
 	User     string
 	Identity string
 
-	UserIdentityMappingClient userclient.UserIdentityMappingInterface
+	UserIdentityMappingClient client.UserIdentityMappingInterface
 
 	DryRun bool
 
+	Mapper       meta.RESTMapper
 	OutputFormat string
 	Out          io.Writer
 	Printer      ObjectPrinter
@@ -79,20 +80,17 @@ func (o *CreateUserIdentityMappingOptions) Complete(cmd *cobra.Command, f *clien
 
 	o.DryRun = cmdutil.GetFlagBool(cmd, "dry-run")
 
-	clientConfig, err := f.ClientConfig()
+	client, _, err := f.Clients()
 	if err != nil {
 		return err
 	}
-	client, err := userclientinternal.NewForConfig(clientConfig)
-	if err != nil {
-		return err
-	}
-	o.UserIdentityMappingClient = client.User().UserIdentityMappings()
+	o.UserIdentityMappingClient = client.UserIdentityMappings()
 
+	o.Mapper, _ = f.Object()
 	o.OutputFormat = cmdutil.GetFlagString(cmd, "output")
 
 	o.Printer = func(obj runtime.Object, out io.Writer) error {
-		return cmdutil.PrintObject(cmd, obj, out)
+		return f.PrintObject(cmd, false, o.Mapper, obj, out)
 	}
 
 	return nil
@@ -107,6 +105,9 @@ func (o *CreateUserIdentityMappingOptions) Validate() error {
 	}
 	if o.UserIdentityMappingClient == nil {
 		return fmt.Errorf("UserIdentityMappingClient is required")
+	}
+	if o.Mapper == nil {
+		return fmt.Errorf("Mapper is required")
 	}
 	if o.Out == nil {
 		return fmt.Errorf("Out is required")
@@ -134,7 +135,7 @@ func (o *CreateUserIdentityMappingOptions) Run() error {
 	}
 
 	if useShortOutput := o.OutputFormat == "name"; useShortOutput || len(o.OutputFormat) == 0 {
-		cmdutil.PrintSuccess(useShortOutput, o.Out, actualMapping, o.DryRun, "created")
+		cmdutil.PrintSuccess(o.Mapper, useShortOutput, o.Out, "useridentitymapping", actualMapping.Name, o.DryRun, "created")
 		return nil
 	}
 

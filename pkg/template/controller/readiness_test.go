@@ -7,16 +7,15 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	kapi "k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/apis/apps"
 	"k8s.io/kubernetes/pkg/apis/batch"
-	kapi "k8s.io/kubernetes/pkg/apis/core"
 	"k8s.io/kubernetes/pkg/apis/extensions"
 	deploymentutil "k8s.io/kubernetes/pkg/controller/deployment/util"
 
-	appsapi "github.com/openshift/origin/pkg/apps/apis/apps"
 	buildapi "github.com/openshift/origin/pkg/build/apis/build"
-	fakebuild "github.com/openshift/origin/pkg/build/generated/internalclientset/fake"
-	routeapi "github.com/openshift/origin/pkg/route/apis/route"
+	"github.com/openshift/origin/pkg/client/testclient"
+	deployapi "github.com/openshift/origin/pkg/deploy/apis/apps"
 )
 
 func TestCheckReadiness(t *testing.T) {
@@ -71,9 +70,6 @@ func TestCheckReadiness(t *testing.T) {
 			},
 			build: buildapi.Build{
 				ObjectMeta: metav1.ObjectMeta{
-					Labels: map[string]string{
-						buildapi.BuildConfigLabel: "",
-					},
 					Annotations: map[string]string{
 						buildapi.BuildNumberAnnotation: "1",
 					},
@@ -93,9 +89,6 @@ func TestCheckReadiness(t *testing.T) {
 			},
 			build: buildapi.Build{
 				ObjectMeta: metav1.ObjectMeta{
-					Labels: map[string]string{
-						buildapi.BuildConfigLabel: "",
-					},
 					Annotations: map[string]string{
 						buildapi.BuildNumberAnnotation: "1",
 					},
@@ -148,21 +141,21 @@ func TestCheckReadiness(t *testing.T) {
 
 		// DeploymentConfig
 		{
-			groupKind: appsapi.Kind("DeploymentConfig"),
-			object:    &appsapi.DeploymentConfig{},
+			groupKind: deployapi.Kind("DeploymentConfig"),
+			object:    &deployapi.DeploymentConfig{},
 		},
 		{
-			groupKind: appsapi.Kind("DeploymentConfig"),
-			object: &appsapi.DeploymentConfig{
-				Status: appsapi.DeploymentConfigStatus{
-					Conditions: []appsapi.DeploymentCondition{
+			groupKind: deployapi.Kind("DeploymentConfig"),
+			object: &deployapi.DeploymentConfig{
+				Status: deployapi.DeploymentConfigStatus{
+					Conditions: []deployapi.DeploymentCondition{
 						{
-							Type:   appsapi.DeploymentProgressing,
+							Type:   deployapi.DeploymentProgressing,
 							Status: kapi.ConditionTrue,
-							Reason: appsapi.NewRcAvailableReason,
+							Reason: deployapi.NewRcAvailableReason,
 						},
 						{
-							Type:   appsapi.DeploymentAvailable,
+							Type:   deployapi.DeploymentAvailable,
 							Status: kapi.ConditionTrue,
 						},
 					},
@@ -171,12 +164,12 @@ func TestCheckReadiness(t *testing.T) {
 			expectedReady: true,
 		},
 		{
-			groupKind: appsapi.Kind("DeploymentConfig"),
-			object: &appsapi.DeploymentConfig{
-				Status: appsapi.DeploymentConfigStatus{
-					Conditions: []appsapi.DeploymentCondition{
+			groupKind: deployapi.Kind("DeploymentConfig"),
+			object: &deployapi.DeploymentConfig{
+				Status: deployapi.DeploymentConfigStatus{
+					Conditions: []deployapi.DeploymentCondition{
 						{
-							Type:   appsapi.DeploymentProgressing,
+							Type:   deployapi.DeploymentProgressing,
 							Status: kapi.ConditionFalse,
 						},
 					},
@@ -194,7 +187,7 @@ func TestCheckReadiness(t *testing.T) {
 			groupKind: batch.Kind("Job"),
 			object: &batch.Job{
 				Status: batch.JobStatus{
-					CompletionTime: &metav1.Time{Time: time.Unix(0, 0)},
+					CompletionTime: &metav1.Time{Time: time.Now()},
 				},
 			},
 			expectedReady: true,
@@ -231,55 +224,19 @@ func TestCheckReadiness(t *testing.T) {
 			},
 			expectedReady: true,
 		},
-		{
-			groupKind: routeapi.Kind("Route"),
-			object: &routeapi.Route{
-				Spec: routeapi.RouteSpec{
-					Host: "",
-				},
-			},
-			expectedReady: false,
-		},
-		{
-			groupKind: routeapi.Kind("Route"),
-			object: &routeapi.Route{
-				Spec: routeapi.RouteSpec{
-					Host: "app.example.com",
-				},
-			},
-			expectedReady: true,
-		},
-		{
-			groupKind: schema.GroupKind{Group: "", Kind: "Route"},
-			object: &routeapi.Route{
-				Spec: routeapi.RouteSpec{
-					Host: "",
-				},
-			},
-			expectedReady: false,
-		},
-		{
-			groupKind: schema.GroupKind{Group: "", Kind: "Route"},
-			object: &routeapi.Route{
-				Spec: routeapi.RouteSpec{
-					Host: "app.example.com",
-				},
-			},
-			expectedReady: true,
-		},
 	}
 
 	for i, test := range tests {
-		buildClient := fakebuild.NewSimpleClientset(&test.build)
+		cli := testclient.NewSimpleFake(&buildapi.BuildList{Items: []buildapi.Build{test.build}})
 		ref := kapi.ObjectReference{
 			Kind:       test.groupKind.Kind,
 			APIVersion: test.groupKind.WithVersion("v1").GroupVersion().String(),
 		}
-		if can := CanCheckReadiness(ref); !can {
+		if can := canCheckReadiness(ref); !can {
 			t.Errorf("%d: unexpected canCheckReadiness value %v", i, can)
 			continue
 		}
-		ready, failed, err := CheckReadiness(buildClient, ref, test.object)
+		ready, failed, err := checkReadiness(cli, ref, test.object)
 		if err != nil {
 			t.Errorf("%d: unexpected err value %v", i, err)
 			continue

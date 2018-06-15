@@ -6,16 +6,16 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	kapi "k8s.io/kubernetes/pkg/apis/core"
+	kapi "k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/kubectl/cmd/templates"
 	cmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
 
-	appsapi "github.com/openshift/origin/pkg/apps/apis/apps"
-	appsclientinternal "github.com/openshift/origin/pkg/apps/generated/internalclientset"
-	appsinternalversion "github.com/openshift/origin/pkg/apps/generated/internalclientset/typed/apps/internalversion"
-	"github.com/openshift/origin/pkg/oc/cli/util/clientcmd"
+	"github.com/openshift/origin/pkg/client"
+	"github.com/openshift/origin/pkg/cmd/util/clientcmd"
+	deployapi "github.com/openshift/origin/pkg/deploy/apis/apps"
 )
 
 var DeploymentConfigRecommendedName = "deploymentconfig"
@@ -32,11 +32,12 @@ var (
 )
 
 type CreateDeploymentConfigOptions struct {
-	DC     *appsapi.DeploymentConfig
-	Client appsinternalversion.DeploymentConfigsGetter
+	DC     *deployapi.DeploymentConfig
+	Client client.DeploymentConfigsNamespacer
 
 	DryRun bool
 
+	Mapper       meta.RESTMapper
 	OutputFormat string
 	Out          io.Writer
 	Printer      ObjectPrinter
@@ -79,9 +80,9 @@ func (o *CreateDeploymentConfigOptions) Complete(cmd *cobra.Command, f *clientcm
 	labels := map[string]string{"deployment-config.name": args[0]}
 
 	o.DryRun = cmdutil.GetFlagBool(cmd, "dry-run")
-	o.DC = &appsapi.DeploymentConfig{
+	o.DC = &deployapi.DeploymentConfig{
 		ObjectMeta: metav1.ObjectMeta{Name: args[0]},
-		Spec: appsapi.DeploymentConfigSpec{
+		Spec: deployapi.DeploymentConfigSpec{
 			Selector: labels,
 			Replicas: 1,
 			Template: &kapi.PodTemplateSpec{
@@ -105,20 +106,16 @@ func (o *CreateDeploymentConfigOptions) Complete(cmd *cobra.Command, f *clientcm
 		return err
 	}
 
-	clientConfig, err := f.ClientConfig()
+	o.Client, _, err = f.Clients()
 	if err != nil {
 		return err
 	}
-	appsClient, err := appsclientinternal.NewForConfig(clientConfig)
-	if err != nil {
-		return err
-	}
-	o.Client = appsClient.Apps()
 
+	o.Mapper, _ = f.Object()
 	o.OutputFormat = cmdutil.GetFlagString(cmd, "output")
 
 	o.Printer = func(obj runtime.Object, out io.Writer) error {
-		return cmdutil.PrintObject(cmd, obj, out)
+		return f.PrintObject(cmd, false, o.Mapper, obj, out)
 	}
 
 	return nil
@@ -130,6 +127,9 @@ func (o *CreateDeploymentConfigOptions) Validate() error {
 	}
 	if o.Client == nil {
 		return fmt.Errorf("Client is required")
+	}
+	if o.Mapper == nil {
+		return fmt.Errorf("Mapper is required")
 	}
 	if o.Out == nil {
 		return fmt.Errorf("Out is required")
@@ -154,7 +154,7 @@ func (o *CreateDeploymentConfigOptions) Run() error {
 	}
 
 	if useShortOutput := o.OutputFormat == "name"; useShortOutput || len(o.OutputFormat) == 0 {
-		cmdutil.PrintSuccess(useShortOutput, o.Out, actualObj, o.DryRun, "created")
+		cmdutil.PrintSuccess(o.Mapper, useShortOutput, o.Out, "deploymentconfig", actualObj.Name, o.DryRun, "created")
 		return nil
 	}
 
