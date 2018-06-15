@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"time"
@@ -17,22 +18,21 @@ import (
 	restclient "k8s.io/client-go/rest"
 	kclientcmd "k8s.io/client-go/tools/clientcmd"
 	kclientcmdapi "k8s.io/client-go/tools/clientcmd/api"
-	kterm "k8s.io/kubernetes/pkg/kubectl/util/term"
+	kterm "k8s.io/kubernetes/pkg/util/term"
 
-	"github.com/openshift/origin/pkg/client/config"
+	"github.com/openshift/origin/pkg/client"
 	cmdutil "github.com/openshift/origin/pkg/cmd/util"
+	"github.com/openshift/origin/pkg/cmd/util/clientcmd"
 	"github.com/openshift/origin/pkg/cmd/util/term"
+	"github.com/openshift/origin/pkg/cmd/util/tokencmd"
 	"github.com/openshift/origin/pkg/oc/cli/cmd/errors"
 	loginutil "github.com/openshift/origin/pkg/oc/cli/cmd/login/util"
-	cliconfig "github.com/openshift/origin/pkg/oc/cli/config"
-	"github.com/openshift/origin/pkg/oc/util/tokencmd"
-	projectclient "github.com/openshift/origin/pkg/project/generated/internalclientset"
+	"github.com/openshift/origin/pkg/oc/cli/config"
+	cmderr "github.com/openshift/origin/pkg/oc/errors"
 	userapi "github.com/openshift/origin/pkg/user/apis/user"
 )
 
 const defaultClusterURL = "https://localhost:8443"
-
-const projectsItemsSuppressThreshold = 50
 
 // LoginOptions is a helper for the login and setup process, gathers all information required for a
 // successful login and eventual update of config files.
@@ -56,7 +56,6 @@ type LoginOptions struct {
 	Config             *restclient.Config
 	Reader             io.Reader
 	Out                io.Writer
-	ErrOut             io.Writer
 
 	// cert data to be used when authenticating
 	CertFile string
@@ -138,12 +137,12 @@ func (o *LoginOptions) getClientConfig() (*restclient.Config, error) {
 				clientConfig.CAFile = ""
 				clientConfig.CAData = nil
 			} else {
-				return nil, getPrettyErrorForServer(err, o.Server)
+				return nil, clientcmd.GetPrettyErrorForServer(err, o.Server)
 			}
 		// TLS record header errors, like oversized record which usually means
 		// the server only supports "http"
 		case tls.RecordHeaderError:
-			return nil, getPrettyErrorForServer(err, o.Server)
+			return nil, clientcmd.GetPrettyErrorForServer(err, o.Server)
 		default:
 			if _, ok := err.(*net.OpError); ok {
 				return nil, fmt.Errorf("%v - verify you have provided the correct host and port and that the server is currently running.", err)
@@ -226,6 +225,13 @@ func (o *LoginOptions) gatherAuthInfo() error {
 	clientConfig.KeyFile = o.KeyFile
 	token, err := tokencmd.RequestToken(o.Config, o.Reader, o.Username, o.Password)
 	if err != nil {
+		// if internal error occurs, suggest making sure
+		// client is connecting to the right host:port
+		if statusErr, ok := err.(*kerrors.StatusError); ok {
+			if statusErr.Status().Code == http.StatusInternalServerError {
+				return fmt.Errorf("error: The server was unable to respond - verify you have provided the correct host and port and that the server is currently running.")
+			}
+		}
 		return err
 	}
 	clientConfig.BearerToken = token
@@ -255,12 +261,12 @@ func (o *LoginOptions) gatherProjectInfo() error {
 		return fmt.Errorf("current user, %v, does not match expected user %v", me.Name, o.Username)
 	}
 
-	projectClient, err := projectclient.NewForConfig(o.Config)
+	oClient, err := client.New(o.Config)
 	if err != nil {
 		return err
 	}
 
-	projectsList, err := projectClient.Project().Projects().List(metav1.ListOptions{})
+	projectsList, err := oClient.Projects().List(metav1.ListOptions{})
 	// if we're running on kube (or likely kube), just set it to "default"
 	if kerrors.IsNotFound(err) || kerrors.IsForbidden(err) {
 		fmt.Fprintf(o.Out, "Using \"default\".  You can switch projects with:\n\n '%s project <projectname>'\n", o.CommandName)
@@ -279,7 +285,7 @@ func (o *LoginOptions) gatherProjectInfo() error {
 
 	if len(o.DefaultNamespace) > 0 && !projects.Has(o.DefaultNamespace) {
 		// Attempt a direct get of our current project in case it hasn't appeared in the list yet
-		if currentProject, err := projectClient.Project().Projects().Get(o.DefaultNamespace, metav1.GetOptions{}); err == nil {
+		if currentProject, err := oClient.Projects().Get(o.DefaultNamespace, metav1.GetOptions{}); err == nil {
 			// If we get it successfully, add it to the list
 			projectsItems = append(projectsItems, *currentProject)
 			projects.Insert(currentProject.Name)
@@ -311,26 +317,21 @@ func (o *LoginOptions) gatherProjectInfo() error {
 			}
 		}
 
-		current, err := projectClient.Project().Projects().Get(namespace, metav1.GetOptions{})
-		if err != nil && !kerrors.IsNotFound(err) && !kerrors.IsForbidden(err) {
+		current, err := oClient.Projects().Get(namespace, metav1.GetOptions{})
+		if err != nil && !kerrors.IsNotFound(err) && !clientcmd.IsForbidden(err) {
 			return err
 		}
 		o.Project = current.Name
 
-		// Suppress project listing if the number of projects available to the user is greater than the threshold. Prevents unnecessarily noisy logins on clusters with large numbers of projects
-		if len(projectsItems) > projectsItemsSuppressThreshold {
-			fmt.Fprintf(o.Out, "You have access to %d projects, the list has been suppressed. You can list all projects with '%s projects'\n\n", len(projectsItems), o.CommandName)
-		} else {
-			fmt.Fprintf(o.Out, "You have access to the following projects and can switch between them with '%s project <projectname>':\n\n", o.CommandName)
-			for _, p := range projects.List() {
-				if o.Project == p {
-					fmt.Fprintf(o.Out, "  * %s\n", p)
-				} else {
-					fmt.Fprintf(o.Out, "    %s\n", p)
-				}
+		fmt.Fprintf(o.Out, "You have access to the following projects and can switch between them with '%s project <projectname>':\n\n", o.CommandName)
+		for _, p := range projects.List() {
+			if o.Project == p {
+				fmt.Fprintf(o.Out, "  * %s\n", p)
+			} else {
+				fmt.Fprintf(o.Out, "    %s\n", p)
 			}
-			fmt.Fprintln(o.Out)
 		}
+		fmt.Fprintln(o.Out)
 		fmt.Fprintf(o.Out, "Using project %q.\n", o.Project)
 	}
 
@@ -351,7 +352,7 @@ func (o *LoginOptions) SaveConfig() (bool, error) {
 		globalExistedBefore = false
 	}
 
-	newConfig, err := cliconfig.CreateConfig(o.Project, o.Config)
+	newConfig, err := config.CreateConfig(o.Project, o.Config)
 	if err != nil {
 		return false, err
 	}
@@ -364,11 +365,11 @@ func (o *LoginOptions) SaveConfig() (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	if err := cliconfig.RelativizeClientConfigPaths(newConfig, baseDir); err != nil {
+	if err := config.RelativizeClientConfigPaths(newConfig, baseDir); err != nil {
 		return false, err
 	}
 
-	configToWrite, err := cliconfig.MergeConfig(*o.StartingKubeConfig, *newConfig)
+	configToWrite, err := config.MergeConfig(*o.StartingKubeConfig, *newConfig)
 	if err != nil {
 		return false, err
 	}
@@ -379,7 +380,7 @@ func (o *LoginOptions) SaveConfig() (bool, error) {
 		}
 
 		out := &bytes.Buffer{}
-		fmt.Fprintf(out, errors.ErrKubeConfigNotWriteable(o.PathOptions.GetDefaultFilename(), o.PathOptions.IsExplicitFile(), err).Error())
+		cmderr.PrintError(errors.ErrKubeConfigNotWriteable(o.PathOptions.GetDefaultFilename(), o.PathOptions.IsExplicitFile(), err), out)
 		return false, fmt.Errorf("%v", out)
 	}
 

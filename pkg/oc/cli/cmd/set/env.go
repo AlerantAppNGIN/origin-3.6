@@ -15,15 +15,13 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/strategicpatch"
-	"k8s.io/kubernetes/pkg/api/legacyscheme"
-	kapi "k8s.io/kubernetes/pkg/apis/core"
+	kapi "k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/kubectl/cmd/templates"
 	kcmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
 	"k8s.io/kubernetes/pkg/kubectl/resource"
 
 	cmdutil "github.com/openshift/origin/pkg/cmd/util"
-	"github.com/openshift/origin/pkg/oc/cli/util/clientcmd"
-	utilenv "github.com/openshift/origin/pkg/oc/util/env"
+	"github.com/openshift/origin/pkg/cmd/util/clientcmd"
 	envresolve "github.com/openshift/origin/pkg/pod/envresolve"
 )
 
@@ -126,7 +124,7 @@ func NewCmdEnv(fullName string, f *clientcmd.Factory, in io.Reader, out, errout 
 		Run: func(cmd *cobra.Command, args []string) {
 			kcmdutil.CheckErr(options.Complete(f, cmd, args))
 			err := options.RunEnv(f)
-			if err == kcmdutil.ErrExit {
+			if err == cmdutil.ErrExit {
 				os.Exit(1)
 			}
 			kcmdutil.CheckErr(err)
@@ -169,12 +167,12 @@ func keyToEnvName(key string) string {
 }
 
 func (o *EnvOptions) Complete(f *clientcmd.Factory, cmd *cobra.Command, args []string) error {
-	resources, envArgs, ok := utilenv.SplitEnvironmentFromResources(args)
+	resources, envArgs, ok := cmdutil.SplitEnvironmentFromResources(args)
 	if !ok {
-		return kcmdutil.UsageErrorf(cmd, "all resources must be specified before environment changes: %s", strings.Join(args, " "))
+		return kcmdutil.UsageError(o.Cmd, "all resources must be specified before environment changes: %s", strings.Join(args, " "))
 	}
 	if len(o.Filenames) == 0 && len(resources) < 1 {
-		return kcmdutil.UsageErrorf(cmd, "one or more resources must be specified as <resource> <name> or <resource>/<name>")
+		return kcmdutil.UsageError(cmd, "one or more resources must be specified as <resource> <name> or <resource>/<name>")
 	}
 
 	o.ContainerSelector = kcmdutil.GetFlagString(cmd, "containers")
@@ -195,7 +193,7 @@ func (o *EnvOptions) Complete(f *clientcmd.Factory, cmd *cobra.Command, args []s
 	o.ShortOutput = kcmdutil.GetFlagString(cmd, "output") == "name"
 
 	if o.List && len(o.Output) > 0 {
-		return kcmdutil.UsageErrorf(o.Cmd, "--list and --output may not be specified together")
+		return kcmdutil.UsageError(o.Cmd, "--list and --output may not be specified together")
 	}
 
 	return nil
@@ -221,15 +219,13 @@ func (o *EnvOptions) RunEnv(f *clientcmd.Factory) error {
 
 	cmdutil.WarnAboutCommaSeparation(o.Err, o.EnvParams, "--env")
 
-	env, remove, err := utilenv.ParseEnv(append(o.EnvParams, o.EnvArgs...), o.In)
+	env, remove, err := cmdutil.ParseEnv(append(o.EnvParams, o.EnvArgs...), o.In)
 	if err != nil {
 		return err
 	}
 
 	if len(o.From) != 0 {
-		b := f.NewBuilder().
-			Internal().
-			LocalParam(o.Local).
+		b := f.NewBuilder(!o.Local).
 			ContinueOnError().
 			NamespaceParam(cmdNamespace).DefaultNamespace().
 			FilenameParam(explicit, &resource.FilenameOptions{Recursive: false, Filenames: o.Filenames}).
@@ -237,7 +233,7 @@ func (o *EnvOptions) RunEnv(f *clientcmd.Factory) error {
 
 		if !o.Local {
 			b = b.
-				LabelSelectorParam(o.Selector).
+				SelectorParam(o.Selector).
 				ResourceTypeOrNameArgs(o.All, o.From)
 		}
 
@@ -291,9 +287,7 @@ func (o *EnvOptions) RunEnv(f *clientcmd.Factory) error {
 		}
 	}
 
-	b := f.NewBuilder().
-		Internal().
-		LocalParam(o.Local).
+	b := f.NewBuilder(!o.Local).
 		ContinueOnError().
 		NamespaceParam(cmdNamespace).DefaultNamespace().
 		FilenameParam(explicit, &resource.FilenameOptions{Recursive: false, Filenames: o.Filenames}).
@@ -301,7 +295,7 @@ func (o *EnvOptions) RunEnv(f *clientcmd.Factory) error {
 
 	if !o.Local {
 		b = b.
-			LabelSelectorParam(o.Selector).
+			SelectorParam(o.Selector).
 			ResourceTypeOrNameArgs(o.All, o.Resources...)
 	}
 
@@ -313,12 +307,12 @@ func (o *EnvOptions) RunEnv(f *clientcmd.Factory) error {
 
 	// only apply resource version locking on a single resource
 	if !one && len(o.ResourceVersion) > 0 {
-		return kcmdutil.UsageErrorf(o.Cmd, "--resource-version may only be used with a single resource")
+		return kcmdutil.UsageError(o.Cmd, "--resource-version may only be used with a single resource")
 	}
 	// Keep a copy of the original objects prior to updating their environment.
 	// Used in constructing the patch(es) that will be applied in the server.
 	gv := *clientConfig.GroupVersion
-	oldObjects, err := clientcmd.AsVersionedObjects(infos, gv, legacyscheme.Codecs.LegacyCodec(gv))
+	oldObjects, err := resource.AsVersionedObjects(infos, gv, kapi.Codecs.LegacyCodec(gv))
 	if err != nil {
 		return err
 	}
@@ -337,7 +331,7 @@ func (o *EnvOptions) RunEnv(f *clientcmd.Factory) error {
 	skipped := 0
 	errored := []*resource.Info{}
 	for _, info := range infos {
-		ok, err := f.UpdatePodSpecForObject(info.Object, clientcmd.ConvertInteralPodSpecToExternal(func(spec *kapi.PodSpec) error {
+		ok, err := f.UpdatePodSpecForObject(info.Object, func(spec *kapi.PodSpec) error {
 			resolutionErrorsEncountered := false
 			containers, _ := selectContainers(spec.Containers, o.ContainerSelector)
 			if len(containers) == 0 {
@@ -403,7 +397,7 @@ func (o *EnvOptions) RunEnv(f *clientcmd.Factory) error {
 				return errors.New("failed to retrieve valueFrom references")
 			}
 			return nil
-		}))
+		})
 		if !ok {
 			// This is a fallback function for objects that don't have pod spec.
 			ok, err = f.UpdateObjectEnvironment(info.Object, func(vars *[]kapi.EnvVar) error {
@@ -439,7 +433,7 @@ func (o *EnvOptions) RunEnv(f *clientcmd.Factory) error {
 		return fmt.Errorf("%s/%s is not a pod or does not have a pod template", infos[0].Mapping.Resource, infos[0].Name)
 	}
 	if len(errored) == len(infos) {
-		return kcmdutil.ErrExit
+		return cmdutil.ErrExit
 	}
 
 	if o.List {
@@ -450,7 +444,7 @@ func (o *EnvOptions) RunEnv(f *clientcmd.Factory) error {
 		return f.PrintResourceInfos(o.Cmd, o.Local, infos, o.Out)
 	}
 
-	objects, err := clientcmd.AsVersionedObjects(infos, gv, legacyscheme.Codecs.LegacyCodec(gv))
+	objects, err := resource.AsVersionedObjects(infos, gv, kapi.Codecs.LegacyCodec(gv))
 	if err != nil {
 		return err
 	}
@@ -484,14 +478,15 @@ updates:
 
 		// make sure arguments to set or replace environment variables are set
 		// before returning a successful message
-		if len(env) == 0 && len(o.EnvArgs) == 0 && len(remove) == 0 {
+		if len(env) == 0 && len(o.EnvArgs) == 0 {
 			return fmt.Errorf("at least one environment variable must be provided")
 		}
 
-		kcmdutil.PrintSuccess(o.ShortOutput, o.Out, info.Object, false, "updated")
+		mapper, _ := f.Object()
+		kcmdutil.PrintSuccess(mapper, o.ShortOutput, o.Out, info.Mapping.Resource, info.Name, false, "updated")
 	}
 	if failed {
-		return kcmdutil.ErrExit
+		return cmdutil.ErrExit
 	}
 	return nil
 }

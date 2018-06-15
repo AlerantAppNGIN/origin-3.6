@@ -32,9 +32,8 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/apiserver/pkg/admission"
 	"k8s.io/client-go/util/workqueue"
-	api "k8s.io/kubernetes/pkg/apis/core"
+	"k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/quota"
-	"k8s.io/kubernetes/pkg/quota/generic"
 	_ "k8s.io/kubernetes/pkg/util/reflector/prometheus" // for reflector metric registration
 	_ "k8s.io/kubernetes/pkg/util/workqueue/prometheus" // for workqueue metric registration
 	resourcequotaapi "k8s.io/kubernetes/plugin/pkg/admission/resourcequota/apis/resourcequota"
@@ -51,8 +50,6 @@ type quotaEvaluator struct {
 	quotaAccessor QuotaAccessor
 	// lockAcquisitionFunc acquires any required locks and returns a cleanup method to defer
 	lockAcquisitionFunc func([]api.ResourceQuota) func()
-
-	ignoredResources map[schema.GroupResource]struct{}
 
 	// registry that knows how to measure usage for objects
 	registry quota.Registry
@@ -109,18 +106,16 @@ func newAdmissionWaiter(a admission.Attributes) *admissionWaiter {
 // NewQuotaEvaluator configures an admission controller that can enforce quota constraints
 // using the provided registry.  The registry must have the capability to handle group/kinds that
 // are persisted by the server this admission controller is intercepting
-func NewQuotaEvaluator(quotaAccessor QuotaAccessor, ignoredResources map[schema.GroupResource]struct{}, quotaRegistry quota.Registry, lockAcquisitionFunc func([]api.ResourceQuota) func(), config *resourcequotaapi.Configuration, workers int, stopCh <-chan struct{}) Evaluator {
+func NewQuotaEvaluator(quotaAccessor QuotaAccessor, registry quota.Registry, lockAcquisitionFunc func([]api.ResourceQuota) func(), config *resourcequotaapi.Configuration, workers int, stopCh <-chan struct{}) Evaluator {
 	// if we get a nil config, just create an empty default.
 	if config == nil {
 		config = &resourcequotaapi.Configuration{}
 	}
-
 	return &quotaEvaluator{
 		quotaAccessor:       quotaAccessor,
 		lockAcquisitionFunc: lockAcquisitionFunc,
 
-		ignoredResources: ignoredResources,
-		registry:         quotaRegistry,
+		registry: registry,
 
 		queue:      workqueue.NewNamed("admission_quota_controller"),
 		work:       map[string][]*admissionWaiter{},
@@ -325,7 +320,11 @@ func (e *quotaEvaluator) checkQuotas(quotas []api.ResourceQuota, admissionAttrib
 func copyQuotas(in []api.ResourceQuota) ([]api.ResourceQuota, error) {
 	out := make([]api.ResourceQuota, 0, len(in))
 	for _, quota := range in {
-		out = append(out, *quota.DeepCopy())
+		copied, err := api.Scheme.Copy(&quota)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *copied.(*api.ResourceQuota))
 	}
 
 	return out, nil
@@ -370,12 +369,14 @@ func limitedByDefault(usage api.ResourceList, limitedResources []resourcequotaap
 // that capture what the usage would be if the request succeeded.  It return an error if there is insufficient quota to satisfy the request
 func (e *quotaEvaluator) checkRequest(quotas []api.ResourceQuota, a admission.Attributes) ([]api.ResourceQuota, error) {
 	namespace := a.GetNamespace()
-	evaluator := e.registry.Get(a.GetResource().GroupResource())
-	if evaluator == nil {
+	evaluators := e.registry.Evaluators()
+	evaluator, found := evaluators[a.GetKind().GroupKind()]
+	if !found {
 		return quotas, nil
 	}
 
-	if !evaluator.Handles(a) {
+	op := a.GetOperation()
+	if !evaluator.Handles(op) {
 		return quotas, nil
 	}
 
@@ -447,6 +448,7 @@ func (e *quotaEvaluator) checkRequest(quotas []api.ResourceQuota, a admission.At
 			accessor.SetNamespace(namespace)
 		}
 	}
+
 	// there is at least one quota that definitely matches our object
 	// as a result, we need to measure the usage of this object for quota
 	// on updates, we need to subtract the previous measured usage
@@ -461,7 +463,7 @@ func (e *quotaEvaluator) checkRequest(quotas []api.ResourceQuota, a admission.At
 		return nil, admission.NewForbidden(a, fmt.Errorf("quota usage is negative for resource(s): %s", prettyPrintResourceNames(negativeUsage)))
 	}
 
-	if admission.Update == a.GetOperation() {
+	if admission.Update == op {
 		prevItem := a.GetOldObject()
 		if prevItem == nil {
 			return nil, admission.NewForbidden(a, fmt.Errorf("unable to get previous usage since prior version of object was not found"))
@@ -475,10 +477,9 @@ func (e *quotaEvaluator) checkRequest(quotas []api.ResourceQuota, a admission.At
 			if innerErr != nil {
 				return quotas, innerErr
 			}
-			deltaUsage = quota.SubtractWithNonNegativeResult(deltaUsage, prevUsage)
+			deltaUsage = quota.Subtract(deltaUsage, prevUsage)
 		}
 	}
-
 	if quota.IsZero(deltaUsage) {
 		return quotas, nil
 	}
@@ -520,27 +521,19 @@ func (e *quotaEvaluator) Evaluate(a admission.Attributes) error {
 		go e.run()
 	})
 
-	// is this resource ignored?
-	gvr := a.GetResource()
-	gr := gvr.GroupResource()
-	if _, ok := e.ignoredResources[gr]; ok {
+	// if we do not know how to evaluate use for this kind, just ignore
+	evaluators := e.registry.Evaluators()
+	evaluator, found := evaluators[a.GetKind().GroupKind()]
+	if !found {
 		return nil
-	}
-
-	// if we do not know how to evaluate use for this resource, create an evaluator
-	evaluator := e.registry.Get(gr)
-	if evaluator == nil {
-		// create an object count evaluator if no evaluator previously registered
-		// note, we do not need aggregate usage here, so we pass a nil infomer func
-		evaluator = generic.NewObjectCountEvaluator(false, gr, nil, "")
-		e.registry.Add(evaluator)
-		glog.Infof("quota admission added evaluator for: %s", gr)
 	}
 	// for this kind, check if the operation could mutate any quota resources
 	// if no resources tracked by quota are impacted, then just return
-	if !evaluator.Handles(a) {
+	op := a.GetOperation()
+	if !evaluator.Handles(op) {
 		return nil
 	}
+
 	waiter := newAdmissionWaiter(a)
 
 	e.addWork(waiter)

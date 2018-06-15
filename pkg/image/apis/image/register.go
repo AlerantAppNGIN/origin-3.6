@@ -3,7 +3,7 @@ package image
 import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	kapi "k8s.io/kubernetes/pkg/apis/core"
+	kapi "k8s.io/kubernetes/pkg/api"
 )
 
 const (
@@ -38,6 +38,18 @@ func Resource(resource string) schema.GroupResource {
 
 func LegacyResource(resource string) schema.GroupResource {
 	return LegacySchemeGroupVersion.WithResource(resource).GroupResource()
+}
+
+// IsKindOrLegacy checks if the provided GroupKind matches with the given kind by looking
+// up the API group and also the legacy API.
+func IsKindOrLegacy(kind string, gk schema.GroupKind) bool {
+	return gk == Kind(kind) || gk == LegacyKind(kind)
+}
+
+// IsResourceOrLegacy checks if the provided GroupResources matches with the given
+// resource by looking up the API group and also the legacy API.
+func IsResourceOrLegacy(resource string, gr schema.GroupResource) bool {
+	return gr == Resource(resource) || gr == LegacyResource(resource)
 }
 
 // Adds the list of known types to api.Scheme.

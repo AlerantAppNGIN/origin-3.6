@@ -19,7 +19,7 @@ function find_tests() {
     local full_test_list=()
     local selected_tests=()
 
-    full_test_list=( $(find "${OS_ROOT}/test/cmd" -name '*.sh') )
+    full_test_list=( $(find "${OS_ROOT}/test/cmd" -name '*.sh' -not -wholename '*images_tests.sh') )
     for test in "${full_test_list[@]}"; do
         if grep -q -E "${test_regex}" <<< "${test}"; then
             selected_tests+=( "${test}" )
@@ -44,7 +44,11 @@ export NETWORK_PLUGIN='redhat/openshift-ovs-multitenant'
 
 os::cleanup::tmpdir
 os::util::environment::setup_all_server_vars
-os::util::ensure_tmpfs "${ETCD_DATA_DIR}"
+
+# Allow setting $JUNIT_REPORT to toggle output behavior
+if [[ -n "${JUNIT_REPORT:-}" ]]; then
+  export JUNIT_REPORT_OUTPUT="${LOG_DIR}/raw_test_output.log"
+fi
 
 echo "Logging to ${LOG_DIR}..."
 
@@ -68,13 +72,16 @@ fi
 
 # profile the web
 export OPENSHIFT_PROFILE="${WEB_PROFILE-}"
-export ALLOWED_REGISTRIES='[{"domainName":"172.30.30.30:5000"},{"domainName":"myregistry.com"},{"domainName":"registry.centos.org"},{"domainName":"docker.io"},{"domainName":"gcr.io"},{"domainName":"quay.io"},{"domainName":"*.redhat.com"},{"domainName":"*.docker.io"},{"domainName":"registry.redhat.io"}]'
 
 os::start::configure_server
 
 os::test::junit::declare_suite_start "cmd/version"
 os::cmd::expect_success_and_not_text "KUBECONFIG='${MASTER_CONFIG_DIR}/admin.kubeconfig' oc version" "did you specify the right host or port"
 os::cmd::expect_success_and_not_text "KUBECONFIG='' oc version" "Missing or incomplete configuration info"
+os::test::junit::declare_suite_end
+
+os::test::junit::declare_suite_start "cmd/config"
+os::cmd::expect_success_and_text "cat ${MASTER_CONFIG_DIR}/master-config.yaml" 'disabledFeatures: null'
 os::test::junit::declare_suite_end
 
 os::start::master
@@ -106,7 +113,7 @@ for test in "${tests[@]}"; do
   os::cmd::expect_success "oc project ${CLUSTER_ADMIN_CONTEXT}"
   os::cmd::expect_success "oc new-project '${namespace}'"
   # wait for the project cache to catch up and correctly list us in the new project
-  os::cmd::try_until_text "oc get projects -o name" "project.project.openshift.io/${namespace}"
+  os::cmd::try_until_text "oc get projects -o name" "projects/${namespace}"
   os::test::junit::declare_suite_end
 
   if ! ${test}; then

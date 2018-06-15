@@ -64,7 +64,7 @@ function generate_script_config() {
     if [[ "${port}" == "0" ]]; then
       echo "   script \"true\""
     else
-      echo "   script \"/bin/bash -c '</dev/tcp/${serviceip}/${port}'\""
+      echo "   script \"</dev/tcp/${serviceip}/${port}\""
     fi
   fi
 
@@ -154,11 +154,12 @@ function generate_mucast_options() {
 #
 function generate_vip_section() {
   local interface ; interface=${2:-"$(get_network_device)"}
+
   echo ""
   echo "   virtual_ipaddress {"
 
-  for ip in ${1}; do
-    echo "    ${ip} dev ${interface}"
+  for ip in $(expand_ip_ranges "$1"); do
+    echo "      ${ip} dev ${interface}"
   done
 
   echo "   }"
@@ -224,7 +225,6 @@ vrrp_instance ${instance_name} {
 #
 function generate_failover_config() {
   local vips ; vips=$(expand_ip_ranges "${HA_VIPS}")
-  local vip_groups ; vip_groups="${HA_VIP_GROUPS}"
   local interface ; interface=$(get_network_device "${NETWORK_INTERFACE}")
   local ipaddr ; ipaddr=$(get_device_ip_address "${interface}")
   local port="${HA_MONITOR_PORT//[^0-9]/}"
@@ -250,27 +250,8 @@ $(generate_script_config "${ipaddr}" "${port}")
 
   local counter=1
   local previous="none"
-  local vip_counter=0
-  local total_vips=( $vips )
-  local vips_per_group=1
-  local vips_mod=0
 
-  if [[ $vip_groups -gt 0 ]]; then
-    vips_per_group=$((${#total_vips[@]} / vip_groups))
-    vips_mod=$((${#total_vips[@]} % vip_groups))
-  fi
-
-  while [[ "${vip_counter}" -lt "${#total_vips[@]}" ]]; do
-    local cur_vip_count=vips_per_group
-
-    if [[ ${vips_mod} -gt 0 ]]; then
-      ((cur_vip_count++))
-      ((vips_mod--))
-    fi
-
-    vip_group=("${total_vips[@]:vip_counter:cur_vip_count}")
-    vip_counter=$((vip_counter + cur_vip_count))
-
+  for vip in ${vips}; do
     local offset=$((RANDOM % 32))
     local priority=$((ipslot % 64 + offset))
     local instancetype="slave"
@@ -288,10 +269,10 @@ $(generate_script_config "${ipaddr}" "${port}")
       fi
     fi
 
-    generate_vrrpd_instance_config "${HA_CONFIG_NAME}" "${counter}" "${vip_group[*]}" \
-      "${interface}" "${priority}" "${instancetype}"
-    ((counter++))
+    generate_vrrpd_instance_config "${HA_CONFIG_NAME}" "${counter}" "${vip}"  \
+        "${interface}" "${priority}" "${instancetype}"
 
+    counter=$((counter + 1))
   done
 }
 

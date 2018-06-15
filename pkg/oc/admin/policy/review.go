@@ -12,20 +12,18 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/apiserver/pkg/authentication/serviceaccount"
-	"k8s.io/kubernetes/pkg/api/legacyscheme"
+	kapi "k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/apis/apps"
-	kapi "k8s.io/kubernetes/pkg/apis/core"
 	"k8s.io/kubernetes/pkg/kubectl/cmd/templates"
 	kcmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
 	"k8s.io/kubernetes/pkg/kubectl/resource"
 	kprinters "k8s.io/kubernetes/pkg/printers"
 
-	securityapiv1 "github.com/openshift/api/security/v1"
 	ometa "github.com/openshift/origin/pkg/api/meta"
-	"github.com/openshift/origin/pkg/oc/cli/util/clientcmd"
+	"github.com/openshift/origin/pkg/client"
+	"github.com/openshift/origin/pkg/cmd/util/clientcmd"
 	securityapi "github.com/openshift/origin/pkg/security/apis/security"
-	securityclientinternal "github.com/openshift/origin/pkg/security/generated/internalclientset"
-	securitytypedclient "github.com/openshift/origin/pkg/security/generated/internalclientset/typed/security/internalversion"
+	securityapiv1 "github.com/openshift/origin/pkg/security/apis/security/v1"
 )
 
 var (
@@ -53,7 +51,7 @@ var (
 const ReviewRecommendedName = "scc-review"
 
 type sccReviewOptions struct {
-	client                   securitytypedclient.PodSecurityPolicyReviewsGetter
+	client                   client.PodSecurityPolicyReviewsNamespacer
 	namespace                string
 	enforceNamespace         bool
 	out                      io.Writer
@@ -86,7 +84,7 @@ func NewCmdSccReview(name, fullName string, f *clientcmd.Factory, out io.Writer)
 
 func (o *sccReviewOptions) Complete(f *clientcmd.Factory, args []string, cmd *cobra.Command, out io.Writer) error {
 	if len(args) == 0 && len(o.FilenameOptions.Filenames) == 0 {
-		return kcmdutil.UsageErrorf(cmd, "one or more resources must be specified")
+		return kcmdutil.UsageError(cmd, cmd.Use)
 	}
 	for _, sa := range o.serviceAccountNames {
 		if strings.HasPrefix(sa, serviceaccount.ServiceAccountUsernamePrefix) {
@@ -104,23 +102,15 @@ func (o *sccReviewOptions) Complete(f *clientcmd.Factory, args []string, cmd *co
 	if err != nil {
 		return err
 	}
-	clientConfig, err := f.ClientConfig()
-	if err != nil {
-		return err
-	}
-	securityClient, err := securityclientinternal.NewForConfig(clientConfig)
+	o.client, _, err = f.Clients()
 	if err != nil {
 		return fmt.Errorf("unable to obtain client: %v", err)
 	}
-	o.client = securityClient.Security()
-	o.builder = f.NewBuilder()
+	o.builder = f.NewBuilder(true)
 	o.RESTClientFactory = f.ClientForMapping
 
-	output := kcmdutil.GetFlagString(cmd, "output")
-	wide := len(output) > 0 && output == "wide"
-
-	if len(output) != 0 && !wide {
-		printer, err := kcmdutil.PrinterForOptions(kcmdutil.ExtractCmdPrintOptions(cmd, false))
+	if len(kcmdutil.GetFlagString(cmd, "output")) != 0 {
+		printer, err := f.PrinterForCommand(cmd, false, nil, kprinters.PrintOptions{})
 		if err != nil {
 			return err
 		}
@@ -134,7 +124,6 @@ func (o *sccReviewOptions) Complete(f *clientcmd.Factory, args []string, cmd *co
 
 func (o *sccReviewOptions) Run(args []string) error {
 	r := o.builder.
-		Internal().
 		NamespaceParam(o.namespace).
 		FilenameParam(o.enforceNamespace, &o.FilenameOptions).
 		ResourceTypeOrNameArgs(true, args...).
@@ -216,7 +205,7 @@ var _ sccReviewPrinter = &sccReviewOutputPrinter{}
 
 func (s *sccReviewOutputPrinter) print(unused *resource.Info, obj runtime.Object, out io.Writer) error {
 	versionedObj := &securityapiv1.PodSecurityPolicyReview{}
-	if err := legacyscheme.Scheme.Convert(obj, versionedObj, nil); err != nil {
+	if err := kapi.Scheme.Convert(obj, versionedObj, nil); err != nil {
 		return err
 	}
 	return s.ResourcePrinter.PrintObj(versionedObj, out)
@@ -248,11 +237,11 @@ func (s *sccReviewHumanReadablePrinter) print(info *resource.Info, obj runtime.O
 	if !ok {
 		return fmt.Errorf("unexpected object %T", obj)
 	}
-	gvks, _, err := legacyscheme.Scheme.ObjectKinds(info.Object)
+	gvk, _, err := kapi.Scheme.ObjectKind(info.Object)
 	if err != nil {
 		return err
 	}
-	kind := gvks[0].Kind
+	kind := gvk.Kind
 	for _, allowedSA := range pspreview.Status.AllowedServiceAccounts {
 		allowedBy := "<none>"
 		if allowedSA.AllowedBy != nil {

@@ -8,19 +8,15 @@ import (
 	"k8s.io/apiserver/pkg/registry/rest"
 	restclient "k8s.io/client-go/rest"
 	rbacinternalversion "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset/typed/rbac/internalversion"
-	"k8s.io/kubernetes/pkg/printers"
-	printerstorage "k8s.io/kubernetes/pkg/printers/storage"
 
+	authclient "github.com/openshift/origin/pkg/auth/client"
 	authorizationapi "github.com/openshift/origin/pkg/authorization/apis/authorization"
 	"github.com/openshift/origin/pkg/authorization/registry/util"
-	authclient "github.com/openshift/origin/pkg/client/impersonatingclient"
-	printersinternal "github.com/openshift/origin/pkg/printers/internalversion"
 	utilregistry "github.com/openshift/origin/pkg/util/registry"
 )
 
 type REST struct {
 	privilegedClient restclient.Interface
-	rest.TableConvertor
 }
 
 var _ rest.Lister = &REST{}
@@ -29,10 +25,7 @@ var _ rest.CreaterUpdater = &REST{}
 var _ rest.GracefulDeleter = &REST{}
 
 func NewREST(client restclient.Interface) utilregistry.NoWatchStorage {
-	return utilregistry.WrapNoWatchStorageError(&REST{
-		privilegedClient: client,
-		TableConvertor:   printerstorage.TableConvertor{TablePrinter: printers.NewTablePrinter().With(printersinternal.AddHandlers)},
-	})
+	return utilregistry.WrapNoWatchStorageError(&REST{privilegedClient: client})
 }
 
 func (s *REST) New() runtime.Object {
@@ -58,7 +51,7 @@ func (s *REST) List(ctx apirequest.Context, options *metainternal.ListOptions) (
 		return nil, err
 	}
 
-	ret := &authorizationapi.ClusterRoleBindingList{ListMeta: bindings.ListMeta}
+	ret := &authorizationapi.ClusterRoleBindingList{}
 	for _, curr := range bindings.Items {
 		role, err := util.ClusterRoleBindingFromRBAC(&curr)
 		if err != nil {
@@ -66,6 +59,7 @@ func (s *REST) List(ctx apirequest.Context, options *metainternal.ListOptions) (
 		}
 		ret.Items = append(ret.Items, *role)
 	}
+	ret.ListMeta.ResourceVersion = bindings.ResourceVersion
 	return ret, nil
 }
 
@@ -100,7 +94,7 @@ func (s *REST) Delete(ctx apirequest.Context, name string, options *metav1.Delet
 	return &metav1.Status{Status: metav1.StatusSuccess}, true, nil
 }
 
-func (s *REST) Create(ctx apirequest.Context, obj runtime.Object, _ rest.ValidateObjectFunc, _ bool) (runtime.Object, error) {
+func (s *REST) Create(ctx apirequest.Context, obj runtime.Object, _ bool) (runtime.Object, error) {
 	client, err := s.getImpersonatingClient(ctx)
 	if err != nil {
 		return nil, err
@@ -123,7 +117,7 @@ func (s *REST) Create(ctx apirequest.Context, obj runtime.Object, _ rest.Validat
 	return binding, nil
 }
 
-func (s *REST) Update(ctx apirequest.Context, name string, objInfo rest.UpdatedObjectInfo, _ rest.ValidateObjectFunc, _ rest.ValidateObjectUpdateFunc) (runtime.Object, bool, error) {
+func (s *REST) Update(ctx apirequest.Context, name string, objInfo rest.UpdatedObjectInfo) (runtime.Object, bool, error) {
 	client, err := s.getImpersonatingClient(ctx)
 	if err != nil {
 		return nil, false, err

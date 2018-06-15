@@ -1,6 +1,8 @@
 reviewers:
   - smarterclayton
   - sdodson
+  - tdawson
+  - kargakis
   - rootfs
   - stevekuznetsov
   - sjenning
@@ -8,4 +10,6 @@ reviewers:
 approvers:
   - smarterclayton
   - sdodson
+  - tdawson
+  - kargakis
   - stevekuznetsov

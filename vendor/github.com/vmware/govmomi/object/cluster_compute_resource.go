@@ -21,7 +21,6 @@ import (
 
 	"github.com/vmware/govmomi/vim25"
 	"github.com/vmware/govmomi/vim25/methods"
-	"github.com/vmware/govmomi/vim25/mo"
 	"github.com/vmware/govmomi/vim25/types"
 )
 
@@ -35,15 +34,19 @@ func NewClusterComputeResource(c *vim25.Client, ref types.ManagedObjectReference
 	}
 }
 
-func (c ClusterComputeResource) Configuration(ctx context.Context) (*types.ClusterConfigInfoEx, error) {
-	var obj mo.ClusterComputeResource
+func (c ClusterComputeResource) ReconfigureCluster(ctx context.Context, spec types.ClusterConfigSpec) (*Task, error) {
+	req := types.ReconfigureCluster_Task{
+		This:   c.Reference(),
+		Spec:   spec,
+		Modify: true,
+	}
 
-	err := c.Properties(ctx, c.Reference(), []string{"configurationEx"}, &obj)
+	res, err := methods.ReconfigureCluster_Task(ctx, c.c, &req)
 	if err != nil {
 		return nil, err
 	}
 
-	return obj.ConfigurationEx.(*types.ClusterConfigInfoEx), nil
+	return NewTask(c.c, res.Returnval), nil
 }
 
 func (c ClusterComputeResource) AddHost(ctx context.Context, spec types.HostConnectSpec, asConnected bool, license *string, resourcePool *types.ManagedObjectReference) (*Task, error) {
@@ -62,6 +65,19 @@ func (c ClusterComputeResource) AddHost(ctx context.Context, spec types.HostConn
 	}
 
 	res, err := methods.AddHost_Task(ctx, c.c, &req)
+	if err != nil {
+		return nil, err
+	}
+
+	return NewTask(c.c, res.Returnval), nil
+}
+
+func (c ClusterComputeResource) Destroy(ctx context.Context) (*Task, error) {
+	req := types.Destroy_Task{
+		This: c.Reference(),
+	}
+
+	res, err := methods.Destroy_Task(ctx, c.c, &req)
 	if err != nil {
 		return nil, err
 	}

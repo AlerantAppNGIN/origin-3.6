@@ -1,17 +1,3 @@
-// Copyright 2016 The CMux Authors. All rights reserved.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
-// implied. See the License for the specific language governing
-// permissions and limitations under the License.
-
 package cmux
 
 import (
@@ -62,14 +48,12 @@ func BenchmarkCMuxConnHTTP1(b *testing.B) {
 	wg.Add(b.N)
 
 	b.ResetTimer()
-	b.RunParallel(func(pb *testing.PB) {
-		for pb.Next() {
-			wg.Add(1)
-			m.serve(&mockConn{
-				r: bytes.NewReader(benchHTTP1Payload),
-			}, donec, &wg)
+	for i := 0; i < b.N; i++ {
+		c := &mockConn{
+			r: bytes.NewReader(benchHTTP1Payload),
 		}
-	})
+		m.serve(c, donec, &wg)
+	}
 }
 
 func BenchmarkCMuxConnHTTP2(b *testing.B) {
@@ -82,14 +66,12 @@ func BenchmarkCMuxConnHTTP2(b *testing.B) {
 	wg.Add(b.N)
 
 	b.ResetTimer()
-	b.RunParallel(func(pb *testing.PB) {
-		for pb.Next() {
-			wg.Add(1)
-			m.serve(&mockConn{
-				r: bytes.NewReader(benchHTTP2Payload),
-			}, donec, &wg)
+	for i := 0; i < b.N; i++ {
+		c := &mockConn{
+			r: bytes.NewReader(benchHTTP2Payload),
 		}
-	})
+		m.serve(c, donec, &wg)
+	}
 }
 
 func BenchmarkCMuxConnHTTP1n2(b *testing.B) {
@@ -102,16 +84,15 @@ func BenchmarkCMuxConnHTTP1n2(b *testing.B) {
 
 	donec := make(chan struct{})
 	var wg sync.WaitGroup
+	wg.Add(b.N)
 
 	b.ResetTimer()
-	b.RunParallel(func(pb *testing.PB) {
-		for pb.Next() {
-			wg.Add(1)
-			m.serve(&mockConn{
-				r: bytes.NewReader(benchHTTP2Payload),
-			}, donec, &wg)
+	for i := 0; i < b.N; i++ {
+		c := &mockConn{
+			r: bytes.NewReader(benchHTTP2Payload),
 		}
-	})
+		m.serve(c, donec, &wg)
+	}
 }
 
 func BenchmarkCMuxConnHTTP2n1(b *testing.B) {
@@ -124,14 +105,13 @@ func BenchmarkCMuxConnHTTP2n1(b *testing.B) {
 
 	donec := make(chan struct{})
 	var wg sync.WaitGroup
+	wg.Add(b.N)
 
 	b.ResetTimer()
-	b.RunParallel(func(pb *testing.PB) {
-		for pb.Next() {
-			wg.Add(1)
-			m.serve(&mockConn{
-				r: bytes.NewReader(benchHTTP1Payload),
-			}, donec, &wg)
+	for i := 0; i < b.N; i++ {
+		c := &mockConn{
+			r: bytes.NewReader(benchHTTP1Payload),
 		}
-	})
+		m.serve(c, donec, &wg)
+	}
 }

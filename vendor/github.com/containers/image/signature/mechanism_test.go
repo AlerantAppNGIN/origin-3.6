@@ -17,18 +17,6 @@ const (
 	testGPGHomeDirectory = "./fixtures"
 )
 
-// Many of the tests use two fixtures: V4 signature packets (*.signature), and V3 signature packets (*.signature-v3)
-
-// fixtureVariants loads V3 and V4 signature fixture variants based on the v4 fixture path, and returns a map which makes it easy to test both.
-func fixtureVariants(t *testing.T, v4Path string) map[string][]byte {
-	v4, err := ioutil.ReadFile(v4Path)
-	require.NoError(t, err)
-	v3Path := v4Path + "-v3"
-	v3, err := ioutil.ReadFile(v3Path)
-	require.NoError(t, err)
-	return map[string][]byte{v4Path: v4, v3Path: v3}
-}
-
 func TestSigningNotSupportedError(t *testing.T) {
 	// A stupid test just to keep code coverage
 	s := "test"
@@ -52,14 +40,13 @@ func TestNewGPGSigningMechanismInDirectory(t *testing.T) {
 
 	// Test that using the default directory (presumably in user’s home)
 	// cannot use TestKeyFingerprint.
-	signatures := fixtureVariants(t, "./fixtures/invalid-blob.signature")
+	signature, err := ioutil.ReadFile("./fixtures/invalid-blob.signature")
+	require.NoError(t, err)
 	mech, err = newGPGSigningMechanismInDirectory("")
 	require.NoError(t, err)
 	defer mech.Close()
-	for version, signature := range signatures {
-		_, _, err := mech.Verify(signature)
-		assert.Error(t, err, version)
-	}
+	_, _, err = mech.Verify(signature)
+	assert.Error(t, err)
 
 	// Similarly, using a newly created empty directory makes TestKeyFingerprint
 	// unavailable
@@ -69,10 +56,8 @@ func TestNewGPGSigningMechanismInDirectory(t *testing.T) {
 	mech, err = newGPGSigningMechanismInDirectory(emptyDir)
 	require.NoError(t, err)
 	defer mech.Close()
-	for version, signature := range signatures {
-		_, _, err := mech.Verify(signature)
-		assert.Error(t, err, version)
-	}
+	_, _, err = mech.Verify(signature)
+	assert.Error(t, err)
 
 	// If pubring.gpg is unreadable in the directory, either initializing
 	// the mechanism fails (with openpgp), or it succeeds (sadly, gpgme) and
@@ -86,20 +71,16 @@ func TestNewGPGSigningMechanismInDirectory(t *testing.T) {
 	mech, err = newGPGSigningMechanismInDirectory(unreadableDir)
 	if err == nil {
 		defer mech.Close()
-		for version, signature := range signatures {
-			_, _, err := mech.Verify(signature)
-			assert.Error(t, err, version)
-		}
+		_, _, err = mech.Verify(signature)
 	}
+	assert.Error(t, err)
 
 	// Setting the directory parameter to testGPGHomeDirectory makes the key available.
 	mech, err = newGPGSigningMechanismInDirectory(testGPGHomeDirectory)
 	require.NoError(t, err)
 	defer mech.Close()
-	for version, signature := range signatures {
-		_, _, err := mech.Verify(signature)
-		assert.NoError(t, err, version)
-	}
+	_, _, err = mech.Verify(signature)
+	assert.NoError(t, err)
 
 	// If we use the default directory mechanism, GNUPGHOME is respected.
 	origGNUPGHOME := os.Getenv("GNUPGHOME")
@@ -108,10 +89,8 @@ func TestNewGPGSigningMechanismInDirectory(t *testing.T) {
 	mech, err = newGPGSigningMechanismInDirectory("")
 	require.NoError(t, err)
 	defer mech.Close()
-	for version, signature := range signatures {
-		_, _, err := mech.Verify(signature)
-		assert.NoError(t, err, version)
-	}
+	_, _, err = mech.Verify(signature)
+	assert.NoError(t, err)
 }
 
 func TestNewEphemeralGPGSigningMechanism(t *testing.T) {
@@ -121,11 +100,10 @@ func TestNewEphemeralGPGSigningMechanism(t *testing.T) {
 	defer mech.Close()
 	assert.Empty(t, keyIdentities)
 	// Try validating a signature when the key is unknown.
-	signatures := fixtureVariants(t, "./fixtures/invalid-blob.signature")
-	for version, signature := range signatures {
-		_, _, err := mech.Verify(signature)
-		require.Error(t, err, version)
-	}
+	signature, err := ioutil.ReadFile("./fixtures/invalid-blob.signature")
+	require.NoError(t, err)
+	content, signingFingerprint, err := mech.Verify(signature)
+	require.Error(t, err)
 
 	// Successful import
 	keyBlob, err := ioutil.ReadFile("./fixtures/public-key.gpg")
@@ -135,12 +113,10 @@ func TestNewEphemeralGPGSigningMechanism(t *testing.T) {
 	defer mech.Close()
 	assert.Equal(t, []string{TestKeyFingerprint}, keyIdentities)
 	// After import, the signature should validate.
-	for version, signature := range signatures {
-		content, signingFingerprint, err := mech.Verify(signature)
-		require.NoError(t, err, version)
-		assert.Equal(t, []byte("This is not JSON\n"), content, version)
-		assert.Equal(t, TestKeyFingerprint, signingFingerprint, version)
-	}
+	content, signingFingerprint, err = mech.Verify(signature)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("This is not JSON\n"), content)
+	assert.Equal(t, TestKeyFingerprint, signingFingerprint)
 
 	// Two keys: Read the binary-format pubring.gpg, and concatenate it twice.
 	// (Using two copies of public-key.gpg, in the ASCII-armored format, works with
@@ -200,10 +176,10 @@ func TestGPGSigningMechanismSign(t *testing.T) {
 	// The various GPG/GPGME failures cases are not obviously easy to reach.
 }
 
-func assertSigningError(t *testing.T, content []byte, fingerprint string, err error, msgAndArgs ...interface{}) {
-	assert.Error(t, err, msgAndArgs...)
-	assert.Nil(t, content, msgAndArgs...)
-	assert.Empty(t, fingerprint, msgAndArgs...)
+func assertSigningError(t *testing.T, content []byte, fingerprint string, err error) {
+	assert.Error(t, err)
+	assert.Nil(t, content)
+	assert.Empty(t, fingerprint)
 }
 
 func TestGPGSigningMechanismVerify(t *testing.T) {
@@ -212,31 +188,30 @@ func TestGPGSigningMechanismVerify(t *testing.T) {
 	defer mech.Close()
 
 	// Successful verification
-	signatures := fixtureVariants(t, "./fixtures/invalid-blob.signature")
-	for variant, signature := range signatures {
-		content, signingFingerprint, err := mech.Verify(signature)
-		require.NoError(t, err, variant)
-		assert.Equal(t, []byte("This is not JSON\n"), content, variant)
-		assert.Equal(t, TestKeyFingerprint, signingFingerprint, variant)
-	}
+	signature, err := ioutil.ReadFile("./fixtures/invalid-blob.signature")
+	require.NoError(t, err)
+	content, signingFingerprint, err := mech.Verify(signature)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("This is not JSON\n"), content)
+	assert.Equal(t, TestKeyFingerprint, signingFingerprint)
 
 	// For extra paranoia, test that we return nil data on error.
 
 	// Completely invalid signature.
-	content, signingFingerprint, err := mech.Verify([]byte{})
+	content, signingFingerprint, err = mech.Verify([]byte{})
 	assertSigningError(t, content, signingFingerprint, err)
 
 	content, signingFingerprint, err = mech.Verify([]byte("invalid signature"))
 	assertSigningError(t, content, signingFingerprint, err)
 
 	// Literal packet, not a signature
-	signature, err := ioutil.ReadFile("./fixtures/unsigned-literal.signature") // Not fixtureVariants, the “literal data” packet does not have V3/V4 versions.
+	signature, err = ioutil.ReadFile("./fixtures/unsigned-literal.signature")
 	require.NoError(t, err)
 	content, signingFingerprint, err = mech.Verify(signature)
 	assertSigningError(t, content, signingFingerprint, err)
 
 	// Encrypted data, not a signature.
-	signature, err = ioutil.ReadFile("./fixtures/unsigned-encrypted.signature") // Not fixtureVariants, the “public-key encrypted session key” does not have V3/V4 versions.
+	signature, err = ioutil.ReadFile("./fixtures/unsigned-encrypted.signature")
 	require.NoError(t, err)
 	content, signingFingerprint, err = mech.Verify(signature)
 	assertSigningError(t, content, signingFingerprint, err)
@@ -244,24 +219,22 @@ func TestGPGSigningMechanismVerify(t *testing.T) {
 	// FIXME? Is there a way to create a multi-signature so that gpgme_op_verify returns multiple signatures?
 
 	// Expired signature
-	signature, err = ioutil.ReadFile("./fixtures/expired.signature") // Not fixtureVariants, V3 signature packets don’t support expiration.
+	signature, err = ioutil.ReadFile("./fixtures/expired.signature")
 	require.NoError(t, err)
 	content, signingFingerprint, err = mech.Verify(signature)
 	assertSigningError(t, content, signingFingerprint, err)
 
 	// Corrupt signature
-	signatures = fixtureVariants(t, "./fixtures/corrupt.signature")
-	for version, signature := range signatures {
-		content, signingFingerprint, err := mech.Verify(signature)
-		assertSigningError(t, content, signingFingerprint, err, version)
-	}
+	signature, err = ioutil.ReadFile("./fixtures/corrupt.signature")
+	require.NoError(t, err)
+	content, signingFingerprint, err = mech.Verify(signature)
+	assertSigningError(t, content, signingFingerprint, err)
 
 	// Valid signature with an unknown key
-	signatures = fixtureVariants(t, "./fixtures/unknown-key.signature")
-	for version, signature := range signatures {
-		content, signingFingerprint, err := mech.Verify(signature)
-		assertSigningError(t, content, signingFingerprint, err, version)
-	}
+	signature, err = ioutil.ReadFile("./fixtures/unknown-key.signature")
+	require.NoError(t, err)
+	content, signingFingerprint, err = mech.Verify(signature)
+	assertSigningError(t, content, signingFingerprint, err)
 
 	// The various GPG/GPGME failures cases are not obviously easy to reach.
 }
@@ -272,13 +245,12 @@ func TestGPGSigningMechanismUntrustedSignatureContents(t *testing.T) {
 	defer mech.Close()
 
 	// A valid signature
-	signatures := fixtureVariants(t, "./fixtures/invalid-blob.signature")
-	for version, signature := range signatures {
-		content, shortKeyID, err := mech.UntrustedSignatureContents(signature)
-		require.NoError(t, err, version)
-		assert.Equal(t, []byte("This is not JSON\n"), content, version)
-		assert.Equal(t, TestKeyShortID, shortKeyID, version)
-	}
+	signature, err := ioutil.ReadFile("./fixtures/invalid-blob.signature")
+	require.NoError(t, err)
+	content, shortKeyID, err := mech.UntrustedSignatureContents(signature)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("This is not JSON\n"), content)
+	assert.Equal(t, TestKeyShortID, shortKeyID)
 
 	// Completely invalid signature.
 	_, _, err = mech.UntrustedSignatureContents([]byte{})
@@ -288,19 +260,19 @@ func TestGPGSigningMechanismUntrustedSignatureContents(t *testing.T) {
 	assert.Error(t, err)
 
 	// Literal packet, not a signature
-	signature, err := ioutil.ReadFile("./fixtures/unsigned-literal.signature") // Not fixtureVariants, the “literal data” packet does not have V3/V4 versions.
+	signature, err = ioutil.ReadFile("./fixtures/unsigned-literal.signature")
 	require.NoError(t, err)
-	content, shortKeyID, err := mech.UntrustedSignatureContents(signature)
+	content, shortKeyID, err = mech.UntrustedSignatureContents(signature)
 	assert.Error(t, err)
 
 	// Encrypted data, not a signature.
-	signature, err = ioutil.ReadFile("./fixtures/unsigned-encrypted.signature") // Not fixtureVariants, the “public-key encrypted session key” does not have V3/V4 versions.
+	signature, err = ioutil.ReadFile("./fixtures/unsigned-encrypted.signature")
 	require.NoError(t, err)
 	content, shortKeyID, err = mech.UntrustedSignatureContents(signature)
 	assert.Error(t, err)
 
 	// Expired signature
-	signature, err = ioutil.ReadFile("./fixtures/expired.signature") // Not fixtureVariants, V3 signature packets don’t support expiration.
+	signature, err = ioutil.ReadFile("./fixtures/expired.signature")
 	require.NoError(t, err)
 	content, shortKeyID, err = mech.UntrustedSignatureContents(signature)
 	require.NoError(t, err)
@@ -308,20 +280,18 @@ func TestGPGSigningMechanismUntrustedSignatureContents(t *testing.T) {
 	assert.Equal(t, TestKeyShortID, shortKeyID)
 
 	// Corrupt signature
-	signatures = fixtureVariants(t, "./fixtures/corrupt.signature")
-	for version, signature := range signatures {
-		content, shortKeyID, err := mech.UntrustedSignatureContents(signature)
-		require.NoError(t, err, version)
-		assert.Equal(t, []byte(`{"critical":{"identity":{"docker-reference":"testing/manifest"},"image":{"docker-manifest-digest":"sha256:20bf21ed457b390829cdbeec8795a7bea1626991fda603e0d01b4e7f60427e55"},"type":"atomic container signature"},"optional":{"creator":"atomic ","timestamp":1458239713}}`), content, version)
-		assert.Equal(t, TestKeyShortID, shortKeyID, version)
-	}
+	signature, err = ioutil.ReadFile("./fixtures/corrupt.signature")
+	require.NoError(t, err)
+	content, shortKeyID, err = mech.UntrustedSignatureContents(signature)
+	require.NoError(t, err)
+	assert.Equal(t, []byte(`{"critical":{"identity":{"docker-reference":"testing/manifest"},"image":{"docker-manifest-digest":"sha256:20bf21ed457b390829cdbeec8795a7bea1626991fda603e0d01b4e7f60427e55"},"type":"atomic container signature"},"optional":{"creator":"atomic ","timestamp":1458239713}}`), content)
+	assert.Equal(t, TestKeyShortID, shortKeyID)
 
 	// Valid signature with an unknown key
-	signatures = fixtureVariants(t, "./fixtures/unknown-key.signature")
-	for version, signature := range signatures {
-		content, shortKeyID, err := mech.UntrustedSignatureContents(signature)
-		require.NoError(t, err, version)
-		assert.Equal(t, []byte(`{"critical":{"identity":{"docker-reference":"testing/manifest"},"image":{"docker-manifest-digest":"sha256:20bf21ed457b390829cdbeec8795a7bea1626991fda603e0d01b4e7f60427e55"},"type":"atomic container signature"},"optional":{"creator":"atomic 0.1.13-dev","timestamp":1464633474}}`), content, version)
-		assert.Equal(t, "BB75E91990DF8F7E", shortKeyID, version)
-	}
+	signature, err = ioutil.ReadFile("./fixtures/unknown-key.signature")
+	require.NoError(t, err)
+	content, shortKeyID, err = mech.UntrustedSignatureContents(signature)
+	require.NoError(t, err)
+	assert.Equal(t, []byte(`{"critical":{"identity":{"docker-reference":"testing/manifest"},"image":{"docker-manifest-digest":"sha256:20bf21ed457b390829cdbeec8795a7bea1626991fda603e0d01b4e7f60427e55"},"type":"atomic container signature"},"optional":{"creator":"atomic 0.1.13-dev","timestamp":1464633474}}`), content)
+	assert.Equal(t, "E5476D1110D07803", shortKeyID)
 }

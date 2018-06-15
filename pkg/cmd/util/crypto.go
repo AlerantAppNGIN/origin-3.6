@@ -4,10 +4,9 @@ import (
 	"bytes"
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io/ioutil"
-
-	"k8s.io/client-go/util/cert"
 )
 
 func CertPoolFromFile(filename string) (*x509.CertPool, error) {
@@ -21,7 +20,7 @@ func CertPoolFromFile(filename string) (*x509.CertPool, error) {
 		return nil, err
 	}
 
-	certs, err := cert.ParseCertsPEM(pemBlock)
+	certs, err := CertificatesFromPEM(pemBlock)
 	if err != nil {
 		return nil, fmt.Errorf("Error reading %s: %s", filename, err)
 	}
@@ -41,9 +40,37 @@ func CertificatesFromFile(file string) ([]*x509.Certificate, error) {
 	if err != nil {
 		return nil, err
 	}
-	certs, err := cert.ParseCertsPEM(pemBlock)
+	certs, err := CertificatesFromPEM(pemBlock)
 	if err != nil {
 		return nil, fmt.Errorf("Error reading %s: %s", file, err)
+	}
+	return certs, nil
+}
+
+func CertificatesFromPEM(pemCerts []byte) ([]*x509.Certificate, error) {
+	ok := false
+	certs := []*x509.Certificate{}
+	for len(pemCerts) > 0 {
+		var block *pem.Block
+		block, pemCerts = pem.Decode(pemCerts)
+		if block == nil {
+			break
+		}
+		if block.Type != "CERTIFICATE" || len(block.Headers) != 0 {
+			continue
+		}
+
+		cert, err := x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			return certs, err
+		}
+
+		certs = append(certs, cert)
+		ok = true
+	}
+
+	if !ok {
+		return certs, errors.New("Could not read any certificates")
 	}
 	return certs, nil
 }

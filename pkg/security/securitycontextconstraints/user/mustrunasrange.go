@@ -2,21 +2,18 @@ package user
 
 import (
 	"fmt"
-
 	"k8s.io/apimachinery/pkg/util/validation/field"
-	api "k8s.io/kubernetes/pkg/apis/core"
+	"k8s.io/kubernetes/pkg/api"
 
 	securityapi "github.com/openshift/origin/pkg/security/apis/security"
 )
 
-// mustRunAsRange implements the RunAsUserSecurityContextConstraintsStrategy interface
+// mustRunAs implements the RunAsUserSecurityContextConstraintsStrategy interface
 type mustRunAsRange struct {
 	opts *securityapi.RunAsUserStrategyOptions
 }
 
-var _ RunAsUserSecurityContextConstraintsStrategy = &mustRunAsRange{}
-
-// NewMustRunAsRange provides a strategy that requires the container to run as a specific UID in a range.
+// NewMustRunAs provides a strategy that requires the container to run as a specific UID in a range.
 func NewMustRunAsRange(options *securityapi.RunAsUserStrategyOptions) (RunAsUserSecurityContextConstraintsStrategy, error) {
 	if options == nil {
 		return nil, fmt.Errorf("MustRunAsRange requires run as user options")
@@ -38,18 +35,28 @@ func (s *mustRunAsRange) Generate(pod *api.Pod, container *api.Container) (*int6
 }
 
 // Validate ensures that the specified values fall within the range of the strategy.
-func (s *mustRunAsRange) Validate(fldPath *field.Path, _ *api.Pod, _ *api.Container, runAsNonRoot *bool, runAsUser *int64) field.ErrorList {
+func (s *mustRunAsRange) Validate(pod *api.Pod, container *api.Container) field.ErrorList {
 	allErrs := field.ErrorList{}
 
-	if runAsUser == nil {
-		allErrs = append(allErrs, field.Required(fldPath.Child("runAsUser"), ""))
+	securityContextPath := field.NewPath("securityContext")
+	if container.SecurityContext == nil {
+		detail := fmt.Sprintf("unable to validate nil security context for container %s", container.Name)
+		allErrs = append(allErrs, field.Invalid(securityContextPath, container.SecurityContext, detail))
+		return allErrs
+	}
+	if container.SecurityContext.RunAsUser == nil {
+		detail := fmt.Sprintf("unable to validate nil RunAsUser for container %s", container.Name)
+		allErrs = append(allErrs, field.Invalid(securityContextPath.Child("runAsUser"), container.SecurityContext.RunAsUser, detail))
 		return allErrs
 	}
 
-	if *runAsUser < *s.opts.UIDRangeMin || *runAsUser > *s.opts.UIDRangeMax {
-		detail := fmt.Sprintf("must be in the ranges: [%v, %v]", *s.opts.UIDRangeMin, *s.opts.UIDRangeMax)
-		allErrs = append(allErrs, field.Invalid(fldPath.Child("runAsUser"), *runAsUser, detail))
-		return allErrs
+	if *container.SecurityContext.RunAsUser < *s.opts.UIDRangeMin || *container.SecurityContext.RunAsUser > *s.opts.UIDRangeMax {
+		detail := fmt.Sprintf("UID on container %s does not match required range.  Found %d, required min: %d max: %d",
+			container.Name,
+			*container.SecurityContext.RunAsUser,
+			*s.opts.UIDRangeMin,
+			*s.opts.UIDRangeMax)
+		allErrs = append(allErrs, field.Invalid(securityContextPath.Child("runAsUser"), *container.SecurityContext.RunAsUser, detail))
 	}
 
 	return allErrs

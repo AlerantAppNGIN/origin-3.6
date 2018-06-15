@@ -25,10 +25,9 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
-	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/apiserver/pkg/server/healthz"
 	"k8s.io/client-go/tools/cache"
@@ -37,7 +36,7 @@ import (
 	cmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
 	"k8s.io/kubernetes/pkg/kubectl/resource"
 
-	"github.com/openshift/origin/pkg/oc/cli/util/clientcmd"
+	"github.com/openshift/origin/pkg/cmd/util/clientcmd"
 	"github.com/openshift/origin/pkg/util/proc"
 )
 
@@ -149,7 +148,9 @@ var (
 		script could make a call to allocate storage on your infrastructure as a
 		service, or register node names in DNS, or set complex firewalls. The more
 		complex your integration, the more important it is to record enough data in the
-		remote system that you can identify when resources on either side are deleted.`)
+		remote system that you can identify when resources on either side are deleted.
+
+		Experimental: This command is under active development and may change without notice.`)
 
 	observeExample = templates.Examples(`
 		# Observe changes to services
@@ -180,7 +181,7 @@ func NewCmdObserve(fullName string, f *clientcmd.Factory, out, errOut io.Writer)
 			}
 
 			if err := options.Validate(args); err != nil {
-				cmdutil.CheckErr(cmdutil.UsageErrorf(cmd, err.Error()))
+				cmdutil.CheckErr(cmdutil.UsageError(cmd, err.Error()))
 			}
 
 			if err := options.Run(); err != nil {
@@ -211,7 +212,7 @@ func NewCmdObserve(fullName string, f *clientcmd.Factory, out, errOut io.Writer)
 	// control observe program behavior
 	cmd.Flags().BoolVar(&options.once, "once", false, "If true, exit with a status code 0 after all current objects have been processed.")
 	cmd.Flags().DurationVar(&options.exitAfterPeriod, "exit-after", 0, "Exit with status code 0 after the provided duration, optional.")
-	cmd.Flags().DurationVar(&options.resyncPeriod, "resync-period", 0, "When non-zero, periodically reprocess every item from the server as a Sync event. Use to ensure external systems are kept up to date.")
+	cmd.Flags().DurationVar(&options.resyncPeriod, "resync-period", 0, "When non-zero, periodically reprocess every item from the server as a Sync event. Use to ensure external systems are kept up to date. Requires --names")
 	cmd.Flags().BoolVar(&options.printMetricsOnExit, "print-metrics-on-exit", false, "If true, on exit write all metrics to stdout.")
 	cmd.Flags().StringVar(&options.listenAddr, "listen-addr", options.listenAddr, "The name of an interface to listen on to expose metrics and health checking.")
 
@@ -377,7 +378,7 @@ func (o *ObserveOptions) Complete(f *clientcmd.Factory, cmd *cobra.Command, args
 			return outputNames, nil
 		}
 		o.knownObjects = o.argumentStore
-	case len(o.deleteCommand) > 0, o.resyncPeriod > 0:
+	case len(o.deleteCommand) > 0:
 		o.knownObjects = o.argumentStore
 	}
 
@@ -397,7 +398,7 @@ func (o *ObserveOptions) Run() error {
 	}
 
 	// watch the given resource for changes
-	store := cache.NewDeltaFIFO(objectArgumentsKeyFunc, o.knownObjects)
+	store := cache.NewDeltaFIFO(objectArgumentsKeyFunc, nil, o.knownObjects)
 	lw := restListWatcher{Helper: resource.NewHelper(o.client, o.mapping)}
 	if !o.allNamespaces {
 		lw.namespace = o.namespace
@@ -440,23 +441,10 @@ func (o *ObserveOptions) Run() error {
 	}
 
 	defer o.dumpMetrics()
-	stopCh := make(chan struct{})
-	defer close(stopCh)
 
 	// start the reflector
 	reflector := cache.NewNamedReflector("observer", lw, nil, store, o.resyncPeriod)
-	go func() {
-		observedListErrors := 0
-		wait.Until(func() {
-			if err := reflector.ListAndWatch(stopCh); err != nil {
-				utilruntime.HandleError(err)
-				observedListErrors++
-				if o.maximumErrors != -1 && observedListErrors > o.maximumErrors {
-					glog.Fatalf("Maximum list errors of %d reached, exiting", o.maximumErrors)
-				}
-			}
-		}, time.Second, stopCh)
-	}()
+	reflector.Run()
 
 	if o.once {
 		// wait until the reflector reports it has completed the initial list and the
@@ -727,25 +715,7 @@ func measureCommandDuration(m *prometheus.SummaryVec, fn func() error, labels ..
 		statusCode = -1
 	}
 	m.WithLabelValues(append(labels, strconv.Itoa(statusCode))...).Observe(float64(duration / time.Millisecond))
-
-	if errnoError(err) == syscall.ECHILD {
-		// ignore wait4 syscall errno as it means
-		// that the subprocess has started and ended
-		// before the wait call was made.
-		return nil
-	}
-
 	return err
-}
-
-func errnoError(err error) syscall.Errno {
-	if se, ok := err.(*os.SyscallError); ok {
-		if errno, ok := se.Err.(syscall.Errno); ok {
-			return errno
-		}
-	}
-
-	return 0
 }
 
 func exitCodeForCommandError(err error) (int, bool) {
@@ -803,11 +773,19 @@ type restListWatcher struct {
 }
 
 func (lw restListWatcher) List(opt metav1.ListOptions) (runtime.Object, error) {
-	return lw.Helper.List(lw.namespace, "", false, &opt)
+	labelSelector, err := labels.Parse(opt.LabelSelector)
+	if err != nil {
+		return nil, err
+	}
+	return lw.Helper.List(lw.namespace, "", labelSelector, false)
 }
 
 func (lw restListWatcher) Watch(opt metav1.ListOptions) (watch.Interface, error) {
-	return lw.Helper.Watch(lw.namespace, opt.ResourceVersion, &opt)
+	labelSelector, err := labels.Parse(opt.LabelSelector)
+	if err != nil {
+		return nil, err
+	}
+	return lw.Helper.Watch(lw.namespace, opt.ResourceVersion, "", labelSelector)
 }
 
 type JSONPathColumnPrinter struct {

@@ -14,10 +14,8 @@ import (
 	kcmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
 
 	buildapi "github.com/openshift/origin/pkg/build/apis/build"
-	buildmanualclient "github.com/openshift/origin/pkg/build/client/internalversion"
-	buildclientinternal "github.com/openshift/origin/pkg/build/generated/internalclientset"
 	buildutil "github.com/openshift/origin/pkg/build/util"
-	"github.com/openshift/origin/pkg/oc/cli/util/clientcmd"
+	"github.com/openshift/origin/pkg/cmd/util/clientcmd"
 )
 
 var (
@@ -41,8 +39,7 @@ func NewCmdBuildLogs(fullName string, f *clientcmd.Factory, out io.Writer) *cobr
 		Short:      "Show logs from a build",
 		Long:       buildLogsLong,
 		Example:    fmt.Sprintf(buildLogsExample, fullName),
-		Deprecated: fmt.Sprintf("use oc %v build/<build-name>", LogsRecommendedCommandName),
-		Hidden:     true,
+		Deprecated: fmt.Sprintf("use \"oc %v build/<build-name>\" instead.", LogsRecommendedCommandName),
 		Run: func(cmd *cobra.Command, args []string) {
 			err := RunBuildLogs(fullName, f, out, cmd, opts, args)
 
@@ -77,7 +74,7 @@ func RunBuildLogs(fullName string, f *clientcmd.Factory, out io.Writer, cmd *cob
 		if cmdNamespace != "" {
 			namespace = " -n " + cmdNamespace
 		}
-		return kcmdutil.UsageErrorf(cmd, "A build name is required - you can run `%s get builds%s` to list builds", fullName, namespace)
+		return kcmdutil.UsageError(cmd, "A build name is required - you can run `%s get builds%s` to list builds", fullName, namespace)
 	}
 
 	namespace, _, err := f.DefaultNamespace()
@@ -85,16 +82,12 @@ func RunBuildLogs(fullName string, f *clientcmd.Factory, out io.Writer, cmd *cob
 		return err
 	}
 
-	clientConfig, err := f.ClientConfig()
-	if err != nil {
-		return err
-	}
-	buildClient, err := buildclientinternal.NewForConfig(clientConfig)
+	c, _, err := f.Clients()
 	if err != nil {
 		return err
 	}
 
-	readCloser, err := buildmanualclient.NewBuildLogClient(buildClient.Build().RESTClient(), namespace).Logs(args[0], opts).Stream()
+	readCloser, err := c.BuildLogs(namespace).Get(args[0], opts).Stream()
 	if err != nil {
 		return err
 	}

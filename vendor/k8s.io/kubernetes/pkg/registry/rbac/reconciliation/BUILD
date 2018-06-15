@@ -1,5 +1,7 @@
 package(default_visibility = ["//visibility:public"])
 
+licenses(["notice"])
+
 load(
     "@io_bazel_rules_go//go:def.bzl",
     "go_library",
@@ -12,12 +14,12 @@ go_test(
         "reconcile_role_test.go",
         "reconcile_rolebindings_test.go",
     ],
-    embed = [":go_default_library"],
+    library = ":go_default_library",
+    tags = ["automanaged"],
     deps = [
-        "//pkg/apis/core/helper:go_default_library",
+        "//pkg/api/helper:go_default_library",
         "//pkg/apis/rbac:go_default_library",
         "//vendor/k8s.io/apimachinery/pkg/apis/meta/v1:go_default_library",
-        "//vendor/k8s.io/apimachinery/pkg/util/diff:go_default_library",
     ],
 )
 
@@ -30,19 +32,16 @@ go_library(
         "reconcile_rolebindings.go",
         "role_interfaces.go",
         "rolebinding_interfaces.go",
-        "zz_generated.deepcopy.go",
     ],
-    importpath = "k8s.io/kubernetes/pkg/registry/rbac/reconciliation",
+    tags = ["automanaged"],
     deps = [
-        "//pkg/apis/core:go_default_library",
+        "//pkg/api:go_default_library",
         "//pkg/apis/rbac:go_default_library",
         "//pkg/client/clientset_generated/internalclientset/typed/core/internalversion:go_default_library",
         "//pkg/client/clientset_generated/internalclientset/typed/rbac/internalversion:go_default_library",
         "//pkg/registry/rbac/validation:go_default_library",
-        "//vendor/k8s.io/apimachinery/pkg/api/equality:go_default_library",
         "//vendor/k8s.io/apimachinery/pkg/api/errors:go_default_library",
         "//vendor/k8s.io/apimachinery/pkg/apis/meta/v1:go_default_library",
-        "//vendor/k8s.io/apimachinery/pkg/runtime:go_default_library",
         "//vendor/k8s.io/apimachinery/pkg/types:go_default_library",
     ],
 )

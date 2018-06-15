@@ -1,8 +1,32 @@
 package authorization
 
 import (
-	kapi "k8s.io/kubernetes/pkg/apis/core"
+	kapi "k8s.io/kubernetes/pkg/api"
 )
+
+// policies
+
+func ToPolicyList(in *ClusterPolicyList) *PolicyList {
+	ret := &PolicyList{}
+	for _, curr := range in.Items {
+		ret.Items = append(ret.Items, *ToPolicy(&curr))
+	}
+
+	return ret
+}
+
+func ToPolicy(in *ClusterPolicy) *Policy {
+	if in == nil {
+		return nil
+	}
+
+	ret := &Policy{}
+	ret.ObjectMeta = in.ObjectMeta
+	ret.LastModified = in.LastModified
+	ret.Roles = ToRoleMap(in.Roles)
+
+	return ret
+}
 
 func ToRoleMap(in map[string]*ClusterRole) map[string]*Role {
 	ret := map[string]*Role{}
@@ -30,6 +54,28 @@ func ToRole(in *ClusterRole) *Role {
 	ret := &Role{}
 	ret.ObjectMeta = in.ObjectMeta
 	ret.Rules = in.Rules
+
+	return ret
+}
+
+func ToClusterPolicyList(in *PolicyList) *ClusterPolicyList {
+	ret := &ClusterPolicyList{}
+	for _, curr := range in.Items {
+		ret.Items = append(ret.Items, *ToClusterPolicy(&curr))
+	}
+
+	return ret
+}
+
+func ToClusterPolicy(in *Policy) *ClusterPolicy {
+	if in == nil {
+		return nil
+	}
+
+	ret := &ClusterPolicy{}
+	ret.ObjectMeta = in.ObjectMeta
+	ret.LastModified = in.LastModified
+	ret.Roles = ToClusterRoleMap(in.Roles)
 
 	return ret
 }
@@ -64,6 +110,38 @@ func ToClusterRole(in *Role) *ClusterRole {
 	return ret
 }
 
+// policy bindings
+
+func ToPolicyBindingList(in *ClusterPolicyBindingList) *PolicyBindingList {
+	ret := &PolicyBindingList{}
+	for _, curr := range in.Items {
+		ret.Items = append(ret.Items, *ToPolicyBinding(&curr))
+	}
+
+	return ret
+}
+
+func ToPolicyBinding(in *ClusterPolicyBinding) *PolicyBinding {
+	if in == nil {
+		return nil
+	}
+
+	ret := &PolicyBinding{}
+	ret.ObjectMeta = in.ObjectMeta
+	ret.LastModified = in.LastModified
+	ret.PolicyRef = ToPolicyRef(in.PolicyRef)
+	ret.RoleBindings = ToRoleBindingMap(in.RoleBindings)
+
+	return ret
+}
+
+func ToPolicyRef(in kapi.ObjectReference) kapi.ObjectReference {
+	ret := kapi.ObjectReference{}
+
+	ret.Name = in.Name
+	return ret
+}
+
 func ToRoleBindingMap(in map[string]*ClusterRoleBinding) map[string]*RoleBinding {
 	ret := map[string]*RoleBinding{}
 	for key, RoleBinding := range in {
@@ -95,6 +173,36 @@ func ToRoleBinding(in *ClusterRoleBinding) *RoleBinding {
 }
 
 func ToRoleRef(in kapi.ObjectReference) kapi.ObjectReference {
+	ret := kapi.ObjectReference{}
+
+	ret.Name = in.Name
+	return ret
+}
+
+func ToClusterPolicyBindingList(in *PolicyBindingList) *ClusterPolicyBindingList {
+	ret := &ClusterPolicyBindingList{}
+	for _, curr := range in.Items {
+		ret.Items = append(ret.Items, *ToClusterPolicyBinding(&curr))
+	}
+
+	return ret
+}
+
+func ToClusterPolicyBinding(in *PolicyBinding) *ClusterPolicyBinding {
+	if in == nil {
+		return nil
+	}
+
+	ret := &ClusterPolicyBinding{}
+	ret.ObjectMeta = in.ObjectMeta
+	ret.LastModified = in.LastModified
+	ret.PolicyRef = ToClusterPolicyRef(in.PolicyRef)
+	ret.RoleBindings = ToClusterRoleBindingMap(in.RoleBindings)
+
+	return ret
+}
+
+func ToClusterPolicyRef(in kapi.ObjectReference) kapi.ObjectReference {
 	ret := kapi.ObjectReference{}
 
 	ret.Name = in.Name

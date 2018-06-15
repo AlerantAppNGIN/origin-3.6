@@ -2,60 +2,55 @@ package clusterquotareconciliation
 
 import (
 	"fmt"
-	"reflect"
-	"sync"
 	"time"
 
 	"github.com/golang/glog"
 
-	"k8s.io/apimachinery/pkg/api/equality"
 	kapierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	kutilerrors "k8s.io/apimachinery/pkg/util/errors"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/tools/cache"
-	kapi "k8s.io/kubernetes/pkg/apis/core"
+	kapi "k8s.io/kubernetes/pkg/api"
+	kapihelper "k8s.io/kubernetes/pkg/api/helper"
 	"k8s.io/kubernetes/pkg/controller"
 	"k8s.io/kubernetes/pkg/controller/resourcequota"
 	utilquota "k8s.io/kubernetes/pkg/quota"
 
+	"github.com/openshift/origin/pkg/client"
 	quotaapi "github.com/openshift/origin/pkg/quota/apis/quota"
 	"github.com/openshift/origin/pkg/quota/controller/clusterquotamapping"
 	quotainformer "github.com/openshift/origin/pkg/quota/generated/informers/internalversion/quota/internalversion"
-	quotatypedclient "github.com/openshift/origin/pkg/quota/generated/internalclientset/typed/quota/internalversion"
 	quotalister "github.com/openshift/origin/pkg/quota/generated/listers/quota/internalversion"
 )
 
 type ClusterQuotaReconcilationControllerOptions struct {
 	ClusterQuotaInformer quotainformer.ClusterResourceQuotaInformer
 	ClusterQuotaMapper   clusterquotamapping.ClusterQuotaMapper
-	ClusterQuotaClient   quotatypedclient.ClusterResourceQuotaInterface
+	ClusterQuotaClient   client.ClusterResourceQuotasInterface
 
 	// Knows how to calculate usage
 	Registry utilquota.Registry
 	// Controls full recalculation of quota usage
 	ResyncPeriod time.Duration
-	// Discover list of supported resources on the server.
-	DiscoveryFunc resourcequota.NamespacedResourcesFunc
-	// A function that returns the list of resources to ignore
-	IgnoredResourcesFunc func() map[schema.GroupResource]struct{}
-	// InformersStarted knows if informers were started.
-	InformersStarted <-chan struct{}
-	// InformerFactory interfaces with informers.
-	InformerFactory resourcequota.InformerFactory
+	// Knows how to build controllers that notify replenishment events
+	ControllerFactory resourcequota.ReplenishmentControllerFactory
 	// Controls full resync of objects monitored for replenihsment.
 	ReplenishmentResyncPeriod controller.ResyncPeriodFunc
+	// List of GroupKind objects that should be monitored for replenishment at
+	// a faster frequency than the quota controller recalculation interval
+	GroupKindsToReplenish []schema.GroupKind
 }
 
 type ClusterQuotaReconcilationController struct {
 	clusterQuotaLister quotalister.ClusterResourceQuotaLister
+	clusterQuotaSynced func() bool
 	clusterQuotaMapper clusterquotamapping.ClusterQuotaMapper
-	clusterQuotaClient quotatypedclient.ClusterResourceQuotaInterface
-	// A list of functions that return true when their caches have synced
-	informerSyncedFuncs []cache.InformerSynced
+	clusterQuotaClient client.ClusterResourceQuotasInterface
 
 	resyncPeriod time.Duration
 
@@ -64,12 +59,8 @@ type ClusterQuotaReconcilationController struct {
 
 	// knows how to calculate usage
 	registry utilquota.Registry
-	// knows how to monitor all the resources tracked by quota and trigger replenishment
-	quotaMonitor *resourcequota.QuotaMonitor
-	// controls the workers that process quotas
-	// this lock is acquired to control write access to the monitors and ensures that all
-	// monitors are synced before the controller can process quotas.
-	workerLock sync.RWMutex
+	// controllers monitoring to notify for replenishment
+	replenishmentControllers []cache.Controller
 }
 
 type workItem struct {
@@ -77,12 +68,12 @@ type workItem struct {
 	forceRecalculation bool
 }
 
-func NewClusterQuotaReconcilationController(options ClusterQuotaReconcilationControllerOptions) (*ClusterQuotaReconcilationController, error) {
+func NewClusterQuotaReconcilationController(options ClusterQuotaReconcilationControllerOptions) *ClusterQuotaReconcilationController {
 	c := &ClusterQuotaReconcilationController{
-		clusterQuotaLister:  options.ClusterQuotaInformer.Lister(),
-		clusterQuotaMapper:  options.ClusterQuotaMapper,
-		clusterQuotaClient:  options.ClusterQuotaClient,
-		informerSyncedFuncs: []cache.InformerSynced{options.ClusterQuotaInformer.Informer().HasSynced},
+		clusterQuotaLister: options.ClusterQuotaInformer.Lister(),
+		clusterQuotaSynced: options.ClusterQuotaInformer.Informer().HasSynced,
+		clusterQuotaMapper: options.ClusterQuotaMapper,
+		clusterQuotaClient: options.ClusterQuotaClient,
 
 		resyncPeriod: options.ResyncPeriod,
 		registry:     options.Registry,
@@ -96,43 +87,39 @@ func NewClusterQuotaReconcilationController(options ClusterQuotaReconcilationCon
 		UpdateFunc: c.updateClusterQuota,
 	})
 
-	qm := resourcequota.NewQuotaMonitor(
-		options.InformersStarted,
-		options.InformerFactory,
-		options.IgnoredResourcesFunc(),
-		options.ReplenishmentResyncPeriod,
-		c.replenishQuota,
-		c.registry,
-	)
-
-	c.quotaMonitor = qm
-
-	// do initial quota monitor setup
-	resources, err := resourcequota.GetQuotableResources(options.DiscoveryFunc)
-	if err != nil {
-		return nil, err
+	for _, groupKindToReplenish := range options.GroupKindsToReplenish {
+		controllerOptions := &resourcequota.ReplenishmentControllerOptions{
+			GroupKind:         groupKindToReplenish,
+			ResyncPeriod:      options.ReplenishmentResyncPeriod,
+			ReplenishmentFunc: c.replenishQuota,
+		}
+		replenishmentController, err := options.ControllerFactory.NewController(controllerOptions)
+		if err != nil {
+			glog.Warningf("quota controller unable to replenish %s due to %v, changes only accounted during full resync", groupKindToReplenish, err)
+		} else {
+			c.replenishmentControllers = append(c.replenishmentControllers, replenishmentController)
+		}
 	}
-	if err = qm.SyncMonitors(resources); err != nil {
-		utilruntime.HandleError(fmt.Errorf("initial monitor sync has error: %v", err))
-	}
-
-	// only start quota once all informers synced
-	c.informerSyncedFuncs = append(c.informerSyncedFuncs, qm.IsSynced)
-
-	return c, nil
+	return c
 }
 
 // Run begins quota controller using the specified number of workers
 func (c *ClusterQuotaReconcilationController) Run(workers int, stopCh <-chan struct{}) {
 	defer utilruntime.HandleCrash()
 
-	glog.Infof("Starting the cluster quota reconciliation controller")
+	// Wait for the stores to sync before starting any work in this controller.
+	ready := make(chan struct{})
+	go c.waitForSyncedStores(ready, stopCh)
+	select {
+	case <-ready:
+	case <-stopCh:
+		return
+	}
+	glog.V(4).Infof("Starting the cluster quota reconciliation controller workers")
 
 	// the controllers that replenish other resources to respond rapidly to state changes
-	go c.quotaMonitor.Run(stopCh)
-
-	if !controller.WaitForCacheSync("cluster resource quota", stopCh, c.informerSyncedFuncs...) {
-		return
+	for _, replenishmentController := range c.replenishmentControllers {
+		go replenishmentController.Run(stopCh)
 	}
 
 	// the workers that chug through the quota calculation backlog
@@ -148,52 +135,18 @@ func (c *ClusterQuotaReconcilationController) Run(workers int, stopCh <-chan str
 	c.queue.ShutDown()
 }
 
-// Sync periodically resyncs the controller when new resources are observed from discovery.
-func (c *ClusterQuotaReconcilationController) Sync(discoveryFunc resourcequota.NamespacedResourcesFunc, period time.Duration, stopCh <-chan struct{}) {
-	// Something has changed, so track the new state and perform a sync.
-	oldResources := make(map[schema.GroupVersionResource]struct{})
-	wait.Until(func() {
-		// Get the current resource list from discovery.
-		newResources, err := resourcequota.GetQuotableResources(discoveryFunc)
-		if err != nil {
-			utilruntime.HandleError(err)
+func (c *ClusterQuotaReconcilationController) waitForSyncedStores(ready chan<- struct{}, stopCh <-chan struct{}) {
+	defer utilruntime.HandleCrash()
+
+	for !c.clusterQuotaSynced() {
+		glog.V(4).Infof("Waiting for the caches to sync before starting the cluster quota reconciliation controller workers")
+		select {
+		case <-time.After(100 * time.Millisecond):
+		case <-stopCh:
 			return
 		}
-
-		// Decide whether discovery has reported a change.
-		if reflect.DeepEqual(oldResources, newResources) {
-			glog.V(4).Infof("no resource updates from discovery, skipping resource quota sync")
-			return
-		}
-
-		// Something has changed, so track the new state and perform a sync.
-		glog.V(2).Infof("syncing resource quota controller with updated resources from discovery: %v", newResources)
-		oldResources = newResources
-
-		// Ensure workers are paused to avoid processing events before informers
-		// have resynced.
-		c.workerLock.Lock()
-		defer c.workerLock.Unlock()
-
-		// Perform the monitor resync and wait for controllers to report cache sync.
-		if err := c.resyncMonitors(newResources); err != nil {
-			utilruntime.HandleError(fmt.Errorf("failed to sync resource monitors: %v", err))
-			return
-		}
-		if c.quotaMonitor != nil && !controller.WaitForCacheSync("cluster resource quota", stopCh, c.quotaMonitor.IsSynced) {
-			utilruntime.HandleError(fmt.Errorf("timed out waiting for quota monitor sync"))
-		}
-	}, period, stopCh)
-}
-
-// resyncMonitors starts or stops quota monitors as needed to ensure that all
-// (and only) those resources present in the map are monitored.
-func (c *ClusterQuotaReconcilationController) resyncMonitors(resources map[schema.GroupVersionResource]struct{}) error {
-	if err := c.quotaMonitor.SyncMonitors(resources); err != nil {
-		return err
 	}
-	c.quotaMonitor.StartMonitors()
-	return nil
+	close(ready)
 }
 
 func (c *ClusterQuotaReconcilationController) calculate(quotaName string, namespaceNames ...string) {
@@ -248,9 +201,6 @@ func (c *ClusterQuotaReconcilationController) calculateAll() {
 // It enforces that the syncHandler is never invoked concurrently with the same key.
 func (c *ClusterQuotaReconcilationController) worker() {
 	workFunc := func() bool {
-		c.workerLock.RLock()
-		defer c.workerLock.RUnlock()
-
 		uncastKey, uncastData, quit := c.queue.GetWithData()
 		if quit {
 			return true
@@ -298,11 +248,15 @@ func (c *ClusterQuotaReconcilationController) worker() {
 
 // syncResourceQuotaFromKey syncs a quota key
 func (c *ClusterQuotaReconcilationController) syncQuotaForNamespaces(originalQuota *quotaapi.ClusterResourceQuota, workItems []workItem) (error, []workItem /* to retry */) {
-	quota := originalQuota.DeepCopy()
+	obj, err := kapi.Scheme.Copy(originalQuota)
+	if err != nil {
+		return err, workItems
+	}
+	quota := obj.(*quotaapi.ClusterResourceQuota)
 
 	// get the list of namespaces that match this cluster quota
 	matchingNamespaceNamesList, quotaSelector := c.clusterQuotaMapper.GetNamespacesFor(quota.Name)
-	if !equality.Semantic.DeepEqual(quotaSelector, quota.Spec.Selector) {
+	if !kapihelper.Semantic.DeepEqual(quotaSelector, quota.Spec.Selector) {
 		return fmt.Errorf("mapping not up to date, have=%v need=%v", quotaSelector, quota.Spec.Selector), workItems
 	}
 	matchingNamespaceNames := sets.NewString(matchingNamespaceNamesList...)
@@ -322,7 +276,7 @@ func (c *ClusterQuotaReconcilationController) syncQuotaForNamespaces(originalQuo
 		}
 
 		// if there's no work for us to do, do nothing
-		if !item.forceRecalculation && namespaceLoaded && equality.Semantic.DeepEqual(namespaceTotals.Hard, quota.Spec.Quota.Hard) {
+		if !item.forceRecalculation && namespaceLoaded && kapihelper.Semantic.DeepEqual(namespaceTotals.Hard, quota.Spec.Quota.Hard) {
 			continue
 		}
 
@@ -358,11 +312,11 @@ func (c *ClusterQuotaReconcilationController) syncQuotaForNamespaces(originalQuo
 	quota.Status.Total.Hard = quota.Spec.Quota.Hard
 
 	// if there's no change, no update, return early.  NewAggregate returns nil on empty input
-	if equality.Semantic.DeepEqual(quota, originalQuota) {
+	if kapihelper.Semantic.DeepEqual(quota, originalQuota) {
 		return kutilerrors.NewAggregate(reconcilationErrors), retryItems
 	}
 
-	if _, err := c.clusterQuotaClient.UpdateStatus(quota); err != nil {
+	if _, err := c.clusterQuotaClient.ClusterResourceQuotas().UpdateStatus(quota); err != nil {
 		return kutilerrors.NewAggregate(append(reconcilationErrors, err)), workItems
 	}
 
@@ -370,17 +324,11 @@ func (c *ClusterQuotaReconcilationController) syncQuotaForNamespaces(originalQuo
 }
 
 // replenishQuota is a replenishment function invoked by a controller to notify that a quota should be recalculated
-func (c *ClusterQuotaReconcilationController) replenishQuota(groupResource schema.GroupResource, namespace string) {
+func (c *ClusterQuotaReconcilationController) replenishQuota(groupKind schema.GroupKind, namespace string, object runtime.Object) {
 	// check if the quota controller can evaluate this kind, if not, ignore it altogether...
-	releventEvaluators := []utilquota.Evaluator{}
-	evaluators := c.registry.List()
-	for i := range evaluators {
-		evaluator := evaluators[i]
-		if evaluator.GroupResource() == groupResource {
-			releventEvaluators = append(releventEvaluators, evaluator)
-		}
-	}
-	if len(releventEvaluators) == 0 {
+	evaluators := c.registry.Evaluators()
+	evaluator, found := evaluators[groupKind]
+	if !found {
 		return
 	}
 
@@ -395,13 +343,10 @@ func (c *ClusterQuotaReconcilationController) replenishQuota(groupResource schem
 		}
 
 		resourceQuotaResources := utilquota.ResourceNames(quota.Status.Total.Hard)
-		for _, evaluator := range releventEvaluators {
-			matchedResources := evaluator.MatchingResources(resourceQuotaResources)
-			if len(matchedResources) > 0 {
-				// TODO: make this support targeted replenishment to a specific kind, right now it does a full recalc on that quota.
-				c.forceCalculation(quotaName, namespace)
-				break
-			}
+		matchedResources := evaluator.MatchingResources(resourceQuotaResources)
+		if len(matchedResources) > 0 {
+			// TODO: make this support targeted replenishment to a specific kind, right now it does a full recalc on that quota.
+			c.forceCalculation(quotaName, namespace)
 		}
 	}
 }

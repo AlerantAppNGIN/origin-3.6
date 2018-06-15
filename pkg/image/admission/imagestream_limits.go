@@ -3,7 +3,7 @@ package admission
 import (
 	kapierrors "k8s.io/apimachinery/pkg/api/errors"
 	kerrutil "k8s.io/apimachinery/pkg/util/errors"
-	kapi "k8s.io/kubernetes/pkg/apis/core"
+	kapi "k8s.io/kubernetes/pkg/api"
 
 	imageapi "github.com/openshift/origin/pkg/image/apis/image"
 )

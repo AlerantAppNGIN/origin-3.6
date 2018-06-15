@@ -3,6 +3,7 @@ package integration
 import (
 	"bytes"
 	"crypto/tls"
+	"encoding/json"
 	"fmt"
 	"html/template"
 	"io/ioutil"
@@ -15,7 +16,7 @@ import (
 
 	knet "k8s.io/apimachinery/pkg/util/net"
 
-	configapi "github.com/openshift/origin/pkg/cmd/server/apis/config"
+	configapi "github.com/openshift/origin/pkg/cmd/server/api"
 	testserver "github.com/openshift/origin/test/util/server"
 )
 
@@ -77,6 +78,71 @@ func tryAccessURL(t *testing.T, url string, expectedStatus int, expectedRedirect
 	}
 
 	return resp
+}
+
+func TestAccessOriginWebConsole(t *testing.T) {
+	masterOptions, err := testserver.DefaultMasterOptions()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, err := testserver.StartConfiguredMaster(masterOptions); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer testserver.CleanupMasterEtcd(t, masterOptions)
+
+	for endpoint, exp := range map[string]struct {
+		statusCode int
+		location   string
+	}{
+		"":                    {http.StatusFound, masterOptions.AssetConfig.PublicURL},
+		"healthz":             {http.StatusOK, ""},
+		"login?then=%2F":      {http.StatusOK, ""},
+		"oauth/token/request": {http.StatusFound, masterOptions.AssetConfig.MasterPublicURL + "/oauth/authorize"},
+		"console":             {http.StatusMovedPermanently, "/console/"},
+		"console/":            {http.StatusOK, ""},
+		"console/java":        {http.StatusOK, ""},
+	} {
+		url := masterOptions.AssetConfig.MasterPublicURL + "/" + endpoint
+		tryAccessURL(t, url, exp.statusCode, exp.location, nil)
+	}
+}
+
+func TestAccessDisabledWebConsole(t *testing.T) {
+	masterOptions, err := testserver.DefaultMasterOptions()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	masterOptions.DisabledFeatures.Add(configapi.FeatureWebConsole)
+	if _, err := testserver.StartConfiguredMaster(masterOptions); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer testserver.CleanupMasterEtcd(t, masterOptions)
+
+	resp := tryAccessURL(t, masterOptions.AssetConfig.MasterPublicURL+"/", http.StatusOK, "", nil)
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		t.Errorf("failed to read reposponse's body: %v", err)
+	} else {
+		var value interface{}
+		if err = json.Unmarshal(body, &value); err != nil {
+			t.Errorf("expected json body which couldn't be parsed: %v, got: %s", err, body)
+		}
+	}
+
+	for endpoint, exp := range map[string]struct {
+		statusCode int
+		location   string
+	}{
+		"healthz":             {http.StatusOK, ""},
+		"login?then=%2F":      {http.StatusOK, ""},
+		"oauth/token/request": {http.StatusFound, masterOptions.AssetConfig.MasterPublicURL + "/oauth/authorize"},
+		"console":             {http.StatusForbidden, ""},
+		"console/":            {http.StatusForbidden, ""},
+		"console/java":        {http.StatusForbidden, ""},
+	} {
+		url := masterOptions.AssetConfig.MasterPublicURL + "/" + endpoint
+		tryAccessURL(t, url, exp.statusCode, exp.location, nil)
+	}
 }
 
 func TestAccessOriginWebConsoleMultipleIdentityProviders(t *testing.T) {
@@ -162,12 +228,48 @@ func TestAccessOriginWebConsoleMultipleIdentityProviders(t *testing.T) {
 	}
 
 	// Test the loginSelectorBase for links to all of the IDPs
-	url := masterOptions.OAuthConfig.MasterPublicURL + loginSelectorBase
+	url := masterOptions.AssetConfig.MasterPublicURL + loginSelectorBase
 	tryAccessURL(t, url, http.StatusOK, "", linkRegexps)
 
 	// Test all of these URLs
 	for endpoint, exp := range urlMap {
-		url := masterOptions.OAuthConfig.MasterPublicURL + endpoint
+		url := masterOptions.AssetConfig.MasterPublicURL + endpoint
+		tryAccessURL(t, url, exp.statusCode, exp.location, nil)
+	}
+}
+
+func TestAccessStandaloneOriginWebConsole(t *testing.T) {
+	masterOptions, err := testserver.DefaultMasterOptions()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	addr, err := testserver.FindAvailableBindAddress(13000, 13999)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	masterOptions.AssetConfig.ServingInfo.BindAddress = addr
+	assetBaseURL := "https://" + addr
+	masterOptions.AssetConfig.PublicURL = assetBaseURL + "/console/"
+	masterOptions.OAuthConfig.AssetPublicURL = assetBaseURL + "/console/"
+
+	if _, err := testserver.StartConfiguredMaster(masterOptions); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer testserver.CleanupMasterEtcd(t, masterOptions)
+
+	for endpoint, exp := range map[string]struct {
+		statusCode int
+		location   string
+	}{
+		"":             {http.StatusFound, "/console/"},
+		"blarg":        {http.StatusNotFound, ""},
+		"console":      {http.StatusMovedPermanently, "/console/"},
+		"console/":     {http.StatusOK, ""},
+		"console/java": {http.StatusOK, ""},
+	} {
+		url := assetBaseURL + "/" + endpoint
 		tryAccessURL(t, url, exp.statusCode, exp.location, nil)
 	}
 }

@@ -10,10 +10,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ktransport "k8s.io/client-go/transport"
 
-	configapi "github.com/openshift/origin/pkg/cmd/server/apis/config"
+	configapi "github.com/openshift/origin/pkg/cmd/server/api"
 	oauthapi "github.com/openshift/origin/pkg/oauth/apis/oauth"
-	oauthclient "github.com/openshift/origin/pkg/oauth/generated/internalclientset/typed/oauth/internalversion"
-	"github.com/openshift/origin/pkg/oauth/urls"
+	oauthutil "github.com/openshift/origin/pkg/oauth/util"
 	testutil "github.com/openshift/origin/test/util"
 	testserver "github.com/openshift/origin/test/util/server"
 )
@@ -47,7 +46,10 @@ func TestAuthProxyOnAuthorize(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	clusterAdminOAuthClient := oauthclient.NewForConfigOrDie(clusterAdminClientConfig)
+	clusterAdminClient, err := testutil.GetClusterAdminClient(clusterAdminKubeConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// set up a front proxy guarding the oauth server
 	proxyHTTPHandler := NewBasicAuthChallenger("TestRegistryAndServer", validUsers, NewXRemoteUserProxyingHandler(clusterAdminClientConfig.Host))
@@ -56,13 +58,13 @@ func TestAuthProxyOnAuthorize(t *testing.T) {
 	t.Logf("proxy server is on %v\n", proxyServer.URL)
 
 	// need to prime clients so that we can get back a code.  the client must be valid
-	result := clusterAdminOAuthClient.RESTClient().Post().Resource("oAuthClients").Body(&oauthapi.OAuthClient{ObjectMeta: metav1.ObjectMeta{Name: "test"}, Secret: "secret", RedirectURIs: []string{clusterAdminClientConfig.Host}}).Do()
+	result := clusterAdminClient.RESTClient.Post().Resource("oAuthClients").Body(&oauthapi.OAuthClient{ObjectMeta: metav1.ObjectMeta{Name: "test"}, Secret: "secret", RedirectURIs: []string{clusterAdminClientConfig.Host}}).Do()
 	if result.Error() != nil {
 		t.Fatal(result.Error())
 	}
 
 	// our simple URL to get back a code.  We want to go through the front proxy
-	rawAuthorizeRequest := proxyServer.URL + urls.OpenShiftOAuthAPIPrefix + "/authorize?response_type=code&client_id=test"
+	rawAuthorizeRequest := proxyServer.URL + oauthutil.OpenShiftOAuthAPIPrefix + "/authorize?response_type=code&client_id=test"
 
 	// the first request we make to the front proxy should challenge us for authentication info
 	shouldBeAChallengeResponse, err := http.Get(rawAuthorizeRequest)

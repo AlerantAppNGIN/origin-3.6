@@ -343,7 +343,7 @@ func filesInCommit(sha string) ([]File, error) {
 
 func descriptionInCommit(sha string) ([]string, error) {
 	descriptionLines := []string{}
-	stdout, stderr, err := run("git", "log", "--pretty=%b", "-1", sha)
+	stdout, stderr, err := run("git", "show", "--quiet", sha)
 	if err != nil {
 		return descriptionLines, fmt.Errorf("%s: %s", stderr, err)
 	}
@@ -352,7 +352,7 @@ func descriptionInCommit(sha string) ([]string, error) {
 		if len(commitLine) == 0 {
 			continue
 		}
-		descriptionLines = append(descriptionLines, commitLine)
+		descriptionLines = append(descriptionLines, strings.Trim(commitLine, " "))
 	}
 	return descriptionLines, nil
 }

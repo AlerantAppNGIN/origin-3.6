@@ -41,9 +41,6 @@ type ImportRestriction struct {
 	// AllowedImportPackageRoots are roots of package trees that
 	// are allowed to be imported for this restriction
 	AllowedImportPackageRoots []string `json:"allowedImportPackageRoots"`
-	// ForbiddenImportPackageRoots are roots of package trees that
-	// are NOT allowed to be imported for this restriction
-	ForbiddenImportPackageRoots []string `json:"forbiddenImportPackageRoots"`
 }
 
 // ForbiddenImportsFor determines all of the forbidden
@@ -111,14 +108,6 @@ func (i *ImportRestriction) isAllowed(packageToCheck string) bool {
 		return true
 	}
 
-	for _, forbiddenPackageRoot := range i.ForbiddenImportPackageRoots {
-		if strings.HasPrefix(forbiddenPackageRoot, "vendor") {
-			forbiddenPackageRoot = rootPackage + "/" + forbiddenPackageRoot
-		}
-		if strings.HasPrefix(packageToCheck, forbiddenPackageRoot) {
-			return false
-		}
-	}
 	for _, allowedPackage := range i.AllowedImportPackages {
 		if strings.HasPrefix(allowedPackage, "vendor") {
 			allowedPackage = rootPackage + "/" + allowedPackage
@@ -143,14 +132,6 @@ func (i *ImportRestriction) isAllowed(packageToCheck string) bool {
 // restricting.  Any package being restricted is assumed to be allowed to import another package being
 // restricted since they are grouped
 func (i *ImportRestriction) isIncludedInRestrictedPackages(packageToCheck string) bool {
-	// some subtrees are specifically excluded.  Not sure if we still need this given
-	// explicit inclusion
-	for _, ignored := range i.IgnoredSubTrees {
-		if strings.HasPrefix(packageToCheck, ignored) {
-			return false
-		}
-	}
-
 	for _, currBase := range i.CheckedPackageRoots {
 		if strings.HasPrefix(packageToCheck, currBase) {
 			return true
@@ -215,14 +196,14 @@ func main() {
 
 		// make sure that all the allowed imports are used
 		if unused := unusedPackageImports(restriction.AllowedImportPackages, packages); len(unused) > 0 {
-			log.Printf("-- found unused allowed package imports(remove them)\n")
+			log.Printf("-- found unused package imports\n")
 			for _, unusedPackage := range unused {
 				log.Printf("\t%s\n", unusedPackage)
 			}
 			failedRestrictionCheck = true
 		}
 		if unused := unusedPackageImportRoots(restriction.AllowedImportPackageRoots, packages); len(unused) > 0 {
-			log.Printf("-- found unused allowed package import roots(remove them)\n")
+			log.Printf("-- found unused package import roots\n")
 			for _, unusedPackage := range unused {
 				log.Printf("\t%s\n", unusedPackage)
 			}
@@ -293,8 +274,7 @@ func mergePackages(existingPackages, currPackages []Package) []Package {
 			}
 		}
 		if !found {
-			// this was super noisy.
-			//log.Printf("-- Adding: %v", currPackage.ImportPath)
+			log.Printf("-- Adding: %v", currPackage.ImportPath)
 			existingPackages = append(existingPackages, currPackage)
 		}
 	}

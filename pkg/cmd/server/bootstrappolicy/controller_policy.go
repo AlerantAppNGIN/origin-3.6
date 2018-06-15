@@ -8,6 +8,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	rbac "k8s.io/kubernetes/pkg/apis/rbac"
 
+	authorizationapi "github.com/openshift/origin/pkg/authorization/apis/authorization"
+
 	// we need the conversions registered for our init block
 	_ "github.com/openshift/origin/pkg/authorization/apis/authorization/install"
 )
@@ -15,31 +17,28 @@ import (
 const saRolePrefix = "system:openshift:controller:"
 
 const (
-	InfraOriginNamespaceServiceAccountName                       = "origin-namespace-controller"
-	InfraServiceAccountControllerServiceAccountName              = "serviceaccount-controller"
-	InfraServiceAccountPullSecretsControllerServiceAccountName   = "serviceaccount-pull-secrets-controller"
-	InfraServiceAccountTokensControllerServiceAccountName        = "serviceaccount-tokens-controller"
-	InfraServiceServingCertServiceAccountName                    = "service-serving-cert-controller"
-	InfraBuildControllerServiceAccountName                       = "build-controller"
-	InfraBuildConfigChangeControllerServiceAccountName           = "build-config-change-controller"
-	InfraDeploymentConfigControllerServiceAccountName            = "deploymentconfig-controller"
-	InfraDeployerControllerServiceAccountName                    = "deployer-controller"
-	InfraImageTriggerControllerServiceAccountName                = "image-trigger-controller"
-	InfraImageImportControllerServiceAccountName                 = "image-import-controller"
-	InfraSDNControllerServiceAccountName                         = "sdn-controller"
-	InfraClusterQuotaReconciliationControllerServiceAccountName  = "cluster-quota-reconciliation-controller"
-	InfraUnidlingControllerServiceAccountName                    = "unidling-controller"
-	InfraServiceIngressIPControllerServiceAccountName            = "service-ingress-ip-controller"
-	InfraPersistentVolumeRecyclerControllerServiceAccountName    = "pv-recycler-controller"
-	InfraResourceQuotaControllerServiceAccountName               = "resourcequota-controller"
-	InfraDefaultRoleBindingsControllerServiceAccountName         = "default-rolebindings-controller"
-	InfraIngressToRouteControllerServiceAccountName              = "ingress-to-route-controller"
-	InfraNamespaceSecurityAllocationControllerServiceAccountName = "namespace-security-allocation-controller"
+	InfraOriginNamespaceServiceAccountName                      = "origin-namespace-controller"
+	InfraServiceAccountControllerServiceAccountName             = "serviceaccount-controller"
+	InfraServiceAccountPullSecretsControllerServiceAccountName  = "serviceaccount-pull-secrets-controller"
+	InfraServiceAccountTokensControllerServiceAccountName       = "serviceaccount-tokens-controller"
+	InfraServiceServingCertServiceAccountName                   = "service-serving-cert-controller"
+	InfraBuildControllerServiceAccountName                      = "build-controller"
+	InfraBuildConfigChangeControllerServiceAccountName          = "build-config-change-controller"
+	InfraDeploymentConfigControllerServiceAccountName           = "deploymentconfig-controller"
+	InfraDeploymentTriggerControllerServiceAccountName          = "deployment-trigger-controller"
+	InfraDeployerControllerServiceAccountName                   = "deployer-controller"
+	InfraImageTriggerControllerServiceAccountName               = "image-trigger-controller"
+	InfraImageImportControllerServiceAccountName                = "image-import-controller"
+	InfraSDNControllerServiceAccountName                        = "sdn-controller"
+	InfraClusterQuotaReconciliationControllerServiceAccountName = "cluster-quota-reconciliation-controller"
+	InfraUnidlingControllerServiceAccountName                   = "unidling-controller"
+	InfraServiceIngressIPControllerServiceAccountName           = "service-ingress-ip-controller"
+	InfraPersistentVolumeRecyclerControllerServiceAccountName   = "pv-recycler-controller"
+	InfraResourceQuotaControllerServiceAccountName              = "resourcequota-controller"
 
 	// template instance controller watches for TemplateInstance object creation
 	// and instantiates templates as a result.
-	InfraTemplateInstanceControllerServiceAccountName          = "template-instance-controller"
-	InfraTemplateInstanceFinalizerControllerServiceAccountName = "template-instance-finalizer-controller"
+	InfraTemplateInstanceControllerServiceAccountName = "template-instance-controller"
 
 	// template service broker is an open service broker-compliant API
 	// implementation which serves up OpenShift templates.  It uses the
@@ -57,12 +56,6 @@ var (
 	// controllerRoleBindings is a slice of roles used for controllers
 	controllerRoleBindings = []rbac.ClusterRoleBinding{}
 )
-
-func bindControllerRole(saName string, roleName string) {
-	roleBinding := rbac.NewClusterBinding(roleName).SAs(DefaultOpenShiftInfraNamespace, saName).BindingOrDie()
-	addDefaultMetadata(&roleBinding)
-	controllerRoleBindings = append(controllerRoleBindings, roleBinding)
-}
 
 func addControllerRole(role rbac.ClusterRole) {
 	if !strings.HasPrefix(role.Name, saRolePrefix) {
@@ -82,12 +75,10 @@ func addControllerRoleToSA(saNamespace, saName string, role rbac.ClusterRole) {
 		}
 	}
 
-	addDefaultMetadata(&role)
 	controllerRoles = append(controllerRoles, role)
 
-	roleBinding := rbac.NewClusterBinding(role.Name).SAs(saNamespace, saName).BindingOrDie()
-	addDefaultMetadata(&roleBinding)
-	controllerRoleBindings = append(controllerRoleBindings, roleBinding)
+	controllerRoleBindings = append(controllerRoleBindings,
+		rbac.NewClusterBinding(role.Name).SAs(saNamespace, saName).BindingOrDie())
 }
 
 func eventsRule() rbac.PolicyRule {
@@ -100,7 +91,6 @@ func init() {
 		ObjectMeta: metav1.ObjectMeta{Name: saRolePrefix + InfraBuildControllerServiceAccountName},
 		Rules: []rbac.PolicyRule{
 			rbac.NewRule("get", "list", "watch", "patch", "update", "delete").Groups(buildGroup, legacyBuildGroup).Resources("builds").RuleOrDie(),
-			rbac.NewRule("update").Groups(buildGroup, legacyBuildGroup).Resources("builds/finalizers").RuleOrDie(),
 			rbac.NewRule("get").Groups(buildGroup, legacyBuildGroup).Resources("buildconfigs").RuleOrDie(),
 			rbac.NewRule("create").Groups(buildGroup, legacyBuildGroup).Resources("builds/optimizeddocker", "builds/docker", "builds/source", "builds/custom", "builds/jenkinspipeline").RuleOrDie(),
 			rbac.NewRule("get", "list").Groups(imageGroup, legacyImageGroup).Resources("imagestreams").RuleOrDie(),
@@ -109,7 +99,6 @@ func init() {
 			rbac.NewRule("get", "list", "create", "delete").Groups(kapiGroup).Resources("pods").RuleOrDie(),
 			rbac.NewRule("get").Groups(kapiGroup).Resources("namespaces").RuleOrDie(),
 			rbac.NewRule("get", "list").Groups(kapiGroup).Resources("serviceaccounts").RuleOrDie(),
-			rbac.NewRule("create").Groups(securityGroup, legacySecurityGroup).Resources("podsecuritypolicysubjectreviews").RuleOrDie(),
 			eventsRule(),
 		},
 	})
@@ -120,7 +109,6 @@ func init() {
 		Rules: []rbac.PolicyRule{
 			rbac.NewRule("get", "list", "watch").Groups(buildGroup, legacyBuildGroup).Resources("buildconfigs").RuleOrDie(),
 			rbac.NewRule("create").Groups(buildGroup, legacyBuildGroup).Resources("buildconfigs/instantiate").RuleOrDie(),
-			rbac.NewRule("delete").Groups(buildGroup, legacyBuildGroup).Resources("builds").RuleOrDie(),
 			eventsRule(),
 		},
 	})
@@ -136,7 +124,6 @@ func init() {
 			// TODO: remove "delete" rule few releases after 3.6
 			rbac.NewRule("delete").Groups(kapiGroup).Resources("replicationcontrollers").RuleOrDie(),
 			rbac.NewRule("get", "list", "watch", "update").Groups(kapiGroup).Resources("replicationcontrollers").RuleOrDie(),
-			rbac.NewRule("get", "update").Groups(kapiGroup).Resources("replicationcontrollers/scale").RuleOrDie(),
 			eventsRule(),
 		},
 	})
@@ -146,10 +133,21 @@ func init() {
 		ObjectMeta: metav1.ObjectMeta{Name: saRolePrefix + InfraDeploymentConfigControllerServiceAccountName},
 		Rules: []rbac.PolicyRule{
 			rbac.NewRule("create", "get", "list", "watch", "update", "patch", "delete").Groups(kapiGroup).Resources("replicationcontrollers").RuleOrDie(),
-			rbac.NewRule("get", "update").Groups(kapiGroup).Resources("replicationcontrollers/scale").RuleOrDie(),
 			rbac.NewRule("update").Groups(deployGroup, legacyDeployGroup).Resources("deploymentconfigs/status").RuleOrDie(),
-			rbac.NewRule("update").Groups(deployGroup, legacyDeployGroup).Resources("deploymentconfigs/finalizers").RuleOrDie(),
+			rbac.NewRule("get", "list", "watch", "delete").Groups(deployGroup, legacyDeployGroup).Resources("deploymentconfigs").RuleOrDie(),
+			eventsRule(),
+		},
+	})
+
+	// deployment-trigger-controller
+	addControllerRole(rbac.ClusterRole{
+		ObjectMeta: metav1.ObjectMeta{Name: saRolePrefix + InfraDeploymentTriggerControllerServiceAccountName},
+		Rules: []rbac.PolicyRule{
+			rbac.NewRule("get", "list", "watch").Groups(kapiGroup).Resources("replicationcontrollers").RuleOrDie(),
 			rbac.NewRule("get", "list", "watch").Groups(deployGroup, legacyDeployGroup).Resources("deploymentconfigs").RuleOrDie(),
+			rbac.NewRule("get", "list", "watch").Groups(imageGroup, legacyImageGroup).Resources("imagestreams").RuleOrDie(),
+
+			rbac.NewRule("create").Groups(deployGroup, legacyDeployGroup).Resources("deploymentconfigs/instantiate").RuleOrDie(),
 			eventsRule(),
 		},
 	})
@@ -159,29 +157,14 @@ func init() {
 		ObjectMeta: metav1.ObjectMeta{Name: saRolePrefix + InfraTemplateInstanceControllerServiceAccountName},
 		Rules: []rbac.PolicyRule{
 			rbac.NewRule("create").Groups(kAuthzGroup).Resources("subjectaccessreviews").RuleOrDie(),
+			rbac.NewRule("get", "list", "watch").Groups(templateGroup).Resources("subjectaccessreviews").RuleOrDie(),
 			rbac.NewRule("update").Groups(templateGroup).Resources("templateinstances/status").RuleOrDie(),
 		},
 	})
 
 	// template-instance-controller
-	templateInstanceController := rbac.NewClusterBinding(AdminRoleName).SAs(DefaultOpenShiftInfraNamespace, InfraTemplateInstanceControllerServiceAccountName).BindingOrDie()
-	templateInstanceController.Name = "system:openshift:controller:" + InfraTemplateInstanceControllerServiceAccountName + ":admin"
-	addDefaultMetadata(&templateInstanceController)
-	controllerRoleBindings = append(controllerRoleBindings, templateInstanceController)
-
-	// template-instance-finalizer-controller
-	addControllerRole(rbac.ClusterRole{
-		ObjectMeta: metav1.ObjectMeta{Name: saRolePrefix + InfraTemplateInstanceFinalizerControllerServiceAccountName},
-		Rules: []rbac.PolicyRule{
-			rbac.NewRule("update").Groups(templateGroup).Resources("templateinstances/status").RuleOrDie(),
-		},
-	})
-
-	// template-instance-finalizer-controller
-	templateInstanceFinalizerController := rbac.NewClusterBinding(AdminRoleName).SAs(DefaultOpenShiftInfraNamespace, InfraTemplateInstanceFinalizerControllerServiceAccountName).BindingOrDie()
-	templateInstanceFinalizerController.Name = "system:openshift:controller:" + InfraTemplateInstanceFinalizerControllerServiceAccountName + ":admin"
-	addDefaultMetadata(&templateInstanceFinalizerController)
-	controllerRoleBindings = append(controllerRoleBindings, templateInstanceFinalizerController)
+	controllerRoleBindings = append(controllerRoleBindings,
+		rbac.NewClusterBinding(AdminRoleName).SAs(DefaultOpenShiftInfraNamespace, InfraTemplateInstanceControllerServiceAccountName).BindingOrDie())
 
 	// origin-namespace-controller
 	addControllerRole(rbac.ClusterRole{
@@ -227,11 +210,10 @@ func init() {
 			// trigger controller must be able to modify these build types
 			// TODO: move to a new custom binding that can be removed separately from end user access?
 			rbac.NewRule("create").Groups(buildGroup, legacyBuildGroup).Resources(
-				SourceBuildResource,
-				DockerBuildResource,
-				CustomBuildResource,
-				OptimizedDockerBuildResource,
-				JenkinsPipelineBuildResource,
+				authorizationapi.SourceBuildResource,
+				authorizationapi.DockerBuildResource,
+				authorizationapi.OptimizedDockerBuildResource,
+				authorizationapi.JenkinsPipelineBuildResource,
 			).RuleOrDie(),
 
 			eventsRule(),
@@ -243,7 +225,7 @@ func init() {
 		ObjectMeta: metav1.ObjectMeta{Name: saRolePrefix + InfraServiceServingCertServiceAccountName},
 		Rules: []rbac.PolicyRule{
 			rbac.NewRule("list", "watch", "update").Groups(kapiGroup).Resources("services").RuleOrDie(),
-			rbac.NewRule("get", "list", "watch", "create", "update", "delete").Groups(kapiGroup).Resources("secrets").RuleOrDie(),
+			rbac.NewRule("get", "list", "watch", "create", "update").Groups(kapiGroup).Resources("secrets").RuleOrDie(),
 			eventsRule(),
 		},
 	})
@@ -311,18 +293,6 @@ func init() {
 		},
 	})
 
-	// ingress-to-route-controller
-	addControllerRole(rbac.ClusterRole{
-		ObjectMeta: metav1.ObjectMeta{Name: saRolePrefix + InfraIngressToRouteControllerServiceAccountName},
-		Rules: []rbac.PolicyRule{
-			rbac.NewRule("get", "list", "watch").Groups(kapiGroup).Resources("secrets", "services").RuleOrDie(),
-			rbac.NewRule("get", "list", "watch").Groups(extensionsGroup).Resources("ingress").RuleOrDie(),
-			rbac.NewRule("get", "list", "watch", "create", "update", "patch", "delete").Groups(routeGroup).Resources("routes").RuleOrDie(),
-			rbac.NewRule("create", "update").Groups(routeGroup).Resources("routes/custom-host").RuleOrDie(),
-			eventsRule(),
-		},
-	})
-
 	// pv-recycler-controller
 	addControllerRole(rbac.ClusterRole{
 		ObjectMeta: metav1.ObjectMeta{Name: saRolePrefix + InfraPersistentVolumeRecyclerControllerServiceAccountName},
@@ -351,14 +321,12 @@ func init() {
 	})
 
 	// horizontal-pod-autoscaler-controller (the OpenShift resources only)
-	addControllerRole(rbac.ClusterRole{
+	addControllerRoleToSA("kube-system", InfraHorizontalPodAutoscalerControllerServiceAccountName, rbac.ClusterRole{
 		ObjectMeta: metav1.ObjectMeta{Name: saRolePrefix + InfraHorizontalPodAutoscalerControllerServiceAccountName},
 		Rules: []rbac.PolicyRule{
 			rbac.NewRule("get", "update").Groups(deployGroup, legacyDeployGroup).Resources("deploymentconfigs/scale").RuleOrDie(),
 		},
 	})
-
-	bindControllerRole(InfraHorizontalPodAutoscalerControllerServiceAccountName, "system:controller:horizontal-pod-autoscaler")
 
 	addControllerRole(rbac.ClusterRole{
 		ObjectMeta: metav1.ObjectMeta{Name: saRolePrefix + InfraTemplateServiceBrokerServiceAccountName},
@@ -366,36 +334,11 @@ func init() {
 			rbac.NewRule("create").Groups(kAuthzGroup).Resources("subjectaccessreviews").RuleOrDie(),
 			rbac.NewRule("create").Groups(authzGroup).Resources("subjectaccessreviews").RuleOrDie(),
 			rbac.NewRule("get", "create", "update", "delete").Groups(templateGroup).Resources("brokertemplateinstances").RuleOrDie(),
-			rbac.NewRule("update").Groups(templateGroup).Resources("brokertemplateinstances/finalizers").RuleOrDie(),
 			rbac.NewRule("get", "create", "delete", "assign").Groups(templateGroup).Resources("templateinstances").RuleOrDie(),
 			rbac.NewRule("get", "list", "watch").Groups(templateGroup).Resources("templates").RuleOrDie(),
-			rbac.NewRule("get", "create", "delete").Groups(kapiGroup).Resources("secrets").RuleOrDie(),
-			rbac.NewRule("get").Groups(kapiGroup).Resources("services", "configmaps").RuleOrDie(),
-			rbac.NewRule("get").Groups(legacyRouteGroup).Resources("routes").RuleOrDie(),
-			rbac.NewRule("get").Groups(routeGroup).Resources("routes").RuleOrDie(),
-			eventsRule(),
-		},
-	})
-
-	// the controller needs to be bound to the roles it is going to try to create
-	bindControllerRole(InfraDefaultRoleBindingsControllerServiceAccountName, ImagePullerRoleName)
-	bindControllerRole(InfraDefaultRoleBindingsControllerServiceAccountName, ImageBuilderRoleName)
-	bindControllerRole(InfraDefaultRoleBindingsControllerServiceAccountName, DeployerRoleName)
-	addControllerRole(rbac.ClusterRole{
-		ObjectMeta: metav1.ObjectMeta{Name: saRolePrefix + InfraDefaultRoleBindingsControllerServiceAccountName},
-		Rules: []rbac.PolicyRule{
-			rbac.NewRule("create").Groups(rbacGroup).Resources("rolebindings").RuleOrDie(),
-			rbac.NewRule("get", "list", "watch").Groups(kapiGroup).Resources("namespaces").RuleOrDie(),
-			rbac.NewRule("get", "list", "watch").Groups(rbacGroup).Resources("rolebindings").RuleOrDie(),
-			eventsRule(),
-		},
-	})
-
-	addControllerRole(rbac.ClusterRole{
-		ObjectMeta: metav1.ObjectMeta{Name: saRolePrefix + InfraNamespaceSecurityAllocationControllerServiceAccountName},
-		Rules: []rbac.PolicyRule{
-			rbac.NewRule("get", "create", "update").Groups(securityGroup).Resources("rangeallocations").RuleOrDie(),
-			rbac.NewRule("get", "list", "watch", "update").Groups(kapiGroup).Resources("namespaces").RuleOrDie(),
+			rbac.NewRule("get", "list", "create", "delete").Groups(kapiGroup).Resources("secrets").RuleOrDie(),
+			rbac.NewRule("list").Groups(kapiGroup).Resources("services", "configmaps").RuleOrDie(),
+			rbac.NewRule("list").Groups(routeGroup).Resources("routes").RuleOrDie(),
 			eventsRule(),
 		},
 	})

@@ -1,5 +1,5 @@
 #FROM registry.access.redhat.com/openshift3/ose
-FROM openshift/origin-control-plane
+FROM openshift/origin
 
 LABEL name="projectatomic/atomic-registry-install" \
       vendor="Project Atomic" \

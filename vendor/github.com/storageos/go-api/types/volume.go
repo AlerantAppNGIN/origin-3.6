@@ -43,9 +43,6 @@ type Volume struct {
 	// Namespace is the object name and authentication scope, such as for teams and projects.
 	Namespace string `json:"namespace"`
 
-	// node selector (where volumes should land)
-	NodeSelector string `json:"nodeSelector"`
-
 	// Volume deployment information for the master volume.
 	// Read Only: true
 	Master *Deployment `json:"master,omitempty"`
@@ -53,9 +50,6 @@ type Volume struct {
 	// Flag indicating if the volume is mounted and in use.
 	// Read Only: true
 	Mounted bool `json:"mounted"`
-
-	// MountDevice, where the device is located
-	MountDevice string `json:"mountDevice"`
 
 	// Mountpoint, where the volume is mounted
 	Mountpoint string `json:"mountpoint"`
@@ -83,10 +77,6 @@ type Volume struct {
 	// Status message explaining current status.
 	// Read Only: true
 	StatusMessage string `json:"statusMessage"`
-
-	// mkfs performed on new volumes
-	MkfsDone   bool      `json:"mkfsDone"`
-	MkfsDoneAt time.Time `json:"mkfsDoneAt"`
 
 	// When the volume was created.
 	// Read Only: true

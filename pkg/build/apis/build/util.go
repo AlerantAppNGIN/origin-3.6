@@ -1,8 +1,10 @@
 package build
 
 import (
-	"github.com/openshift/origin/pkg/api/apihelpers"
 	"k8s.io/apimachinery/pkg/util/validation"
+	kapi "k8s.io/kubernetes/pkg/api"
+
+	"github.com/openshift/origin/pkg/util/namer"
 )
 
 const (
@@ -12,7 +14,7 @@ const (
 
 // GetBuildPodName returns name of the build pod.
 func GetBuildPodName(build *Build) string {
-	return apihelpers.GetPodName(build.Name, BuildPodSuffix)
+	return namer.GetPodName(build.Name, BuildPodSuffix)
 }
 
 func StrategyType(strategy BuildStrategy) string {
@@ -57,4 +59,10 @@ func LabelValue(name string) string {
 		return name
 	}
 	return name[:validation.DNS1123LabelMaxLength]
+}
+
+// GetBuildName returns the name of a Build associated with the
+// given Pod.
+func GetBuildName(pod *kapi.Pod) string {
+	return pod.Annotations[BuildAnnotation]
 }

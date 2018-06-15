@@ -11,7 +11,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	apirequest "k8s.io/apiserver/pkg/endpoints/request"
 	"k8s.io/apiserver/pkg/registry/rest"
-	kapihelper "k8s.io/kubernetes/pkg/apis/core/helper"
+	kapihelper "k8s.io/kubernetes/pkg/api/helper"
 
 	imageapi "github.com/openshift/origin/pkg/image/apis/image"
 	"github.com/openshift/origin/pkg/image/registry/image"
@@ -34,11 +34,11 @@ type REST struct {
 var _ rest.Creater = &REST{}
 
 // NewREST returns a new REST.
-func NewREST(imageRegistry image.Registry, imageStreamRegistry imagestream.Registry, registry imageapi.RegistryHostnameRetriever) *REST {
+func NewREST(imageRegistry image.Registry, imageStreamRegistry imagestream.Registry, defaultRegistry imageapi.DefaultRegistry) *REST {
 	return &REST{
 		imageRegistry:       imageRegistry,
 		imageStreamRegistry: imageStreamRegistry,
-		strategy:            NewStrategy(registry),
+		strategy:            NewStrategy(defaultRegistry),
 	}
 }
 
@@ -52,11 +52,8 @@ func (r *REST) New() runtime.Object {
 // with a resource conflict, the update will be retried if the newer
 // ImageStream has no tag diffs from the previous state. If tag diffs are
 // detected, the conflict error is returned.
-func (s *REST) Create(ctx apirequest.Context, obj runtime.Object, createValidation rest.ValidateObjectFunc, _ bool) (runtime.Object, error) {
+func (s *REST) Create(ctx apirequest.Context, obj runtime.Object, _ bool) (runtime.Object, error) {
 	if err := rest.BeforeCreate(s.strategy, ctx, obj); err != nil {
-		return nil, err
-	}
-	if err := createValidation(obj.DeepCopyObject()); err != nil {
 		return nil, err
 	}
 

@@ -3,13 +3,70 @@ package authorization
 import (
 	"fmt"
 	"strings"
+	"unicode"
 
-	"k8s.io/apimachinery/pkg/api/validation/path"
 	"k8s.io/apimachinery/pkg/util/sets"
-	kapi "k8s.io/kubernetes/pkg/apis/core"
-
-	"github.com/openshift/origin/pkg/authorization/apis/authorization/internal/serviceaccount"
+	"k8s.io/apiserver/pkg/authentication/serviceaccount"
+	"k8s.io/apiserver/pkg/authentication/user"
+	kapi "k8s.io/kubernetes/pkg/api"
+	"k8s.io/kubernetes/pkg/api/validation"
+	// uservalidation "github.com/openshift/origin/pkg/user/apis/user/validation"
 )
+
+// NormalizeResources expands all resource groups and forces all resources to lower case.
+// If the rawResources are already normalized, it returns the original set to avoid the
+// allocation and GC cost, since this is hit multiple times for every REST call.
+// That means you should NEVER MODIFY THE RESULT of this call.
+func NormalizeResources(rawResources sets.String) sets.String {
+	// we only need to expand groups if the exist and we don't create them with groups
+	// by default.  Only accept the cost of expansion if we're doing work.
+	needsNormalization := false
+	for currResource := range rawResources {
+		if needsNormalizing(currResource) {
+			needsNormalization = true
+			break
+		}
+
+	}
+	if !needsNormalization {
+		return rawResources
+	}
+
+	ret := sets.String{}
+	toVisit := rawResources.List()
+	visited := sets.String{}
+
+	for i := 0; i < len(toVisit); i++ {
+		currResource := toVisit[i]
+		if visited.Has(currResource) {
+			continue
+		}
+		visited.Insert(currResource)
+
+		if !strings.HasPrefix(currResource, resourceGroupPrefix) {
+			ret.Insert(strings.ToLower(currResource))
+			continue
+		}
+
+		if resourceTypes, exists := groupsToResources[currResource]; exists {
+			toVisit = append(toVisit, resourceTypes...)
+		}
+	}
+
+	return ret
+}
+
+func needsNormalizing(in string) bool {
+	if strings.HasPrefix(in, resourceGroupPrefix) {
+		return true
+	}
+	for _, r := range in {
+		if unicode.IsUpper(r) {
+			return true
+		}
+	}
+	return false
+}
 
 func (r PolicyRule) String() string {
 	return "PolicyRule" + r.CompactString()
@@ -47,6 +104,18 @@ func (r PolicyRule) CompactString() string {
 	return fmt.Sprintf(formatString, formatArgs...)
 }
 
+type PolicyBindingSorter []PolicyBinding
+
+func (s PolicyBindingSorter) Len() int {
+	return len(s)
+}
+func (s PolicyBindingSorter) Less(i, j int) bool {
+	return s[i].Name < s[j].Name
+}
+func (s PolicyBindingSorter) Swap(i, j int) {
+	s[i], s[j] = s[j], s[i]
+}
+
 type RoleBindingSorter []RoleBinding
 
 func (s RoleBindingSorter) Len() int {
@@ -59,7 +128,13 @@ func (s RoleBindingSorter) Swap(i, j int) {
 	s[i], s[j] = s[j], s[i]
 }
 
-func BuildSubjects(users, groups []string) []kapi.ObjectReference {
+func GetPolicyBindingName(policyRefNamespace string) string {
+	return fmt.Sprintf("%s:%s", policyRefNamespace, PolicyName)
+}
+
+var ClusterPolicyBindingName = GetPolicyBindingName("")
+
+func BuildSubjects(users, groups []string, userNameValidator, groupNameValidator validation.ValidateNameFunc) []kapi.ObjectReference {
 	subjects := []kapi.ObjectReference{}
 
 	for _, user := range users {
@@ -69,61 +144,29 @@ func BuildSubjects(users, groups []string) []kapi.ObjectReference {
 			continue
 		}
 
-		kind := determineUserKind(user)
+		kind := determineUserKind(user, userNameValidator)
 		subjects = append(subjects, kapi.ObjectReference{Kind: kind, Name: user})
 	}
 
 	for _, group := range groups {
-		kind := determineGroupKind(group)
+		kind := determineGroupKind(group, groupNameValidator)
 		subjects = append(subjects, kapi.ObjectReference{Kind: kind, Name: group})
 	}
 
 	return subjects
 }
 
-// duplicated from the user/validation package.  We need to avoid api dependencies on validation from our types.
-// These validators are stable and realistically can't change.
-func validateUserName(name string, _ bool) []string {
-	if reasons := path.ValidatePathSegmentName(name, false); len(reasons) != 0 {
-		return reasons
-	}
-
-	if strings.Contains(name, ":") {
-		return []string{`may not contain ":"`}
-	}
-	if name == "~" {
-		return []string{`may not equal "~"`}
-	}
-	return nil
-}
-
-// duplicated from the user/validation package.  We need to avoid api dependencies on validation from our types.
-// These validators are stable and realistically can't change.
-func validateGroupName(name string, _ bool) []string {
-	if reasons := path.ValidatePathSegmentName(name, false); len(reasons) != 0 {
-		return reasons
-	}
-
-	if strings.Contains(name, ":") {
-		return []string{`may not contain ":"`}
-	}
-	if name == "~" {
-		return []string{`may not equal "~"`}
-	}
-	return nil
-}
-
-func determineUserKind(user string) string {
+func determineUserKind(user string, userNameValidator validation.ValidateNameFunc) string {
 	kind := UserKind
-	if len(validateUserName(user, false)) != 0 {
+	if len(userNameValidator(user, false)) != 0 {
 		kind = SystemUserKind
 	}
 	return kind
 }
 
-func determineGroupKind(group string) string {
+func determineGroupKind(group string, groupNameValidator validation.ValidateNameFunc) string {
 	kind := GroupKind
-	if len(validateGroupName(group, false)) != 0 {
+	if len(groupNameValidator(group, false)) != 0 {
 		kind = SystemGroupKind
 	}
 	return kind
@@ -187,6 +230,80 @@ func SubjectsStrings(currentNamespace string, subjects []kapi.ObjectReference) (
 	}
 
 	return users, groups, sas, others
+}
+
+// SubjectsContainUser returns true if the provided subjects contain the named user. currentNamespace
+// is used to identify service accounts that are defined in a relative fashion.
+func SubjectsContainUser(subjects []kapi.ObjectReference, currentNamespace string, user string) bool {
+	if !strings.HasPrefix(user, serviceaccount.ServiceAccountUsernamePrefix) {
+		for _, subject := range subjects {
+			switch subject.Kind {
+			case UserKind, SystemUserKind:
+				if user == subject.Name {
+					return true
+				}
+			}
+		}
+		return false
+	}
+
+	for _, subject := range subjects {
+		switch subject.Kind {
+		case ServiceAccountKind:
+			namespace := currentNamespace
+			if len(subject.Namespace) > 0 {
+				namespace = subject.Namespace
+			}
+			if len(namespace) == 0 {
+				continue
+			}
+			if user == serviceaccount.MakeUsername(namespace, subject.Name) {
+				return true
+			}
+
+		case UserKind, SystemUserKind:
+			if user == subject.Name {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// SubjectsContainAnyGroup returns true if the provided subjects any of the named groups.
+func SubjectsContainAnyGroup(subjects []kapi.ObjectReference, groups []string) bool {
+	for _, subject := range subjects {
+		switch subject.Kind {
+		case GroupKind, SystemGroupKind:
+			for _, group := range groups {
+				if group == subject.Name {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func AddUserToSAR(user user.Info, sar *SubjectAccessReview) *SubjectAccessReview {
+	origScopes := user.GetExtra()[ScopesKey]
+	scopes := make([]string, len(origScopes), len(origScopes))
+	copy(scopes, origScopes)
+
+	sar.User = user.GetName()
+	sar.Groups = sets.NewString(user.GetGroups()...)
+	sar.Scopes = scopes
+	return sar
+}
+func AddUserToLSAR(user user.Info, lsar *LocalSubjectAccessReview) *LocalSubjectAccessReview {
+	origScopes := user.GetExtra()[ScopesKey]
+	scopes := make([]string, len(origScopes), len(origScopes))
+	copy(scopes, origScopes)
+
+	lsar.User = user.GetName()
+	lsar.Groups = sets.NewString(user.GetGroups()...)
+	lsar.Scopes = scopes
+	return lsar
 }
 
 // +gencopy=false

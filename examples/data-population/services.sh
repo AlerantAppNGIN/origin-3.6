@@ -15,7 +15,7 @@ SERVICE=$(dirname "${BASH_SOURCE}")/service.yaml
 
 for ((i=1; i <=$NUM_PROJECTS; i++))
 do
-  oc create -f $SERVICE --namespace=${PROJECT_NAME_PREFIX}${i}
+  openshift cli create -f $SERVICE --namespace=${PROJECT_NAME_PREFIX}${i}
 done
 
 echo "Done"

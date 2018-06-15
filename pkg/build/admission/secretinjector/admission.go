@@ -10,10 +10,10 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apiserver/pkg/admission"
 	restclient "k8s.io/client-go/rest"
-	api "k8s.io/kubernetes/pkg/apis/core"
+	"k8s.io/kubernetes/pkg/api"
 
+	authclient "github.com/openshift/origin/pkg/auth/client"
 	buildapi "github.com/openshift/origin/pkg/build/apis/build"
-	authclient "github.com/openshift/origin/pkg/client/impersonatingclient"
 	oadmission "github.com/openshift/origin/pkg/cmd/server/admission"
 	"github.com/openshift/origin/pkg/util/urlpattern"
 )
@@ -103,6 +103,6 @@ func (si *secretInjector) SetRESTClientConfig(restClientConfig restclient.Config
 	si.restClientConfig = restClientConfig
 }
 
-func (si *secretInjector) ValidateInitialization() error {
+func (si *secretInjector) Validate() error {
 	return nil
 }

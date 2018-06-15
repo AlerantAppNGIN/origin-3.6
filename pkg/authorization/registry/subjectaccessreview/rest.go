@@ -35,7 +35,7 @@ func (r *REST) New() runtime.Object {
 }
 
 // Create registers a given new ResourceAccessReview instance to r.registry.
-func (r *REST) Create(ctx apirequest.Context, obj runtime.Object, _ rest.ValidateObjectFunc, _ bool) (runtime.Object, error) {
+func (r *REST) Create(ctx apirequest.Context, obj runtime.Object, _ bool) (runtime.Object, error) {
 	subjectAccessReview, ok := obj.(*authorizationapi.SubjectAccessReview)
 	if !ok {
 		return nil, kapierrors.NewBadRequest(fmt.Sprintf("not a subjectAccessReview: %#v", obj))
@@ -75,7 +75,7 @@ func (r *REST) Create(ctx apirequest.Context, obj runtime.Object, _ rest.Validat
 				newExtra[k] = nil
 				continue
 			}
-			newSlice := make([]string, len(v))
+			newSlice := make([]string, len(v), len(v))
 			copy(newSlice, v)
 			newExtra[k] = newSlice
 		}
@@ -108,10 +108,10 @@ func (r *REST) Create(ctx apirequest.Context, obj runtime.Object, _ rest.Validat
 	}
 
 	attributes := util.ToDefaultAuthorizationAttributes(userToCheck, subjectAccessReview.Action.Namespace, subjectAccessReview.Action)
-	authorized, reason, err := r.authorizer.Authorize(attributes)
+	allowed, reason, err := r.authorizer.Authorize(attributes)
 	response := &authorizationapi.SubjectAccessReviewResponse{
 		Namespace: subjectAccessReview.Action.Namespace,
-		Allowed:   authorized == kauthorizer.DecisionAllow,
+		Allowed:   allowed,
 		Reason:    reason,
 	}
 	if err != nil {
@@ -144,12 +144,12 @@ func (r *REST) isAllowed(user user.Info, sar *authorizationapi.SubjectAccessRevi
 		}
 	}
 
-	authorized, reason, err := r.authorizer.Authorize(localSARAttributes)
+	allowed, reason, err := r.authorizer.Authorize(localSARAttributes)
 
 	if err != nil {
 		return kapierrors.NewForbidden(authorizationapi.Resource(localSARAttributes.GetResource()), localSARAttributes.GetName(), err)
 	}
-	if authorized != kauthorizer.DecisionAllow {
+	if !allowed {
 		forbiddenError := kapierrors.NewForbidden(authorizationapi.Resource(localSARAttributes.GetResource()), localSARAttributes.GetName(), errors.New("") /*discarded*/)
 		forbiddenError.ErrStatus.Message = reason
 		return forbiddenError

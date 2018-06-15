@@ -42,7 +42,6 @@ type MetricKind string
 
 const (
 	CpuUsageMetrics        MetricKind = "cpu"
-	PerCpuUsageMetrics     MetricKind = "percpu"
 	MemoryUsageMetrics     MetricKind = "memory"
 	CpuLoadMetrics         MetricKind = "cpuLoad"
 	DiskIOMetrics          MetricKind = "diskIO"

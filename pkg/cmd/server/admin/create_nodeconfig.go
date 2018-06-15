@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"net"
 	"os"
 	"path"
+	"strconv"
 
 	"github.com/spf13/cobra"
 
@@ -14,15 +16,14 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/util/cert"
-	"k8s.io/kubernetes/pkg/api/legacyscheme"
-	kapi "k8s.io/kubernetes/pkg/apis/core"
+	kapi "k8s.io/kubernetes/pkg/api"
 	kcmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
 	"k8s.io/kubernetes/pkg/master/ports"
 
-	"github.com/openshift/library-go/pkg/crypto"
 	"github.com/openshift/origin/pkg/cmd/flagtypes"
-	configapi "github.com/openshift/origin/pkg/cmd/server/apis/config"
-	latestconfigapi "github.com/openshift/origin/pkg/cmd/server/apis/config/latest"
+	configapi "github.com/openshift/origin/pkg/cmd/server/api"
+	latestconfigapi "github.com/openshift/origin/pkg/cmd/server/api/latest"
+	"github.com/openshift/origin/pkg/cmd/server/crypto"
 	cmdutil "github.com/openshift/origin/pkg/cmd/util"
 	"github.com/openshift/origin/pkg/cmd/util/variable"
 )
@@ -45,8 +46,6 @@ type CreateNodeConfigOptions struct {
 	DNSRecursiveResolvConf string
 	ListenAddr             flagtypes.Addr
 
-	KubeletArguments map[string][]string
-
 	ClientCertFile    string
 	ClientKeyFile     string
 	ServerCertFile    string
@@ -68,7 +67,7 @@ func NewCommandNodeConfig(commandName string, fullName string, out io.Writer) *c
 		Short: "Create a configuration bundle for a node",
 		Run: func(cmd *cobra.Command, args []string) {
 			if err := options.Validate(args); err != nil {
-				kcmdutil.CheckErr(kcmdutil.UsageErrorf(cmd, err.Error()))
+				kcmdutil.CheckErr(kcmdutil.UsageError(cmd, err.Error()))
 			}
 
 			if _, err := options.CreateNodeFolder(); err != nil {
@@ -402,7 +401,7 @@ func (o CreateNodeConfigOptions) MakeNodeConfig(serverCertFile, serverKeyFile, n
 		NodeName: o.NodeName,
 
 		ServingInfo: configapi.ServingInfo{
-			BindAddress: o.ListenAddr.HostPort(ports.KubeletPort),
+			BindAddress: net.JoinHostPort(o.ListenAddr.Host, strconv.Itoa(ports.KubeletPort)),
 		},
 
 		VolumeDirectory:     o.VolumeDir,
@@ -422,8 +421,6 @@ func (o CreateNodeConfigOptions) MakeNodeConfig(serverCertFile, serverKeyFile, n
 		NetworkConfig: configapi.NodeNetworkConfig{
 			NetworkPluginName: o.NetworkPluginName,
 		},
-
-		KubeletArguments: o.KubeletArguments,
 
 		EnableUnidling: true,
 	}
@@ -484,9 +481,9 @@ func (o CreateNodeConfigOptions) MakeNodeJSON(nodeJSONFile string) error {
 	node := &kapi.Node{}
 	node.Name = o.NodeName
 
-	groupMeta := legacyscheme.Registry.GroupOrDie(kapi.GroupName)
+	groupMeta := kapi.Registry.GroupOrDie(kapi.GroupName)
 
-	json, err := runtime.Encode(legacyscheme.Codecs.LegacyCodec(groupMeta.GroupVersions[0]), node)
+	json, err := runtime.Encode(kapi.Codecs.LegacyCodec(groupMeta.GroupVersions[0]), node)
 	if err != nil {
 		return err
 	}

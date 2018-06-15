@@ -7,7 +7,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	kapi "k8s.io/kubernetes/pkg/apis/core"
+	kapi "k8s.io/kubernetes/pkg/api"
 
 	g "github.com/onsi/ginkgo"
 	o "github.com/onsi/gomega"
@@ -21,7 +21,7 @@ import (
 
 const limitRangeName = "limits"
 
-var _ = g.Describe("[Feature:ImageQuota][registry][Serial] Image limit range", func() {
+var _ = g.Describe("[Feature:ImageQuota] Image limit range", func() {
 	defer g.GinkgoRecover()
 	var oc = exutil.NewCLI("limitrange-admission", exutil.KubeConfigPath())
 
@@ -40,9 +40,8 @@ var _ = g.Describe("[Feature:ImageQuota][registry][Serial] Image limit range", f
 		deleteTestImagesAndStreams(oc)
 	}
 
-	g.It(fmt.Sprintf("[Skipped] should deny a push of built image exceeding %s limit", imageapi.LimitTypeImage), func() {
-		g.Skip("FIXME: fill image metadata for schema1 in the registry")
-
+	g.It(fmt.Sprintf("should deny a push of built image exceeding %s limit", imageapi.LimitTypeImage), func() {
+		oc.SetOutputDir(exutil.TestContext.OutputDir)
 		defer tearDown(oc)
 
 		dClient, err := testutil.NewDockerClient()
@@ -71,7 +70,7 @@ var _ = g.Describe("[Feature:ImageQuota][registry][Serial] Image limit range", f
 	})
 
 	g.It(fmt.Sprintf("should deny a push of built image exceeding limit on %s resource", imageapi.ResourceImageStreamImages), func() {
-
+		oc.SetOutputDir(exutil.TestContext.OutputDir)
 		defer tearDown(oc)
 
 		limits := kapi.ResourceList{
@@ -115,7 +114,7 @@ var _ = g.Describe("[Feature:ImageQuota][registry][Serial] Image limit range", f
 		o.Expect(err).NotTo(o.HaveOccurred())
 
 		g.By(`removing tag "second" from "another" image stream`)
-		err = oc.ImageClient().Image().ImageStreamTags(oc.Namespace()).Delete("another:second", nil)
+		err = oc.Client().ImageStreamTags(oc.Namespace()).Delete("another", "second")
 		o.Expect(err).NotTo(o.HaveOccurred())
 
 		g.By(fmt.Sprintf("trying to push image below limits %v", limits))
@@ -124,7 +123,7 @@ var _ = g.Describe("[Feature:ImageQuota][registry][Serial] Image limit range", f
 	})
 
 	g.It(fmt.Sprintf("should deny a docker image reference exceeding limit on %s resource", imageapi.ResourceImageStreamTags), func() {
-
+		oc.SetOutputDir(exutil.TestContext.OutputDir)
 		defer tearDown(oc)
 
 		tag2Image, err := buildAndPushTestImagesTo(oc, "src", "tag", 2)
@@ -150,7 +149,7 @@ var _ = g.Describe("[Feature:ImageQuota][registry][Serial] Image limit range", f
 		o.Expect(err).NotTo(o.HaveOccurred())
 
 		g.By(fmt.Sprintf("trying to tag a docker image exceeding limit %v", limit))
-		is, err := oc.ImageClient().Image().ImageStreams(oc.Namespace()).Get("stream", metav1.GetOptions{})
+		is, err := oc.Client().ImageStreams(oc.Namespace()).Get("stream", metav1.GetOptions{})
 		o.Expect(err).NotTo(o.HaveOccurred())
 		is.Spec.Tags["foo"] = imageapi.TagReference{
 			Name: "foo",
@@ -162,12 +161,12 @@ var _ = g.Describe("[Feature:ImageQuota][registry][Serial] Image limit range", f
 				Insecure: true,
 			},
 		}
-		_, err = oc.ImageClient().Image().ImageStreams(oc.Namespace()).Update(is)
+		_, err = oc.Client().ImageStreams(oc.Namespace()).Update(is)
 		o.Expect(err).To(o.HaveOccurred())
 		o.Expect(quotautil.IsErrorQuotaExceeded(err)).Should(o.Equal(true))
 
 		g.By("re-tagging the image under different tag")
-		is, err = oc.ImageClient().Image().ImageStreams(oc.Namespace()).Get("stream", metav1.GetOptions{})
+		is, err = oc.Client().ImageStreams(oc.Namespace()).Get("stream", metav1.GetOptions{})
 		o.Expect(err).NotTo(o.HaveOccurred())
 		is.Spec.Tags["duplicate"] = imageapi.TagReference{
 			Name: "duplicate",
@@ -179,11 +178,12 @@ var _ = g.Describe("[Feature:ImageQuota][registry][Serial] Image limit range", f
 				Insecure: true,
 			},
 		}
-		_, err = oc.ImageClient().Image().ImageStreams(oc.Namespace()).Update(is)
+		_, err = oc.Client().ImageStreams(oc.Namespace()).Update(is)
 		o.Expect(err).NotTo(o.HaveOccurred())
 	})
 
 	g.It(fmt.Sprintf("should deny an import of a repository exceeding limit on %s resource", imageapi.ResourceImageStreamTags), func() {
+		oc.SetOutputDir(exutil.TestContext.OutputDir)
 
 		maxBulkImport, err := getMaxImagesBulkImportedPerRepository()
 		if err != nil {
@@ -243,7 +243,7 @@ func buildAndPushTestImagesTo(oc *exutil.CLI, isName string, tagPrefix string, n
 		if err != nil {
 			return nil, err
 		}
-		ist, err := oc.ImageClient().Image().ImageStreamTags(oc.Namespace()).Get(isName+":"+tag, metav1.GetOptions{})
+		ist, err := oc.Client().ImageStreamTags(oc.Namespace()).Get(isName, tag)
 		if err != nil {
 			return nil, err
 		}

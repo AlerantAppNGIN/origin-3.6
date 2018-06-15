@@ -5,7 +5,6 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	apirequest "k8s.io/apiserver/pkg/endpoints/request"
-	apiserverrest "k8s.io/apiserver/pkg/registry/rest"
 
 	buildapi "github.com/openshift/origin/pkg/build/apis/build"
 	_ "github.com/openshift/origin/pkg/build/apis/build/install"
@@ -22,7 +21,7 @@ func TestCreateClone(t *testing.T) {
 		},
 	}}}
 
-	_, err := rest.Create(apirequest.NewDefaultContext(), &buildapi.BuildRequest{ObjectMeta: metav1.ObjectMeta{Name: "name"}}, apiserverrest.ValidateAllObjectFunc, false)
+	_, err := rest.Create(apirequest.NewDefaultContext(), &buildapi.BuildRequest{ObjectMeta: metav1.ObjectMeta{Name: "name"}}, false)
 	if err != nil {
 		t.Errorf("Unexpected error %v", err)
 	}
@@ -30,7 +29,7 @@ func TestCreateClone(t *testing.T) {
 
 func TestCreateCloneValidationError(t *testing.T) {
 	rest := CloneREST{&generator.BuildGenerator{}}
-	_, err := rest.Create(apirequest.NewDefaultContext(), &buildapi.BuildRequest{}, apiserverrest.ValidateAllObjectFunc, false)
+	_, err := rest.Create(apirequest.NewDefaultContext(), &buildapi.BuildRequest{}, false)
 	if err == nil {
 		t.Error("Expected object got none!")
 	}

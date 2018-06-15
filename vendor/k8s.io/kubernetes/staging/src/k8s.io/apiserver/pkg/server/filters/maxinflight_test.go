@@ -24,6 +24,7 @@ import (
 	"sync"
 	"testing"
 
+	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apiserver/pkg/authentication/user"
 	apifilters "k8s.io/apiserver/pkg/endpoints/filters"
@@ -147,7 +148,7 @@ func TestMaxInFlightNonMutating(t *testing.T) {
 
 	// Do this multiple times to show that rate limit rejected requests don't block.
 	for i := 0; i < 2; i++ {
-		if err := expectHTTPGet(server.URL, http.StatusTooManyRequests); err != nil {
+		if err := expectHTTPGet(server.URL, errors.StatusTooManyRequests); err != nil {
 			t.Error(err)
 		}
 	}
@@ -212,7 +213,7 @@ func TestMaxInFlightMutating(t *testing.T) {
 
 	// Do this multiple times to show that rate limit rejected requests don't block.
 	for i := 0; i < 2; i++ {
-		if err := expectHTTPPost(server.URL+"/foo/bar/", http.StatusTooManyRequests); err != nil {
+		if err := expectHTTPPost(server.URL+"/foo/bar/", errors.StatusTooManyRequests); err != nil {
 			t.Error(err)
 		}
 	}

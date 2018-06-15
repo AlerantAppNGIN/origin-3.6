@@ -1,15 +1,15 @@
-// Copyright (c) 2014-2017 TSUYUSATO Kitsune
+// Copyright (c) 2014 TSUYUSATO Kitsune
 // This software is released under the MIT License.
 // http://opensource.org/licenses/mit-license.php
 
-// Package heredoc provides creation of here-documents from raw strings.
+// Package heredoc provides the here-document with keeping indent.
 //
 // Golang supports raw-string syntax.
 //     doc := `
 //     	Foo
 //     	Bar
 //     `
-// But raw-string cannot recognize indentation. Thus such content is an indented string, equivalent to
+// But raw-string cannot recognize indent. Thus such content is indented string, equivalent to
 //     "\n\tFoo\n\tBar\n"
 // I dont't want this!
 //
@@ -18,7 +18,7 @@
 //     	Foo
 //     	Bar
 //     `)
-// Is equivalent to
+// It is equivalent to
 //     "Foo\nBar\n"
 package heredoc
 
@@ -28,9 +28,11 @@ import (
 	"unicode"
 )
 
-const maxInt = int(^uint(0) >> 1)
-
-// Doc returns un-indented string as here-document.
+// heredoc.Doc retutns unindented string as here-document.
+//
+// Process of making here-document:
+//     1. Find most little indent size. (Skip empty lines)
+//     2. Remove this indents of lines.
 func Doc(raw string) string {
 	skipFirstLine := false
 	if raw[0] == '\n' {
@@ -39,18 +41,10 @@ func Doc(raw string) string {
 		skipFirstLine = true
 	}
 
+	minIndentSize := int(^uint(0) >> 1) // Max value of type int
 	lines := strings.Split(raw, "\n")
 
-	minIndentSize := getMinIndent(lines, skipFirstLine)
-	lines = removeIndentation(lines, minIndentSize, skipFirstLine)
-
-	return strings.Join(lines, "\n")
-}
-
-// getMinIndent calculates the minimum indentation in lines, excluding empty lines.
-func getMinIndent(lines []string, skipFirstLine bool) int {
-	minIndentSize := maxInt
-
+	// 1.
 	for i, line := range lines {
 		if i == 0 && skipFirstLine {
 			continue
@@ -73,26 +67,23 @@ func getMinIndent(lines []string, skipFirstLine bool) int {
 			minIndentSize = indentSize
 		}
 	}
-	return minIndentSize
-}
 
-// removeIndentation removes n characters from the front of each line in lines.
-// Skips first line if skipFirstLine is true, skips empty lines.
-func removeIndentation(lines []string, n int, skipFirstLine bool) []string {
+	// 2.
 	for i, line := range lines {
 		if i == 0 && skipFirstLine {
 			continue
 		}
 
-		if len(lines[i]) >= n {
-			lines[i] = line[n:]
+		if len(lines[i]) >= minIndentSize {
+			lines[i] = line[minIndentSize:]
 		}
 	}
-	return lines
+
+	return strings.Join(lines, "\n")
 }
 
-// Docf returns unindented and formatted string as here-document.
-// Formatting is done as for fmt.Printf().
+// heredoc.Docf returns unindented and formatted string as here-document.
+// This format is same with package fmt's format.
 func Docf(raw string, args ...interface{}) string {
 	return fmt.Sprintf(Doc(raw), args...)
 }

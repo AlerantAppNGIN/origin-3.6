@@ -4,22 +4,21 @@ import (
 	"net"
 	"strconv"
 
+	configapi "github.com/openshift/origin/pkg/cmd/server/api"
+	"github.com/openshift/origin/pkg/cmd/server/crypto"
+	oauthapiserver "github.com/openshift/origin/pkg/oauth/apiserver"
 	apiserveroptions "k8s.io/apiserver/pkg/server/options"
 	utilflag "k8s.io/apiserver/pkg/util/flag"
-
-	routeclient "github.com/openshift/client-go/route/clientset/versioned/typed/route/v1"
-	"github.com/openshift/library-go/pkg/crypto"
-	"github.com/openshift/origin/pkg/oauthserver/oauthserver"
 )
 
 // TODO this is taking a very large config for a small piece of it.  The information must be broken up at some point so that
 // we can run this in a pod.  This is an indication of leaky abstraction because it spent too much time in openshift start
-func NewOAuthServerConfigFromMasterConfig(masterConfig *MasterConfig, listener net.Listener) (*oauthserver.OAuthServerConfig, error) {
+func NewOAuthServerConfigFromMasterConfig(masterConfig *MasterConfig) (*oauthapiserver.OAuthServerConfig, error) {
 	options := masterConfig.Options
 	servingConfig := options.ServingInfo
 	oauthConfig := masterConfig.Options.OAuthConfig
 
-	oauthServerConfig, err := oauthserver.NewOAuthServerConfig(*oauthConfig, &masterConfig.PrivilegedLoopbackClientConfig)
+	oauthServerConfig, err := oauthapiserver.NewOAuthServerConfig(*oauthConfig, &masterConfig.PrivilegedLoopbackClientConfig)
 	if err != nil {
 		return nil, err
 	}
@@ -27,7 +26,7 @@ func NewOAuthServerConfigFromMasterConfig(masterConfig *MasterConfig, listener n
 	oauthServerConfig.GenericConfig.CorsAllowedOriginList = options.CORSAllowedOrigins
 
 	// TODO pull this out into a function
-	host, portString, err := net.SplitHostPort(servingConfig.BindAddress)
+	_, portString, err := net.SplitHostPort(servingConfig.BindAddress)
 	if err != nil {
 		return nil, err
 	}
@@ -36,9 +35,6 @@ func NewOAuthServerConfigFromMasterConfig(masterConfig *MasterConfig, listener n
 		return nil, err
 	}
 	secureServingOptions := apiserveroptions.SecureServingOptions{}
-	secureServingOptions.Listener = listener
-	secureServingOptions.BindAddress = net.ParseIP(host)
-	secureServingOptions.BindNetwork = servingConfig.BindNetwork
 	secureServingOptions.BindPort = port
 	secureServingOptions.ServerCert.CertKey.CertFile = servingConfig.ServerCert.CertFile
 	secureServingOptions.ServerCert.CertKey.KeyFile = servingConfig.ServerCert.KeyFile
@@ -50,22 +46,23 @@ func NewOAuthServerConfigFromMasterConfig(masterConfig *MasterConfig, listener n
 		}
 		secureServingOptions.SNICertKeys = append(secureServingOptions.SNICertKeys, sniCert)
 	}
-	if err := secureServingOptions.ApplyTo(&oauthServerConfig.GenericConfig.Config.SecureServing); err != nil {
+	if err := secureServingOptions.ApplyTo(oauthServerConfig.GenericConfig); err != nil {
 		return nil, err
 	}
-	oauthServerConfig.GenericConfig.SecureServing.MinTLSVersion = crypto.TLSVersionOrDie(servingConfig.MinTLSVersion)
-	oauthServerConfig.GenericConfig.SecureServing.CipherSuites = crypto.CipherSuitesOrDie(servingConfig.CipherSuites)
+	oauthServerConfig.GenericConfig.SecureServingInfo.BindAddress = servingConfig.BindAddress
+	oauthServerConfig.GenericConfig.SecureServingInfo.BindNetwork = servingConfig.BindNetwork
+	oauthServerConfig.GenericConfig.SecureServingInfo.MinTLSVersion = crypto.TLSVersionOrDie(servingConfig.MinTLSVersion)
+	oauthServerConfig.GenericConfig.SecureServingInfo.CipherSuites = crypto.CipherSuitesOrDie(servingConfig.CipherSuites)
 
-	routeClient, err := routeclient.NewForConfig(&masterConfig.PrivilegedLoopbackClientConfig)
-	if err != nil {
-		return nil, err
-	}
+	oauthServerConfig.RESTOptionsGetter = masterConfig.RESTOptionsGetter
 	// TODO pass a privileged client config through during construction.  It is NOT a loopback client.
-	oauthServerConfig.ExtraOAuthConfig.RouteClient = routeClient
-	oauthServerConfig.ExtraOAuthConfig.KubeClient = masterConfig.PrivilegedLoopbackKubernetesClientsetExternal
+	oauthServerConfig.OpenShiftClient = masterConfig.PrivilegedLoopbackOpenShiftClient
+	oauthServerConfig.KubeClient = masterConfig.PrivilegedLoopbackKubernetesClientsetInternal
 
 	// Build the list of valid redirect_uri prefixes for a login using the openshift-web-console client to redirect to
-	oauthServerConfig.ExtraOAuthConfig.AssetPublicAddresses = []string{oauthConfig.AssetPublicURL}
+	if !options.DisabledFeatures.Has(configapi.FeatureWebConsole) {
+		oauthServerConfig.AssetPublicAddresses = []string{oauthConfig.AssetPublicURL}
+	}
 
 	return oauthServerConfig, nil
 }

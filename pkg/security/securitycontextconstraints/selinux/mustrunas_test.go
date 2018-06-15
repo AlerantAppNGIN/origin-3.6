@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	api "k8s.io/kubernetes/pkg/apis/core"
+	"k8s.io/kubernetes/pkg/api"
 
 	securityapi "github.com/openshift/origin/pkg/security/apis/security"
 )
@@ -62,15 +62,9 @@ func TestMustRunAsValidate(t *testing.T) {
 		return &api.SELinuxOptions{
 			User:  "user",
 			Role:  "role",
-			Level: "s0:c0,c6",
+			Level: "level",
 			Type:  "type",
 		}
-	}
-
-	newValidOptsWithLevel := func(level string) *api.SELinuxOptions {
-		opts := newValidOpts()
-		opts.Level = level
-		return opts
 	}
 
 	role := newValidOpts()
@@ -79,64 +73,55 @@ func TestMustRunAsValidate(t *testing.T) {
 	user := newValidOpts()
 	user.User = "invalid"
 
+	level := newValidOpts()
+	level.Level = "invalid"
+
 	seType := newValidOpts()
 	seType.Type = "invalid"
 
-	validOpts := newValidOpts()
-
 	tests := map[string]struct {
-		podSeLinux  *api.SELinuxOptions
-		sccSeLinux  *api.SELinuxOptions
+		seLinux     *api.SELinuxOptions
 		expectedMsg string
 	}{
 		"invalid role": {
-			podSeLinux:  role,
-			sccSeLinux:  validOpts,
-			expectedMsg: "role: Invalid value",
+			seLinux:     role,
+			expectedMsg: "does not match required role",
 		},
 		"invalid user": {
-			podSeLinux:  user,
-			sccSeLinux:  validOpts,
-			expectedMsg: "user: Invalid value",
+			seLinux:     user,
+			expectedMsg: "does not match required user",
 		},
-		"levels are not equal": {
-			podSeLinux:  newValidOptsWithLevel("s0"),
-			sccSeLinux:  newValidOptsWithLevel("s0:c1,c2"),
-			expectedMsg: "level: Invalid value",
+		"invalid level": {
+			seLinux:     level,
+			expectedMsg: "does not match required level",
 		},
-		"levels differ by sensitivity": {
-			podSeLinux:  newValidOptsWithLevel("s0:c6"),
-			sccSeLinux:  newValidOptsWithLevel("s1:c6"),
-			expectedMsg: "level: Invalid value",
-		},
-		"levels differ by categories": {
-			podSeLinux:  newValidOptsWithLevel("s0:c0,c8"),
-			sccSeLinux:  newValidOptsWithLevel("s0:c1,c7"),
-			expectedMsg: "level: Invalid value",
+		"invalid type": {
+			seLinux:     seType,
+			expectedMsg: "does not match required type",
 		},
 		"valid": {
-			podSeLinux:  validOpts,
-			sccSeLinux:  validOpts,
-			expectedMsg: "",
-		},
-		"valid with different order of categories": {
-			podSeLinux:  newValidOptsWithLevel("s0:c6,c0"),
-			sccSeLinux:  validOpts,
+			seLinux:     newValidOpts(),
 			expectedMsg: "",
 		},
 	}
 
+	opts := &securityapi.SELinuxContextStrategyOptions{
+		SELinuxOptions: newValidOpts(),
+	}
+
 	for name, tc := range tests {
-		opts := &securityapi.SELinuxContextStrategyOptions{
-			SELinuxOptions: tc.sccSeLinux,
-		}
 		mustRunAs, err := NewMustRunAs(opts)
 		if err != nil {
 			t.Errorf("unexpected error initializing NewMustRunAs for testcase %s: %#v", name, err)
 			continue
 		}
+		container := &api.Container{
+			SecurityContext: &api.SecurityContext{
+				SELinuxOptions: tc.seLinux,
+			},
+		}
 
-		errs := mustRunAs.Validate(nil, nil, nil, tc.podSeLinux)
+		errs := mustRunAs.Validate(nil, container)
 		//should've passed but didn't
 		if len(tc.expectedMsg) == 0 && len(errs) > 0 {
 			t.Errorf("%s expected no errors but received %v", name, errs)

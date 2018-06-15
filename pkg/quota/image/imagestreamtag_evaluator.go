@@ -9,12 +9,12 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	kadmission "k8s.io/apiserver/pkg/admission"
-	kapi "k8s.io/kubernetes/pkg/apis/core"
+	kapi "k8s.io/kubernetes/pkg/api"
 	kquota "k8s.io/kubernetes/pkg/quota"
 	"k8s.io/kubernetes/pkg/quota/generic"
 
+	osclient "github.com/openshift/origin/pkg/client"
 	imageapi "github.com/openshift/origin/pkg/image/apis/image"
-	imageclient "github.com/openshift/origin/pkg/image/generated/internalclientset/typed/image/internalversion"
 	imageinternalversion "github.com/openshift/origin/pkg/image/generated/listers/image/internalversion"
 )
 
@@ -23,16 +23,16 @@ var imageStreamTagResources = []kapi.ResourceName{
 }
 
 type imageStreamTagEvaluator struct {
-	store     imageinternalversion.ImageStreamLister
-	istGetter imageclient.ImageStreamTagsGetter
+	store         imageinternalversion.ImageStreamLister
+	istNamespacer osclient.ImageStreamTagsNamespacer
 }
 
 // NewImageStreamTagEvaluator computes resource usage of ImageStreamsTags. Its sole purpose is to handle
 // UPDATE admission operations on imageStreamTags resource.
-func NewImageStreamTagEvaluator(store imageinternalversion.ImageStreamLister, istGetter imageclient.ImageStreamTagsGetter) kquota.Evaluator {
+func NewImageStreamTagEvaluator(store imageinternalversion.ImageStreamLister, istNamespacer osclient.ImageStreamTagsNamespacer) kquota.Evaluator {
 	return &imageStreamTagEvaluator{
-		store:     store,
-		istGetter: istGetter,
+		store:         store,
+		istNamespacer: istNamespacer,
 	}
 }
 
@@ -44,12 +44,11 @@ func (i *imageStreamTagEvaluator) Constraints(required []kapi.ResourceName, obje
 	return nil
 }
 
-func (i *imageStreamTagEvaluator) GroupResource() schema.GroupResource {
-	return imageapi.Resource("imagestreamtags")
+func (i *imageStreamTagEvaluator) GroupKind() schema.GroupKind {
+	return imageapi.Kind("ImageStreamTag")
 }
 
-func (i *imageStreamTagEvaluator) Handles(a kadmission.Attributes) bool {
-	operation := a.GetOperation()
+func (i *imageStreamTagEvaluator) Handles(operation kadmission.Operation) bool {
 	return operation == kadmission.Create || operation == kadmission.Update
 }
 

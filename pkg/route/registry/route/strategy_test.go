@@ -9,8 +9,9 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/apiserver/pkg/authentication/user"
 	apirequest "k8s.io/apiserver/pkg/endpoints/request"
-	authorizationapi "k8s.io/kubernetes/pkg/apis/authorization"
+	kapi "k8s.io/kubernetes/pkg/api"
 
+	authorizationapi "github.com/openshift/origin/pkg/authorization/apis/authorization"
 	routeapi "github.com/openshift/origin/pkg/route/apis/route"
 )
 
@@ -30,13 +31,9 @@ type testSAR struct {
 	sar   *authorizationapi.SubjectAccessReview
 }
 
-func (t *testSAR) Create(subjectAccessReview *authorizationapi.SubjectAccessReview) (*authorizationapi.SubjectAccessReview, error) {
+func (t *testSAR) CreateSubjectAccessReview(ctx apirequest.Context, subjectAccessReview *authorizationapi.SubjectAccessReview) (*authorizationapi.SubjectAccessReviewResponse, error) {
 	t.sar = subjectAccessReview
-	return &authorizationapi.SubjectAccessReview{
-		Status: authorizationapi.SubjectAccessReviewStatus{
-			Allowed: t.allow,
-		},
-	}, t.err
+	return &authorizationapi.SubjectAccessReviewResponse{Allowed: t.allow}, t.err
 }
 
 func TestEmptyHostDefaulting(t *testing.T) {
@@ -60,7 +57,8 @@ func TestEmptyHostDefaulting(t *testing.T) {
 			Host: "myhost.com",
 		},
 	}
-	hostlessUpdatedRoute := persistedRoute.DeepCopy()
+	obj, _ := kapi.Scheme.DeepCopy(persistedRoute)
+	hostlessUpdatedRoute := obj.(*routeapi.Route)
 	hostlessUpdatedRoute.Spec.Host = ""
 	strategy.PrepareForUpdate(ctx, hostlessUpdatedRoute, persistedRoute)
 	if hostlessUpdatedRoute.Spec.Host != "myhost.com" {
@@ -87,21 +85,21 @@ func TestEmptyDefaultCACertificate(t *testing.T) {
 		},
 	}
 	for i, testCase := range testCases {
-		copied := testCase.route.DeepCopy()
-		if err := DecorateLegacyRouteWithEmptyDestinationCACertificates(copied); err != nil {
+		copied, _ := kapi.Scheme.Copy(testCase.route)
+		if err := DecorateLegacyRouteWithEmptyDestinationCACertificates(copied.(*routeapi.Route)); err != nil {
 			t.Errorf("%d: unexpected error: %v", i, err)
 			continue
 		}
-		routeStrategy{}.PrepareForCreate(nil, copied)
+		routeStrategy{}.PrepareForCreate(nil, copied.(*routeapi.Route))
 		if !reflect.DeepEqual(testCase.route, copied) {
 			t.Errorf("%d: unexpected change: %#v", i, copied)
 			continue
 		}
-		if err := DecorateLegacyRouteWithEmptyDestinationCACertificates(copied); err != nil {
+		if err := DecorateLegacyRouteWithEmptyDestinationCACertificates(copied.(*routeapi.Route)); err != nil {
 			t.Errorf("%d: unexpected error: %v", i, err)
 			continue
 		}
-		routeStrategy{}.PrepareForUpdate(nil, copied, &routeapi.Route{})
+		routeStrategy{}.PrepareForUpdate(nil, copied.(*routeapi.Route), &routeapi.Route{})
 		if !reflect.DeepEqual(testCase.route, copied) {
 			t.Errorf("%d: unexpected change: %#v", i, copied)
 			continue

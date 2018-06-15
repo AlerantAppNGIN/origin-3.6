@@ -4,11 +4,11 @@ import (
 	restclient "k8s.io/client-go/rest"
 
 	authorizationapi "github.com/openshift/origin/pkg/authorization/apis/authorization"
-	authorizationclient "github.com/openshift/origin/pkg/authorization/generated/internalclientset"
+	"github.com/openshift/origin/pkg/client"
 )
 
 func CanRequestProjects(config *restclient.Config, defaultNamespace string) (bool, error) {
-	oClient, err := authorizationclient.NewForConfig(config)
+	oClient, err := client.New(config)
 	if err != nil {
 		return false, err
 	}
@@ -21,7 +21,7 @@ func CanRequestProjects(config *restclient.Config, defaultNamespace string) (boo
 		},
 	}
 
-	listResponse, err := oClient.Authorization().SubjectAccessReviews().Create(sar)
+	listResponse, err := oClient.SubjectAccessReviews().Create(sar)
 	if err != nil {
 		return false, err
 	}
@@ -34,7 +34,7 @@ func CanRequestProjects(config *restclient.Config, defaultNamespace string) (boo
 		},
 	}
 
-	createResponse, err := oClient.Authorization().SubjectAccessReviews().Create(sar)
+	createResponse, err := oClient.SubjectAccessReviews().Create(sar)
 	if err != nil {
 		return false, err
 	}

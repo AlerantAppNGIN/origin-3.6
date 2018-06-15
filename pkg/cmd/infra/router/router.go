@@ -8,17 +8,18 @@ import (
 	"github.com/golang/glog"
 	"github.com/spf13/pflag"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/sets"
-	"k8s.io/apimachinery/pkg/util/validation"
 	kclientset "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset"
+	kcoreclient "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset/typed/core/internalversion"
 
 	cmdutil "github.com/openshift/origin/pkg/cmd/util"
 	"github.com/openshift/origin/pkg/cmd/util/variable"
 	projectclient "github.com/openshift/origin/pkg/project/generated/internalclientset/typed/project/internalversion"
 	routeapi "github.com/openshift/origin/pkg/route/apis/route"
-	routeinternalclientset "github.com/openshift/origin/pkg/route/generated/internalclientset"
+	routeclient "github.com/openshift/origin/pkg/route/generated/internalclientset/typed/route/internalversion"
 	"github.com/openshift/origin/pkg/router/controller"
 	controllerfactory "github.com/openshift/origin/pkg/router/controller/factory"
 )
@@ -26,20 +27,15 @@ import (
 // RouterSelection controls what routes and resources on the server are considered
 // part of this router.
 type RouterSelection struct {
-	RouterName              string
-	RouterCanonicalHostname string
-
 	ResyncInterval time.Duration
-
-	UpdateStatus bool
 
 	HostnameTemplate string
 	OverrideHostname bool
-	OverrideDomains  []string
-	RedactedDomains  sets.String
 
 	LabelSelector string
+	Labels        labels.Selector
 	FieldSelector string
+	Fields        fields.Selector
 
 	Namespace              string
 	NamespaceLabelSelector string
@@ -60,20 +56,16 @@ type RouterSelection struct {
 
 	DisableNamespaceOwnershipCheck bool
 
-	ExtendedValidation bool
+	EnableIngress bool
 
 	ListenAddr string
 }
 
 // Bind sets the appropriate labels
 func (o *RouterSelection) Bind(flag *pflag.FlagSet) {
-	flag.StringVar(&o.RouterName, "name", cmdutil.Env("ROUTER_SERVICE_NAME", "public"), "The name the router will identify itself with in the route status")
-	flag.StringVar(&o.RouterCanonicalHostname, "router-canonical-hostname", cmdutil.Env("ROUTER_CANONICAL_HOSTNAME", ""), "CanonicalHostname is the external host name for the router that can be used as a CNAME for the host requested for this route. This value is optional and may not be set in all cases.")
-	flag.BoolVar(&o.UpdateStatus, "update-status", isTrue(cmdutil.Env("ROUTER_UPDATE_STATUS", "true")), "If true, the router will update admitted route status.")
-	flag.DurationVar(&o.ResyncInterval, "resync-interval", controllerfactory.DefaultResyncInterval, "The interval at which the route list should be fully refreshed")
+	flag.DurationVar(&o.ResyncInterval, "resync-interval", 10*time.Minute, "The interval at which the route list should be fully refreshed")
 	flag.StringVar(&o.HostnameTemplate, "hostname-template", cmdutil.Env("ROUTER_SUBDOMAIN", ""), "If specified, a template that should be used to generate the hostname for a route without spec.host (e.g. '${name}-${namespace}.myapps.mycompany.com')")
-	flag.BoolVar(&o.OverrideHostname, "override-hostname", isTrue(cmdutil.Env("ROUTER_OVERRIDE_HOSTNAME", "")), "Override the spec.host value for a route with --hostname-template")
-	flag.StringSliceVar(&o.OverrideDomains, "override-domains", envVarAsStrings("ROUTER_OVERRIDE_DOMAINS", "", ","), "List of comma separated domains to override if present in any routes. This overrides the spec.host value in any matching routes with --hostname-template")
+	flag.BoolVar(&o.OverrideHostname, "override-hostname", cmdutil.Env("ROUTER_OVERRIDE_HOSTNAME", "") == "true", "Override the spec.host value for a route with --hostname-template")
 	flag.StringVar(&o.LabelSelector, "labels", cmdutil.Env("ROUTE_LABELS", ""), "A label selector to apply to the routes to watch")
 	flag.StringVar(&o.FieldSelector, "fields", cmdutil.Env("ROUTE_FIELDS", ""), "A field selector to apply to routes to watch")
 	flag.StringVar(&o.ProjectLabelSelector, "project-labels", cmdutil.Env("PROJECT_LABELS", ""), "A label selector to apply to projects to watch; if '*' watches all projects the client can access")
@@ -81,39 +73,40 @@ func (o *RouterSelection) Bind(flag *pflag.FlagSet) {
 	flag.BoolVar(&o.IncludeUDP, "include-udp-endpoints", false, "If true, UDP endpoints will be considered as candidates for routing")
 	flag.StringSliceVar(&o.DeniedDomains, "denied-domains", envVarAsStrings("ROUTER_DENIED_DOMAINS", "", ","), "List of comma separated domains to deny in routes")
 	flag.StringSliceVar(&o.AllowedDomains, "allowed-domains", envVarAsStrings("ROUTER_ALLOWED_DOMAINS", "", ","), "List of comma separated domains to allow in routes. If specified, only the domains in this list will be allowed routes. Note that domains in the denied list take precedence over the ones in the allowed list")
-	flag.BoolVar(&o.AllowWildcardRoutes, "allow-wildcard-routes", isTrue(cmdutil.Env("ROUTER_ALLOW_WILDCARD_ROUTES", "")), "Allow wildcard host names for routes")
-	flag.BoolVar(&o.DisableNamespaceOwnershipCheck, "disable-namespace-ownership-check", isTrue(cmdutil.Env("ROUTER_DISABLE_NAMESPACE_OWNERSHIP_CHECK", "")), "Disables the namespace ownership checks for a route host with different paths or for overlapping host names in the case of wildcard routes. Please be aware that if namespace ownership checks are disabled, routes in a different namespace can use this mechanism to 'steal' sub-paths for existing domains. This is only safe if route creation privileges are restricted, or if all the users can be trusted.")
-	flag.BoolVar(&o.ExtendedValidation, "extended-validation", isTrue(cmdutil.Env("EXTENDED_VALIDATION", "true")), "If set, then an additional extended validation step is performed on all routes admitted in by this router. Defaults to true and enables the extended validation checks.")
-	flag.Bool("enable-ingress", false, "Enable configuration via ingress resources.")
-	flag.MarkDeprecated("enable-ingress", "Ingress resources are now synchronized to routes automatically.")
+	flag.BoolVar(&o.AllowWildcardRoutes, "allow-wildcard-routes", cmdutil.Env("ROUTER_ALLOW_WILDCARD_ROUTES", "") == "true", "Allow wildcard host names for routes")
+	flag.BoolVar(&o.DisableNamespaceOwnershipCheck, "disable-namespace-ownership-check", cmdutil.Env("ROUTER_DISABLE_NAMESPACE_OWNERSHIP_CHECK", "") == "true", "Disables the namespace ownership checks for a route host with different paths or for overlapping host names in the case of wildcard routes. Please be aware that if namespace ownership checks are disabled, routes in a different namespace can use this mechanism to 'steal' sub-paths for existing domains. This is only safe if route creation privileges are restricted, or if all the users can be trusted.")
+	flag.BoolVar(&o.EnableIngress, "enable-ingress", cmdutil.Env("ROUTER_ENABLE_INGRESS", "") == "true", "Enable configuration via ingress resources")
 	flag.StringVar(&o.ListenAddr, "listen-addr", cmdutil.Env("ROUTER_LISTEN_ADDR", ""), "The name of an interface to listen on to expose metrics and health checking. If not specified, will not listen. Overrides stats port.")
 }
 
-// RouteUpdate updates the route before it is seen by the cache.
-func (o *RouterSelection) RouteUpdate(route *routeapi.Route) {
+// RouteSelectionFunc returns a func that identifies the host for a route.
+func (o *RouterSelection) RouteSelectionFunc() controller.RouteHostFunc {
 	if len(o.HostnameTemplate) == 0 {
-		return
+		return controller.HostForRoute
 	}
-	if !o.OverrideHostname && len(route.Spec.Host) > 0 && !hostInDomainList(route.Spec.Host, o.RedactedDomains) {
-		return
-	}
-	s, err := variable.ExpandStrict(o.HostnameTemplate, func(key string) (string, bool) {
-		switch key {
-		case "name":
-			return route.Name, true
-		case "namespace":
-			return route.Namespace, true
-		default:
-			return "", false
+	return func(route *routeapi.Route) string {
+		if !o.OverrideHostname && len(route.Spec.Host) > 0 {
+			return route.Spec.Host
 		}
-	})
-	if err != nil {
-		return
+		// GetNameForHost returns the ingress name for a generated route, and the route route
+		// name otherwise.  When a route and ingress in the same namespace share a name, the
+		// route and the ingress' rules should receive the same generated host.
+		nameForHost := controller.GetNameForHost(route.Name)
+		s, err := variable.ExpandStrict(o.HostnameTemplate, func(key string) (string, bool) {
+			switch key {
+			case "name":
+				return nameForHost, true
+			case "namespace":
+				return route.Namespace, true
+			default:
+				return "", false
+			}
+		})
+		if err != nil {
+			return ""
+		}
+		return strings.Trim(s, "\"'")
 	}
-
-	s = strings.Trim(s, "\"'")
-	glog.V(4).Infof("changing route %s to %s", route.Spec.Host, s)
-	route.Spec.Host = s
 }
 
 func (o *RouterSelection) AdmissionCheck(route *routeapi.Route) error {
@@ -136,6 +129,8 @@ func (o *RouterSelection) AdmissionCheck(route *routeapi.Route) error {
 		glog.V(4).Infof("host %s rejected - not in the list of allowed domains", route.Spec.Host)
 		return fmt.Errorf("host not in the allowed list of domains")
 	}
+
+	glog.V(4).Infof("host %s admitted", route.Spec.Host)
 	return nil
 }
 
@@ -169,22 +164,24 @@ func (o *RouterSelection) Complete() error {
 	if len(o.HostnameTemplate) == 0 && o.OverrideHostname {
 		return fmt.Errorf("--override-hostname requires that --hostname-template be specified")
 	}
-
-	o.RedactedDomains = sets.NewString(o.OverrideDomains...)
-	if len(o.RedactedDomains) > 0 && len(o.HostnameTemplate) == 0 {
-		return fmt.Errorf("--override-domains requires that --hostname-template be specified")
-	}
-
 	if len(o.LabelSelector) > 0 {
-		if _, err := labels.Parse(o.LabelSelector); err != nil {
+		s, err := labels.Parse(o.LabelSelector)
+		if err != nil {
 			return fmt.Errorf("label selector is not valid: %v", err)
 		}
+		o.Labels = s
+	} else {
+		o.Labels = labels.Everything()
 	}
 
 	if len(o.FieldSelector) > 0 {
-		if _, err := fields.ParseSelector(o.FieldSelector); err != nil {
+		s, err := fields.ParseSelector(o.FieldSelector)
+		if err != nil {
 			return fmt.Errorf("field selector is not valid: %v", err)
 		}
+		o.Fields = s
+	} else {
+		o.Fields = fields.Everything()
 	}
 
 	if len(o.ProjectLabelSelector) > 0 {
@@ -220,38 +217,65 @@ func (o *RouterSelection) Complete() error {
 	o.BlacklistedDomains = sets.NewString(o.DeniedDomains...)
 	o.WhitelistedDomains = sets.NewString(o.AllowedDomains...)
 
-	if routerCanonicalHostname := o.RouterCanonicalHostname; len(routerCanonicalHostname) > 0 {
-		if errs := validation.IsDNS1123Subdomain(routerCanonicalHostname); len(errs) != 0 {
-			return fmt.Errorf("invalid canonical hostname: %s", routerCanonicalHostname)
-		}
-		if errs := validation.IsValidIP(routerCanonicalHostname); len(errs) == 0 {
-			return fmt.Errorf("canonical hostname must not be an IP address: %s", routerCanonicalHostname)
-		}
-	}
-
 	return nil
 }
 
 // NewFactory initializes a factory that will watch the requested routes
-func (o *RouterSelection) NewFactory(routeclient routeinternalclientset.Interface, projectclient projectclient.ProjectResourceInterface, kc kclientset.Interface) *controllerfactory.RouterControllerFactory {
-	factory := controllerfactory.NewDefaultRouterControllerFactory(routeclient, projectclient, kc)
-	factory.LabelSelector = o.LabelSelector
-	factory.FieldSelector = o.FieldSelector
+func (o *RouterSelection) NewFactory(routeclient routeclient.RoutesGetter, projectclient projectclient.ProjectResourceInterface, kc kclientset.Interface) *controllerfactory.RouterControllerFactory {
+	factory := controllerfactory.NewDefaultRouterControllerFactory(routeclient, kc)
+	factory.Labels = o.Labels
+	factory.Fields = o.Fields
 	factory.Namespace = o.Namespace
 	factory.ResyncInterval = o.ResyncInterval
 	switch {
 	case o.NamespaceLabels != nil:
 		glog.Infof("Router is only using routes in namespaces matching %s", o.NamespaceLabels)
-		factory.NamespaceLabels = o.NamespaceLabels
+		factory.Namespaces = namespaceNames{kc.Core().Namespaces(), o.NamespaceLabels}
 	case o.ProjectLabels != nil:
 		glog.Infof("Router is only using routes in projects matching %s", o.ProjectLabels)
-		factory.ProjectLabels = o.ProjectLabels
+		factory.Namespaces = projectNames{projectclient, o.ProjectLabels}
 	case len(factory.Namespace) > 0:
 		glog.Infof("Router is only using resources in namespace %s", factory.Namespace)
 	default:
 		glog.Infof("Router is including routes in all namespaces")
 	}
 	return factory
+}
+
+// projectNames returns the names of projects matching the label selector
+type projectNames struct {
+	client   projectclient.ProjectResourceInterface
+	selector labels.Selector
+}
+
+func (n projectNames) NamespaceNames() (sets.String, error) {
+	all, err := n.client.List(metav1.ListOptions{LabelSelector: n.selector.String()})
+	if err != nil {
+		return nil, err
+	}
+	names := make(sets.String, len(all.Items))
+	for i := range all.Items {
+		names.Insert(all.Items[i].Name)
+	}
+	return names, nil
+}
+
+// namespaceNames returns the names of namespaces matching the label selector
+type namespaceNames struct {
+	client   kcoreclient.NamespaceInterface
+	selector labels.Selector
+}
+
+func (n namespaceNames) NamespaceNames() (sets.String, error) {
+	all, err := n.client.List(metav1.ListOptions{LabelSelector: n.selector.String()})
+	if err != nil {
+		return nil, err
+	}
+	names := make(sets.String, len(all.Items))
+	for i := range all.Items {
+		names.Insert(all.Items[i].Name)
+	}
+	return names, nil
 }
 
 func envVarAsStrings(name, defaultValue, separator string) []string {

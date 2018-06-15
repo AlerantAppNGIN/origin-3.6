@@ -1,40 +1,60 @@
 package buildlog
 
 import (
+	"fmt"
+	"net/url"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	metainternal "k8s.io/apimachinery/pkg/apis/meta/internalversion"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/watch"
 	apirequest "k8s.io/apiserver/pkg/endpoints/request"
+	genericrest "k8s.io/apiserver/pkg/registry/generic/rest"
 	"k8s.io/apiserver/pkg/registry/rest"
-	clientgotesting "k8s.io/client-go/testing"
-	kapi "k8s.io/kubernetes/pkg/apis/core"
-	"k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset/fake"
+	kapi "k8s.io/kubernetes/pkg/api"
+	kubeletclient "k8s.io/kubernetes/pkg/kubelet/client"
 
 	buildapi "github.com/openshift/origin/pkg/build/apis/build"
-	buildfakeclient "github.com/openshift/origin/pkg/build/generated/internalclientset/fake"
+	"github.com/openshift/origin/pkg/build/registry/test"
 )
 
-func newPodClient() *fake.Clientset {
-	return fake.NewSimpleClientset(
-		mockPod(kapi.PodPending, "pending-build"),
-		mockPod(kapi.PodRunning, "running-build"),
-		mockPod(kapi.PodSucceeded, "succeeded-build"),
-		mockPod(kapi.PodFailed, "failed-build"),
-		mockPod(kapi.PodUnknown, "unknown-build"),
-	)
+type testPodGetter struct{}
+
+func (p *testPodGetter) Get(ctx apirequest.Context, name string, options *metav1.GetOptions) (runtime.Object, error) {
+	pod := &kapi.Pod{}
+	switch name {
+	case "pending-build":
+		pod = mockPod(kapi.PodPending, name)
+	case "running-build":
+		pod = mockPod(kapi.PodRunning, name)
+	case "succeeded-build":
+		pod = mockPod(kapi.PodSucceeded, name)
+	case "failed-build":
+		pod = mockPod(kapi.PodFailed, name)
+	case "unknown-build":
+		pod = mockPod(kapi.PodUnknown, name)
+	}
+	return pod, nil
 }
 
-func anotherNewPodClient() *fake.Clientset {
-	return fake.NewSimpleClientset(
-		mockPod(kapi.PodSucceeded, "bc-1-build"),
-		mockPod(kapi.PodSucceeded, "bc-2-build"),
-		mockPod(kapi.PodSucceeded, "bc-3-build"),
-	)
+type fakeConnectionInfoGetter struct{}
+
+func (*fakeConnectionInfoGetter) GetConnectionInfo(nodeName types.NodeName) (*kubeletclient.ConnectionInfo, error) {
+	rt, err := kubeletclient.MakeTransport(&kubeletclient.KubeletClientConfig{})
+	if err != nil {
+		return nil, err
+	}
+	return &kubeletclient.ConnectionInfo{
+		Scheme:    "https",
+		Hostname:  "foo-host",
+		Port:      "12345",
+		Transport: rt,
+	}, nil
 }
 
 // TestRegistryResourceLocation tests if proper resource location URL is returned
@@ -42,24 +62,20 @@ func anotherNewPodClient() *fake.Clientset {
 // Note: For this test, the mocked pod is set to "Running" phase, so the test
 // is evaluating the outcome based only on build state.
 func TestRegistryResourceLocation(t *testing.T) {
-	expectedLocations := map[buildapi.BuildPhase]struct {
-		namespace string
-		name      string
-		container string
-	}{
-		buildapi.BuildPhaseComplete:  {namespace: "default", name: "running-build", container: ""},
-		buildapi.BuildPhaseFailed:    {namespace: "default", name: "running-build", container: ""},
-		buildapi.BuildPhaseRunning:   {namespace: "default", name: "running-build", container: ""},
-		buildapi.BuildPhaseNew:       {},
-		buildapi.BuildPhasePending:   {},
-		buildapi.BuildPhaseError:     {},
-		buildapi.BuildPhaseCancelled: {},
+	expectedLocations := map[buildapi.BuildPhase]string{
+		buildapi.BuildPhaseComplete:  fmt.Sprintf("https://foo-host:12345/containerLogs/%s/running-build/foo-container", metav1.NamespaceDefault),
+		buildapi.BuildPhaseFailed:    fmt.Sprintf("https://foo-host:12345/containerLogs/%s/running-build/foo-container", metav1.NamespaceDefault),
+		buildapi.BuildPhaseRunning:   fmt.Sprintf("https://foo-host:12345/containerLogs/%s/running-build/foo-container", metav1.NamespaceDefault),
+		buildapi.BuildPhaseNew:       "",
+		buildapi.BuildPhasePending:   "",
+		buildapi.BuildPhaseError:     "",
+		buildapi.BuildPhaseCancelled: "",
 	}
 
 	ctx := apirequest.NewDefaultContext()
 
 	for BuildPhase, expectedLocation := range expectedLocations {
-		actualNamespace, actualPodName, actualContainer, err := resourceLocationHelper(BuildPhase, "running", ctx, 1)
+		location, err := resourceLocationHelper(BuildPhase, "running", ctx, 1)
 		switch BuildPhase {
 		case buildapi.BuildPhaseError, buildapi.BuildPhaseCancelled:
 			if err == nil {
@@ -71,14 +87,8 @@ func TestRegistryResourceLocation(t *testing.T) {
 			}
 		}
 
-		if e, a := expectedLocation.namespace, actualNamespace; e != a {
-			t.Errorf("expected %v, actual %v", e, a)
-		}
-		if e, a := expectedLocation.name, actualPodName; e != a {
-			t.Errorf("expected %v, actual %v", e, a)
-		}
-		if e, a := expectedLocation.container, actualContainer; e != a {
-			t.Errorf("expected %v, actual %v", e, a)
+		if location != expectedLocation {
+			t.Errorf("Status: %s Expected Location: %s, Got %s", BuildPhase, expectedLocation, location)
 		}
 	}
 }
@@ -129,24 +139,26 @@ func TestWaitForBuild(t *testing.T) {
 
 	for _, tt := range tests {
 		build := mockBuild(buildapi.BuildPhasePending, "running", 1)
-		buildClient := buildfakeclient.NewSimpleClientset(build)
-		fakeWatcher := watch.NewFake()
-		buildClient.PrependWatchReactor("builds", func(action clientgotesting.Action) (handled bool, ret watch.Interface, err error) {
-			return true, fakeWatcher, nil
-		})
+		ch := make(chan watch.Event)
+		watcher := &buildWatcher{
+			Build: build,
+			Watcher: &fakeWatch{
+				Channel: ch,
+			},
+		}
 		storage := REST{
-			BuildClient: buildClient.Build(),
-			PodClient:   newPodClient().Core(),
-			Timeout:     defaultTimeout,
+			Getter:         watcher,
+			Watcher:        watcher,
+			PodGetter:      &testPodGetter{},
+			ConnectionInfo: &fakeConnectionInfoGetter{},
+			Timeout:        defaultTimeout,
 		}
-		getSimplePodLogsFn := func(podNamespace, podName string, logOpts *kapi.PodLogOptions) (runtime.Object, error) {
-			return nil, nil
-		}
-		storage.getSimpleLogsFn = getSimplePodLogsFn
-
 		go func() {
 			for _, status := range tt.status {
-				fakeWatcher.Modify(mockBuild(status, "running", 1))
+				ch <- watch.Event{
+					Type:   watch.Modified,
+					Object: mockBuild(status, "running", 1),
+				}
 			}
 		}()
 		_, err := storage.Get(ctx, build.Name, &buildapi.BuildLogOptions{})
@@ -160,47 +172,77 @@ func TestWaitForBuild(t *testing.T) {
 }
 
 func TestWaitForBuildTimeout(t *testing.T) {
-	build := mockBuild(buildapi.BuildPhasePending, "running", 1)
-	buildClient := buildfakeclient.NewSimpleClientset(build)
 	ctx := apirequest.NewDefaultContext()
-	storage := REST{
-		BuildClient: buildClient.Build(),
-		PodClient:   newPodClient().Core(),
-		Timeout:     100 * time.Millisecond,
+	build := mockBuild(buildapi.BuildPhasePending, "running", 1)
+	ch := make(chan watch.Event)
+	watcher := &buildWatcher{
+		Build: build,
+		Watcher: &fakeWatch{
+			Channel: ch,
+		},
 	}
-
+	storage := REST{
+		Getter:         watcher,
+		Watcher:        watcher,
+		PodGetter:      &testPodGetter{},
+		ConnectionInfo: &fakeConnectionInfoGetter{},
+		Timeout:        100 * time.Millisecond,
+	}
 	_, err := storage.Get(ctx, build.Name, &buildapi.BuildLogOptions{})
 	if err == nil || !strings.Contains(err.Error(), "timed out") {
 		t.Errorf("Unexpected error result from waitForBuild: %v\n", err)
 	}
 }
 
-func resourceLocationHelper(BuildPhase buildapi.BuildPhase, podPhase string, ctx apirequest.Context, version int) (string, string, string, error) {
+type buildWatcher struct {
+	Build   *buildapi.Build
+	Watcher watch.Interface
+	Err     error
+}
+
+func (r *buildWatcher) Get(ctx apirequest.Context, name string, options *metav1.GetOptions) (runtime.Object, error) {
+	return r.Build, nil
+}
+
+func (r *buildWatcher) Watch(ctx apirequest.Context, options *metainternal.ListOptions) (watch.Interface, error) {
+	return r.Watcher, r.Err
+}
+
+type fakeWatch struct {
+	Channel chan watch.Event
+}
+
+func (w *fakeWatch) Stop() {
+	close(w.Channel)
+}
+
+func (w *fakeWatch) ResultChan() <-chan watch.Event {
+	return w.Channel
+}
+
+func resourceLocationHelper(BuildPhase buildapi.BuildPhase, podPhase string, ctx apirequest.Context, version int) (string, error) {
 	expectedBuild := mockBuild(BuildPhase, podPhase, version)
-	buildClient := buildfakeclient.NewSimpleClientset(expectedBuild)
+	internal := &test.BuildStorage{Build: expectedBuild}
 
 	storage := &REST{
-		BuildClient: buildClient.Build(),
-		PodClient:   newPodClient().Core(),
-		Timeout:     defaultTimeout,
+		Getter:         internal,
+		PodGetter:      &testPodGetter{},
+		ConnectionInfo: &fakeConnectionInfoGetter{},
+		Timeout:        defaultTimeout,
 	}
-	actualPodNamespace := ""
-	actualPodName := ""
-	actualContainer := ""
-	getSimplePodLogsFn := func(podNamespace, podName string, logOpts *kapi.PodLogOptions) (runtime.Object, error) {
-		actualPodNamespace = podNamespace
-		actualPodName = podName
-		actualContainer = logOpts.Container
-		return nil, nil
-	}
-	storage.getSimpleLogsFn = getSimplePodLogsFn
-
 	getter := rest.GetterWithOptions(storage)
-	_, err := getter.Get(ctx, expectedBuild.Name, &buildapi.BuildLogOptions{NoWait: true})
+	obj, err := getter.Get(ctx, "foo-build", &buildapi.BuildLogOptions{NoWait: true})
 	if err != nil {
-		return "", "", "", err
+		return "", err
 	}
-	return actualPodNamespace, actualPodName, actualContainer, nil
+	streamer, ok := obj.(*genericrest.LocationStreamer)
+	if !ok {
+		return "", fmt.Errorf("Result of get not LocationStreamer")
+	}
+	if streamer.Location != nil {
+		return streamer.Location.String(), nil
+	}
+	return "", nil
 
 }
 
@@ -227,8 +269,7 @@ func mockPod(podPhase kapi.PodPhase, podName string) *kapi.Pod {
 func mockBuild(status buildapi.BuildPhase, podName string, version int) *buildapi.Build {
 	return &buildapi.Build{
 		ObjectMeta: metav1.ObjectMeta{
-			Namespace: "default",
-			Name:      podName,
+			Name: podName,
 			Annotations: map[string]string{
 				buildapi.BuildNumberAnnotation: strconv.Itoa(version),
 			},
@@ -242,43 +283,53 @@ func mockBuild(status buildapi.BuildPhase, podName string, version int) *buildap
 	}
 }
 
+type anotherTestPodGetter struct{}
+
+func (p *anotherTestPodGetter) Get(ctx apirequest.Context, name string, options *metav1.GetOptions) (runtime.Object, error) {
+	pod := &kapi.Pod{}
+	switch name {
+	case "bc-1-build":
+		pod = mockPod(kapi.PodSucceeded, name)
+	case "bc-2-build":
+		pod = mockPod(kapi.PodSucceeded, name)
+	case "bc-3-build":
+		pod = mockPod(kapi.PodSucceeded, name)
+	}
+	return pod, nil
+}
+
 func TestPreviousBuildLogs(t *testing.T) {
 	ctx := apirequest.NewDefaultContext()
 	first := mockBuild(buildapi.BuildPhaseComplete, "bc-1", 1)
 	second := mockBuild(buildapi.BuildPhaseComplete, "bc-2", 2)
 	third := mockBuild(buildapi.BuildPhaseComplete, "bc-3", 3)
-	buildClient := buildfakeclient.NewSimpleClientset(first, second, third)
+	internal := &test.BuildStorage{Builds: &buildapi.BuildList{Items: []buildapi.Build{*first, *second, *third}}}
 
 	storage := &REST{
-		BuildClient: buildClient.Build(),
-		PodClient:   anotherNewPodClient().Core(),
-		Timeout:     defaultTimeout,
+		Getter:         internal,
+		PodGetter:      &anotherTestPodGetter{},
+		ConnectionInfo: &fakeConnectionInfoGetter{},
+		Timeout:        defaultTimeout,
 	}
-	actualPodNamespace := ""
-	actualPodName := ""
-	actualContainer := ""
-	getSimplePodLogsFn := func(podNamespace, podName string, logOpts *kapi.PodLogOptions) (runtime.Object, error) {
-		actualPodNamespace = podNamespace
-		actualPodName = podName
-		actualContainer = logOpts.Container
-		return nil, nil
-	}
-	storage.getSimpleLogsFn = getSimplePodLogsFn
-
 	getter := rest.GetterWithOptions(storage)
 	// Will expect the previous from bc-3 aka bc-2
-	_, err := getter.Get(ctx, "bc-3", &buildapi.BuildLogOptions{NoWait: true, Previous: true})
+	obj, err := getter.Get(ctx, "bc-3", &buildapi.BuildLogOptions{NoWait: true, Previous: true})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if e, a := "default", actualPodNamespace; e != a {
-		t.Errorf("expected %v, actual %v", e, a)
+	streamer, ok := obj.(*genericrest.LocationStreamer)
+	if !ok {
+		t.Fatalf("unexpected object: %#v", obj)
 	}
-	if e, a := "bc-2-build", actualPodName; e != a {
-		t.Errorf("expected %v, actual %v", e, a)
+
+	expected := &url.URL{
+		Scheme: "https",
+		Host:   "foo-host:12345",
+		Path:   "/containerLogs/default/bc-2-build/foo-container",
 	}
-	if e, a := "", actualContainer; e != a {
-		t.Errorf("expected %v, actual %v", e, a)
+
+	if exp, got := expected.String(), streamer.Location.String(); exp != got {
+		t.Fatalf("expected location:\n\t%s\ngot location:\n\t%s\n", exp, got)
 	}
 }

@@ -16,13 +16,11 @@ import (
 	"k8s.io/kubernetes/pkg/kubectl/cmd/templates"
 	kcmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
 
-	clientcfg "github.com/openshift/origin/pkg/client/config"
+	"github.com/openshift/origin/pkg/client"
+	"github.com/openshift/origin/pkg/cmd/util/clientcmd"
 	cliconfig "github.com/openshift/origin/pkg/oc/cli/config"
-	"github.com/openshift/origin/pkg/oc/cli/util/clientcmd"
 	projectapi "github.com/openshift/origin/pkg/project/apis/project"
 	projectapihelpers "github.com/openshift/origin/pkg/project/apis/project/helpers"
-	projectclientinternal "github.com/openshift/origin/pkg/project/generated/internalclientset"
-	projectclient "github.com/openshift/origin/pkg/project/generated/internalclientset/typed/project/internalversion"
 	projectutil "github.com/openshift/origin/pkg/project/util"
 
 	"github.com/spf13/cobra"
@@ -31,7 +29,7 @@ import (
 type ProjectOptions struct {
 	Config       clientcmdapi.Config
 	ClientConfig *restclient.Config
-	ClientFn     func() (projectclient.ProjectInterface, kclientset.Interface, error)
+	ClientFn     func() (*client.Client, kclientset.Interface, error)
 	Out          io.Writer
 	PathOptions  *kclientcmd.PathOptions
 
@@ -78,7 +76,7 @@ func NewCmdProject(fullName string, f *clientcmd.Factory, out io.Writer) *cobra.
 			options.PathOptions = cliconfig.NewPathOptions(cmd)
 
 			if err := options.Complete(f, args, out); err != nil {
-				kcmdutil.CheckErr(kcmdutil.UsageErrorf(cmd, err.Error()))
+				kcmdutil.CheckErr(kcmdutil.UsageError(cmd, err.Error()))
 			}
 
 			if err := options.RunProject(); err != nil {
@@ -101,7 +99,7 @@ func (o *ProjectOptions) Complete(f *clientcmd.Factory, args []string, out io.Wr
 		o.ProjectName = args[0]
 	}
 
-	o.Config, err = f.RawConfig()
+	o.Config, err = f.OpenShiftClientConfig().RawConfig()
 	if err != nil {
 		return err
 	}
@@ -127,23 +125,16 @@ func (o *ProjectOptions) Complete(f *clientcmd.Factory, args []string, out io.Wr
 
 		// since we failed to retrieve ClientConfig for the current server,
 		// fetch local OpenShift client config
-		o.ClientConfig, err = f.ClientConfig()
+		o.ClientConfig, err = f.OpenShiftClientConfig().ClientConfig()
 		if err != nil {
 			return err
 		}
 
 	}
 
-	o.ClientFn = func() (projectclient.ProjectInterface, kclientset.Interface, error) {
-		kc, err := f.ClientSet()
-		if err != nil {
-			return nil, nil, err
-		}
-		projectClient, err := projectclientinternal.NewForConfig(o.ClientConfig)
-		if err != nil {
-			return nil, nil, err
-		}
-		return projectClient.Project(), kc, nil
+	o.ClientFn = func() (*client.Client, kclientset.Interface, error) {
+		oc, kc, err := f.Clients()
+		return oc, kc, err
 	}
 
 	o.Out = out
@@ -180,7 +171,7 @@ func (o ProjectOptions) RunProject() error {
 			}
 
 			switch err := confirmProjectAccess(currentProject, client, kubeclient); {
-			case kapierrors.IsForbidden(err):
+			case clientcmd.IsForbidden(err):
 				return fmt.Errorf("you do not have rights to view project %q.", currentProject)
 			case kapierrors.IsNotFound(err):
 				return fmt.Errorf("the project %q specified in your config does not exist.", currentProject)
@@ -188,7 +179,7 @@ func (o ProjectOptions) RunProject() error {
 				return err
 			}
 
-			defaultContextName := clientcfg.GetContextNickname(currentContext.Namespace, currentContext.Cluster, currentContext.AuthInfo)
+			defaultContextName := cliconfig.GetContextNickname(currentContext.Namespace, currentContext.Cluster, currentContext.AuthInfo)
 
 			// if they specified a project name and got a generated context, then only show the information they care about.  They won't recognize
 			// a context name they didn't choose
@@ -229,7 +220,7 @@ func (o ProjectOptions) RunProject() error {
 			}
 
 			if err := confirmProjectAccess(argument, client, kubeclient); err != nil {
-				if isNotFound, isForbidden := kapierrors.IsNotFound(err), kapierrors.IsForbidden(err); isNotFound || isForbidden {
+				if isNotFound, isForbidden := kapierrors.IsNotFound(err), clientcmd.IsForbidden(err); isNotFound || isForbidden {
 					var msg string
 					if isForbidden {
 						msg = fmt.Sprintf("You are not a member of project %q.", argument)
@@ -288,7 +279,7 @@ func (o ProjectOptions) RunProject() error {
 
 	// calculate what name we'd generate for the context.  If the context has the same name, don't drop it into the output, because the user won't
 	// recognize the name since they didn't choose it.
-	defaultContextName := clientcfg.GetContextNickname(namespaceInUse, config.Contexts[contextInUse].Cluster, config.Contexts[contextInUse].AuthInfo)
+	defaultContextName := cliconfig.GetContextNickname(namespaceInUse, config.Contexts[contextInUse].Cluster, config.Contexts[contextInUse].AuthInfo)
 
 	switch {
 	// if there is no namespace, then the only information we can provide is the context and server
@@ -322,8 +313,8 @@ func (o *ProjectOptions) GetContextFromName(contextName string) (*clientcmdapi.C
 	return nil, false
 }
 
-func confirmProjectAccess(currentProject string, projectClient projectclient.ProjectInterface, kClient kclientset.Interface) error {
-	_, projectErr := projectClient.Projects().Get(currentProject, metav1.GetOptions{})
+func confirmProjectAccess(currentProject string, oClient *client.Client, kClient kclientset.Interface) error {
+	_, projectErr := oClient.Projects().Get(currentProject, metav1.GetOptions{})
 	if !kapierrors.IsNotFound(projectErr) && !kapierrors.IsForbidden(projectErr) {
 		return projectErr
 	}
@@ -337,8 +328,8 @@ func confirmProjectAccess(currentProject string, projectClient projectclient.Pro
 	return projectErr
 }
 
-func getProjects(projectClient projectclient.ProjectInterface, kClient kclientset.Interface) ([]projectapi.Project, error) {
-	projects, err := projectClient.Projects().List(metav1.ListOptions{})
+func getProjects(oClient *client.Client, kClient kclientset.Interface) ([]projectapi.Project, error) {
+	projects, err := oClient.Projects().List(metav1.ListOptions{})
 	if err == nil {
 		return projects.Items, nil
 	}

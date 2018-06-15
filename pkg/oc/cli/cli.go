@@ -7,38 +7,30 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/openshift/origin/pkg/api/legacygroupification"
+	"github.com/golang/glog"
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 
 	kubecmd "k8s.io/kubernetes/pkg/kubectl/cmd"
 	ktemplates "k8s.io/kubernetes/pkg/kubectl/cmd/templates"
 	kcmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
-	"k8s.io/kubernetes/pkg/kubectl/resource"
 
 	"github.com/openshift/origin/pkg/cmd/flagtypes"
 	"github.com/openshift/origin/pkg/cmd/templates"
+	"github.com/openshift/origin/pkg/cmd/util/clientcmd"
 	"github.com/openshift/origin/pkg/cmd/util/term"
 	"github.com/openshift/origin/pkg/oc/admin"
-	diagnostics "github.com/openshift/origin/pkg/oc/admin/diagnostics"
-	sync "github.com/openshift/origin/pkg/oc/admin/groups/sync/cli"
 	"github.com/openshift/origin/pkg/oc/cli/cmd"
 	"github.com/openshift/origin/pkg/oc/cli/cmd/cluster"
-	"github.com/openshift/origin/pkg/oc/cli/cmd/image"
 	"github.com/openshift/origin/pkg/oc/cli/cmd/importer"
 	"github.com/openshift/origin/pkg/oc/cli/cmd/login"
 	"github.com/openshift/origin/pkg/oc/cli/cmd/observe"
-	"github.com/openshift/origin/pkg/oc/cli/cmd/registry"
 	"github.com/openshift/origin/pkg/oc/cli/cmd/rollout"
 	"github.com/openshift/origin/pkg/oc/cli/cmd/rsync"
 	"github.com/openshift/origin/pkg/oc/cli/cmd/set"
 	"github.com/openshift/origin/pkg/oc/cli/policy"
 	"github.com/openshift/origin/pkg/oc/cli/sa"
 	"github.com/openshift/origin/pkg/oc/cli/secrets"
-	"github.com/openshift/origin/pkg/oc/cli/util/clientcmd"
-	"github.com/openshift/origin/pkg/oc/experimental/buildchain"
-	configcmd "github.com/openshift/origin/pkg/oc/experimental/config"
-	"github.com/openshift/origin/pkg/oc/experimental/dockergc"
-	exipfailover "github.com/openshift/origin/pkg/oc/experimental/ipfailover"
 )
 
 const productName = `OpenShift`
@@ -93,8 +85,8 @@ func NewCommandCLI(name, fullName string, in io.Reader, out, errout io.Writer) *
 
 	f := clientcmd.New(cmds.PersistentFlags())
 
-	loginCmd := login.NewCmdLogin(fullName, f, in, out, errout)
-	secretcmds := secrets.NewCmdSecrets(secrets.SecretsRecommendedName, fullName+" "+secrets.SecretsRecommendedName, f, out, errout)
+	loginCmd := login.NewCmdLogin(fullName, f, in, out)
+	secretcmds := secrets.NewCmdSecrets(secrets.SecretsRecommendedName, fullName+" "+secrets.SecretsRecommendedName, f, in, out, errout, fullName+" edit")
 
 	groups := ktemplates.CommandGroups{
 		{
@@ -108,13 +100,14 @@ func NewCommandCLI(name, fullName string, in io.Reader, out, errout io.Writer) *
 				cmd.NewCmdProject(fullName+" project", f, out),
 				cmd.NewCmdProjects(fullName, f, out),
 				cmd.NewCmdExplain(fullName, f, out, errout),
-				cluster.NewCmdCluster(cluster.ClusterRecommendedName, fullName+" "+cluster.ClusterRecommendedName, f, out, errout),
+				cluster.NewCmdCluster(cluster.ClusterRecommendedName, fullName+" "+cluster.ClusterRecommendedName, f, in, out, errout),
 			},
 		},
 		{
 			Message: "Build and Deploy Commands:",
 			Commands: []*cobra.Command{
 				rollout.NewCmdRollout(fullName, f, out, errout),
+				cmd.NewCmdDeploy(fullName, f, out),
 				cmd.NewCmdRollback(fullName, f, out),
 				cmd.NewCmdNewBuild(cmd.NewBuildRecommendedCommandName, fullName, f, in, out, errout),
 				cmd.NewCmdStartBuild(fullName, f, in, out, errout),
@@ -134,7 +127,7 @@ func NewCommandCLI(name, fullName string, in io.Reader, out, errout io.Writer) *
 				cmd.NewCmdAnnotate(fullName, f, out),
 				cmd.NewCmdExpose(fullName, f, out),
 				cmd.NewCmdDelete(fullName, f, out, errout),
-				cmd.NewCmdScale(fullName, f, out, errout),
+				cmd.NewCmdScale(fullName, f, out),
 				cmd.NewCmdAutoscale(fullName, f, out),
 				secretcmds,
 				sa.NewCmdServiceAccounts(sa.ServiceAccountsRecommendedName, fullName+" "+sa.ServiceAccountsRecommendedName, f, out, errout),
@@ -143,7 +136,7 @@ func NewCommandCLI(name, fullName string, in io.Reader, out, errout io.Writer) *
 		{
 			Message: "Troubleshooting and Debugging Commands:",
 			Commands: []*cobra.Command{
-				cmd.NewCmdLogs(cmd.LogsRecommendedCommandName, fullName, f, out, errout),
+				cmd.NewCmdLogs(cmd.LogsRecommendedCommandName, fullName, f, out),
 				cmd.NewCmdRsh(cmd.RshRecommendedName, fullName, f, in, out, errout),
 				rsync.NewCmdRsync(rsync.RsyncRecommendedName, fullName, f, out, errout),
 				cmd.NewCmdPortForward(fullName, f, out, errout),
@@ -172,54 +165,45 @@ func NewCommandCLI(name, fullName string, in io.Reader, out, errout io.Writer) *
 				cmd.NewCmdAuth(fullName, f, out, errout),
 				cmd.NewCmdConvert(fullName, f, out),
 				importer.NewCmdImport(fullName, f, in, out, errout),
-				image.NewCmdImage(fullName, f, in, out, errout),
-				registry.NewCmd(fullName, f, in, out, errout),
-				cmd.NewCmdApiVersions(fullName, f, out),
-				cmd.NewCmdApiResources(fullName, f, out),
 			},
 		},
 		{
 			Message: "Settings Commands:",
 			Commands: []*cobra.Command{
 				login.NewCmdLogout("logout", fullName+" logout", fullName+" login", f, in, out),
-				cmd.NewCmdConfig(fullName, "config", f, out, errout),
+				cmd.NewCmdConfig(fullName, "config", out, errout),
 				cmd.NewCmdWhoAmI(cmd.WhoAmIRecommendedCommandName, fullName+" "+cmd.WhoAmIRecommendedCommandName, f, out),
-				cmd.NewCmdCompletion(fullName, out),
+				cmd.NewCmdCompletion(fullName, f, out),
 			},
 		},
 	}
 	groups.Add(cmds)
 
-	ocEditFullName := fullName + " edit"
-	ocSecretsFullName := fullName + " " + secrets.SecretsRecommendedName
-	ocSecretsNewFullName := ocSecretsFullName + " " + secrets.NewSecretRecommendedCommandName
-
 	filters := []string{
 		"options",
-		"deploy",
 		// These commands are deprecated and should not appear in help
 		moved(fullName, "set env", cmds, set.NewCmdEnv(fullName, f, in, out, errout)),
 		moved(fullName, "set volume", cmds, set.NewCmdVolume(fullName, f, out, errout)),
 		moved(fullName, "logs", cmds, cmd.NewCmdBuildLogs(fullName, f, out)),
 		moved(fullName, "secrets link", secretcmds, secrets.NewCmdLinkSecret("add", fullName, f, out)),
-		moved(fullName, "create secret", secretcmds, secrets.NewCmdCreateSecret(secrets.NewSecretRecommendedCommandName, fullName, f, out)),
-		moved(fullName, "create secret", secretcmds, secrets.NewCmdCreateDockerConfigSecret(secrets.CreateDockerConfigSecretRecommendedName, fullName, f, out, ocSecretsNewFullName, ocEditFullName)),
-		moved(fullName, "create secret", secretcmds, secrets.NewCmdCreateBasicAuthSecret(secrets.CreateBasicAuthSecretRecommendedCommandName, fullName, f, in, out, ocSecretsNewFullName, ocEditFullName)),
-		moved(fullName, "create secret", secretcmds, secrets.NewCmdCreateSSHAuthSecret(secrets.CreateSSHAuthSecretRecommendedCommandName, fullName, f, out, ocSecretsNewFullName, ocEditFullName)),
 	}
 
 	changeSharedFlagDefaults(cmds)
 	templates.ActsAsRootCommand(cmds, filters, groups...).
 		ExposeFlags(loginCmd, "certificate-authority", "insecure-skip-tls-verify", "token")
 
-	cmds.AddCommand(newExperimentalCommand("ex", name+"ex"))
+	// experimental commands are those that are bundled with the binary but not displayed to end users
+	// directly
+	experimental := &cobra.Command{
+		Use: "ex", // Because this command exposes no description, it will not be shown in help
+	}
+	experimental.AddCommand()
+	cmds.AddCommand(experimental)
 
-	cmds.AddCommand(cmd.NewCmdPlugin(fullName, f, in, out, errout))
 	if name == fullName {
 		cmds.AddCommand(cmd.NewCmdVersion(fullName, f, out, cmd.VersionOptions{PrintClientFeatures: true}))
 	}
 	cmds.AddCommand(cmd.NewCmdOptions(out))
-	cmds.AddCommand(cmd.NewCmdDeploy(fullName, f, out))
 
 	if cmds.Flag("namespace") != nil {
 		if cmds.Flag("namespace").Annotations == nil {
@@ -268,36 +252,26 @@ func changeSharedFlagDefaults(rootCmd *cobra.Command) {
 	}
 }
 
-func newExperimentalCommand(name, fullName string) *cobra.Command {
-	out := os.Stdout
-	errout := os.Stderr
-
-	experimental := &cobra.Command{
-		Use:   name,
-		Short: "Experimental commands under active development",
-		Long:  "The commands grouped here are under development and may change without notice.",
-		Run: func(c *cobra.Command, args []string) {
-			c.SetOutput(out)
-			c.Help()
-		},
-		BashCompletionFunction: admin.BashCompletionFunc,
-	}
-
-	f := clientcmd.New(experimental.PersistentFlags())
-
-	experimental.AddCommand(exipfailover.NewCmdIPFailoverConfig(f, fullName, "ipfailover", out, errout))
-	experimental.AddCommand(dockergc.NewCmdDockerGCConfig(f, fullName, "dockergc", out, errout))
-	experimental.AddCommand(buildchain.NewCmdBuildChain(name, fullName+" "+buildchain.BuildChainRecommendedCommandName, f, out))
-	experimental.AddCommand(configcmd.NewCmdConfig(configcmd.ConfigRecommendedName, fullName+" "+configcmd.ConfigRecommendedName, f, out, errout))
-	deprecatedDiag := diagnostics.NewCmdDiagnostics(diagnostics.DiagnosticsRecommendedName, fullName+" "+diagnostics.DiagnosticsRecommendedName, out)
-	deprecatedDiag.Deprecated = fmt.Sprintf(`use "oc adm %[1]s" to run diagnostics instead.`, diagnostics.DiagnosticsRecommendedName)
-	experimental.AddCommand(deprecatedDiag)
-	experimental.AddCommand(cmd.NewCmdOptions(out))
-
-	// these groups also live under `oc adm groups {sync,prune}` and are here only for backwards compatibility
-	experimental.AddCommand(sync.NewCmdSync("sync-groups", fullName+" "+"sync-groups", f, out))
-	experimental.AddCommand(sync.NewCmdPrune("prune-groups", fullName+" "+"prune-groups", f, out))
-	return experimental
+// NewCmdKubectl provides exactly the functionality from Kubernetes,
+// but with support for OpenShift resources
+func NewCmdKubectl(name string, out io.Writer) *cobra.Command {
+	flags := pflag.NewFlagSet("", pflag.ContinueOnError)
+	f := clientcmd.New(flags)
+	cmds := kubecmd.NewKubectlCommand(f, os.Stdin, out, os.Stderr)
+	cmds.Aliases = []string{"kubectl"}
+	cmds.Use = name
+	cmds.Short = "Kubernetes cluster management via kubectl"
+	flags.VisitAll(func(flag *pflag.Flag) {
+		if f := cmds.PersistentFlags().Lookup(flag.Name); f == nil {
+			cmds.PersistentFlags().AddFlag(flag)
+		} else {
+			glog.V(5).Infof("already registered flag %s", flag.Name)
+		}
+	})
+	cmds.PersistentFlags().Var(flags.Lookup("config").Value, "kubeconfig", "Specify a kubeconfig file to define the configuration")
+	templates.ActsAsRootCommand(cmds, []string{"options"})
+	cmds.AddCommand(cmd.NewCmdOptions(out))
+	return cmds
 }
 
 // CommandFor returns the appropriate command for this base name,
@@ -315,11 +289,8 @@ func CommandFor(basename string) *cobra.Command {
 
 	switch basename {
 	case "kubectl":
-		cmd = kubecmd.NewKubectlCommand(kcmdutil.NewFactory(nil), in, out, errout)
+		cmd = NewCmdKubectl(basename, out)
 	default:
-		// we only need this change for `oc`.  `kubectl` should behave as close to `kubectl` as we can
-		resource.OAPIToGroupified = legacygroupification.OAPIToGroupified
-		kcmdutil.OAPIToGroupifiedGVK = legacygroupification.OAPIToGroupifiedGVK
 		cmd = NewCommandCLI("oc", "oc", in, out, errout)
 	}
 

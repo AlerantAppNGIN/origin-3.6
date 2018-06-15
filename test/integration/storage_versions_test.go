@@ -8,18 +8,17 @@ import (
 	etcd "github.com/coreos/etcd/client"
 	"github.com/coreos/etcd/clientv3"
 	"golang.org/x/net/context"
-	"k8s.io/kubernetes/pkg/api/legacyscheme"
 
-	batch_v1 "k8s.io/api/batch/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	kapi "k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/apis/batch"
-	kapi "k8s.io/kubernetes/pkg/apis/core"
+	batch_v1 "k8s.io/kubernetes/pkg/apis/batch/v1"
 	kclientset "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset"
 	kbatchclient "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset/typed/batch/internalversion"
 
-	configapi "github.com/openshift/origin/pkg/cmd/server/apis/config"
+	configapi "github.com/openshift/origin/pkg/cmd/server/api"
 	testutil "github.com/openshift/origin/test/util"
 	testserver "github.com/openshift/origin/test/util/server"
 )
@@ -44,7 +43,7 @@ func getGVKFromEtcd3(etcdClient *clientv3.Client, masterConfig *configapi.Master
 	if len(resp.Kvs) == 0 {
 		return nil, fmt.Errorf("no key found for %s", key)
 	}
-	_, gvk, err := legacyscheme.Codecs.UniversalDeserializer().Decode(resp.Kvs[0].Value, nil, nil)
+	_, gvk, err := kapi.Codecs.UniversalDeserializer().Decode(resp.Kvs[0].Value, nil, nil)
 	return gvk, err
 }
 
@@ -58,16 +57,20 @@ func setupStorageTests(t *testing.T, ns string) (*configapi.MasterConfig, kclien
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	clusterAdminClient, err := testutil.GetClusterAdminClient(clusterAdminKubeConfig)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	clusterAdminClientConfig, err := testutil.GetClusterAdminClientConfig(clusterAdminKubeConfig)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
 	// create the containing project
-	if _, _, err := testserver.CreateNewProject(clusterAdminClientConfig, ns, "admin"); err != nil {
+	if _, err := testserver.CreateNewProject(clusterAdminClient, *clusterAdminClientConfig, ns, "admin"); err != nil {
 		t.Fatalf("unexpected error creating the project: %v", err)
 	}
-	projectAdminKubeClient, _, err := testutil.GetClientForUser(clusterAdminClientConfig, "admin")
+	_, projectAdminKubeClient, _, err := testutil.GetClientForUser(*clusterAdminClientConfig, "admin")
 	if err != nil {
 		t.Fatalf("unexpected error getting project admin client: %v", err)
 	}
@@ -81,7 +84,7 @@ func TestStorageVersions(t *testing.T) {
 
 	masterConfig, kubeClient := setupStorageTests(t, ns)
 	defer testserver.CleanupMasterEtcd(t, masterConfig)
-	etcdClient, err := testserver.MasterEtcdClients(masterConfig)
+	_, etcdClient, err := testserver.MasterEtcdClients(masterConfig)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -162,7 +165,7 @@ func TestStorageVersions(t *testing.T) {
 
 // 	// Ensure that both versions of the same object are equal when converted
 // 	convertedExtensionsHPA := &autoscaling.HorizontalPodAutoscaler{}
-// 	if err := legacyscheme.Scheme.Convert(extensionsHPA, convertedExtensionsHPA, nil); err != nil {
+// 	if err := kapi.Scheme.Convert(extensionsHPA, convertedExtensionsHPA, nil); err != nil {
 // 		t.Fatalf("Conversion error from extensions.HPA to autoscaling.HPA: %v", err)
 // 	}
 // 	if !kapihelper.Semantic.DeepEqual(autoscalingHPA.Spec, convertedExtensionsHPA.Spec) {

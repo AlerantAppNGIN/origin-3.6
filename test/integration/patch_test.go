@@ -14,10 +14,9 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	apiendpointhandlers "k8s.io/apiserver/pkg/endpoints/handlers"
 	restclient "k8s.io/client-go/rest"
-	kapi "k8s.io/kubernetes/pkg/apis/core"
+	kapi "k8s.io/kubernetes/pkg/api"
 
 	templatesapi "github.com/openshift/origin/pkg/template/apis/template"
-	templateclient "github.com/openshift/origin/pkg/template/generated/internalclientset"
 	testutil "github.com/openshift/origin/test/util"
 	testserver "github.com/openshift/origin/test/util/server"
 )
@@ -29,11 +28,10 @@ func TestPatchConflicts(t *testing.T) {
 	}
 	defer testserver.CleanupMasterEtcd(t, masterConfig)
 
-	clusterAdminClientConfig, err := testutil.GetClusterAdminClientConfig(clusterAdminKubeConfig)
+	clusterAdminClient, err := testutil.GetClusterAdminClient(clusterAdminKubeConfig)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	clusterAdminTemplateClient := templateclient.NewForConfigOrDie(clusterAdminClientConfig).Template()
 
 	clusterAdminKubeClientset, err := testutil.GetClusterAdminKubeClient(clusterAdminKubeConfig)
 	if err != nil {
@@ -49,7 +47,7 @@ func TestPatchConflicts(t *testing.T) {
 	if _, err := clusterAdminKubeClientset.Core().Secrets(ns).Create(&kapi.Secret{ObjectMeta: metav1.ObjectMeta{Name: objName}}); err != nil {
 		t.Fatalf("Error creating k8s resource:%v", err)
 	}
-	if _, err := clusterAdminTemplateClient.Templates(ns).Create(&templatesapi.Template{ObjectMeta: metav1.ObjectMeta{Name: objName}}); err != nil {
+	if _, err := clusterAdminClient.Templates(ns).Create(&templatesapi.Template{ObjectMeta: metav1.ObjectMeta{Name: objName}}); err != nil {
 		t.Fatalf("Error creating origin resource:%v", err)
 	}
 
@@ -62,7 +60,7 @@ func TestPatchConflicts(t *testing.T) {
 			resource: "secrets",
 		},
 		{
-			client:   clusterAdminTemplateClient.RESTClient(),
+			client:   clusterAdminClient.RESTClient,
 			resource: "templates",
 		},
 	}

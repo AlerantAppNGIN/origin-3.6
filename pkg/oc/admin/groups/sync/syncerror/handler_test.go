@@ -6,7 +6,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/openshift/origin/pkg/oauthserver/ldaputil"
+	"github.com/openshift/origin/pkg/auth/ldaputil"
 )
 
 func TestSuppressMemberLookupErrorOutOfBounds(t *testing.T) {

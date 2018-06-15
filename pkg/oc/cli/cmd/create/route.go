@@ -6,15 +6,15 @@ import (
 
 	"github.com/spf13/cobra"
 
-	kapi "k8s.io/kubernetes/pkg/apis/core"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	kapi "k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/kubectl/cmd/templates"
 	kcmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
+	"k8s.io/kubernetes/pkg/kubectl/resource"
 
 	cmdutil "github.com/openshift/origin/pkg/cmd/util"
-	"github.com/openshift/origin/pkg/cmd/util/route"
-	"github.com/openshift/origin/pkg/oc/cli/util/clientcmd"
+	"github.com/openshift/origin/pkg/cmd/util/clientcmd"
 	routeapi "github.com/openshift/origin/pkg/route/apis/route"
-	routeclientinternal "github.com/openshift/origin/pkg/route/generated/internalclientset"
 	fileutil "github.com/openshift/origin/pkg/util/file"
 )
 
@@ -93,15 +93,7 @@ func NewCmdCreateEdgeRoute(fullName string, f *clientcmd.Factory, out io.Writer)
 
 // CreateEdgeRoute implements the behavior to run the create edge route command.
 func CreateEdgeRoute(f *clientcmd.Factory, out io.Writer, cmd *cobra.Command, args []string) error {
-	kc, err := f.ClientSet()
-	if err != nil {
-		return err
-	}
-	clientConfig, err := f.ClientConfig()
-	if err != nil {
-		return err
-	}
-	routeClient, err := routeclientinternal.NewForConfig(clientConfig)
+	oc, kc, err := f.Clients()
 	if err != nil {
 		return err
 	}
@@ -117,7 +109,7 @@ func CreateEdgeRoute(f *clientcmd.Factory, out io.Writer, cmd *cobra.Command, ar
 	if err != nil {
 		return err
 	}
-	route, err := route.UnsecuredRoute(kc, ns, routeName, serviceName, kcmdutil.GetFlagString(cmd, "port"), false)
+	route, err := cmdutil.UnsecuredRoute(kc, ns, routeName, serviceName, kcmdutil.GetFlagString(cmd, "port"), false)
 	if err != nil {
 		return err
 	}
@@ -157,19 +149,25 @@ func CreateEdgeRoute(f *clientcmd.Factory, out io.Writer, cmd *cobra.Command, ar
 	actualRoute := route
 
 	if !dryRun {
-		actualRoute, err = routeClient.Route().Routes(ns).Create(route)
+		actualRoute, err = oc.Routes(ns).Create(route)
 		if err != nil {
 			return err
 		}
 	}
 
-	shortOutput := kcmdutil.GetFlagString(cmd, "output") == "name"
-	if !shortOutput && kcmdutil.GetFlagString(cmd, "output") != "" {
-		kcmdutil.PrintObject(cmd, actualRoute, out)
-	} else {
-		kcmdutil.PrintSuccess(shortOutput, out, actualRoute, dryRun, "created")
+	mapper, typer := f.Object()
+	resourceMapper := &resource.Mapper{
+		ObjectTyper:  typer,
+		RESTMapper:   mapper,
+		ClientMapper: resource.ClientMapperFunc(f.ClientForMapping),
+	}
+	info, err := resourceMapper.InfoForObject(actualRoute, []schema.GroupVersionKind{{Group: ""}})
+	if err != nil {
+		return err
 	}
 
+	shortOutput := kcmdutil.GetFlagString(cmd, "output") == "name"
+	kcmdutil.PrintSuccess(mapper, shortOutput, out, info.Mapping.Resource, info.Name, dryRun, "created")
 	return nil
 }
 
@@ -217,15 +215,7 @@ func NewCmdCreatePassthroughRoute(fullName string, f *clientcmd.Factory, out io.
 
 // CreatePassthroughRoute implements the behavior to run the create passthrough route command.
 func CreatePassthroughRoute(f *clientcmd.Factory, out io.Writer, cmd *cobra.Command, args []string) error {
-	kc, err := f.ClientSet()
-	if err != nil {
-		return err
-	}
-	clientConfig, err := f.ClientConfig()
-	if err != nil {
-		return err
-	}
-	routeClient, err := routeclientinternal.NewForConfig(clientConfig)
+	oc, kc, err := f.Clients()
 	if err != nil {
 		return err
 	}
@@ -241,7 +231,7 @@ func CreatePassthroughRoute(f *clientcmd.Factory, out io.Writer, cmd *cobra.Comm
 	if err != nil {
 		return err
 	}
-	route, err := route.UnsecuredRoute(kc, ns, routeName, serviceName, kcmdutil.GetFlagString(cmd, "port"), false)
+	route, err := cmdutil.UnsecuredRoute(kc, ns, routeName, serviceName, kcmdutil.GetFlagString(cmd, "port"), false)
 	if err != nil {
 		return err
 	}
@@ -265,19 +255,25 @@ func CreatePassthroughRoute(f *clientcmd.Factory, out io.Writer, cmd *cobra.Comm
 	actualRoute := route
 
 	if !dryRun {
-		actualRoute, err = routeClient.Route().Routes(ns).Create(route)
+		actualRoute, err = oc.Routes(ns).Create(route)
 		if err != nil {
 			return err
 		}
 	}
 
-	shortOutput := kcmdutil.GetFlagString(cmd, "output") == "name"
-	if !shortOutput && kcmdutil.GetFlagString(cmd, "output") != "" {
-		kcmdutil.PrintObject(cmd, actualRoute, out)
-	} else {
-		kcmdutil.PrintSuccess(shortOutput, out, actualRoute, dryRun, "created")
+	mapper, typer := f.Object()
+	resourceMapper := &resource.Mapper{
+		ObjectTyper:  typer,
+		RESTMapper:   mapper,
+		ClientMapper: resource.ClientMapperFunc(f.ClientForMapping),
+	}
+	info, err := resourceMapper.InfoForObject(actualRoute, []schema.GroupVersionKind{{Group: ""}})
+	if err != nil {
+		return err
 	}
 
+	shortOutput := kcmdutil.GetFlagString(cmd, "output") == "name"
+	kcmdutil.PrintSuccess(mapper, shortOutput, out, info.Mapping.Resource, info.Name, dryRun, "created")
 	return nil
 }
 
@@ -327,6 +323,7 @@ func NewCmdCreateReencryptRoute(fullName string, f *clientcmd.Factory, out io.Wr
 	cmd.Flags().String("ca-cert", "", "Path to a CA certificate file.")
 	cmd.MarkFlagFilename("ca-cert")
 	cmd.Flags().String("dest-ca-cert", "", "Path to a CA certificate file, used for securing the connection from the router to the destination.")
+	cmd.MarkFlagRequired("dest-ca-cert")
 	cmd.MarkFlagFilename("dest-ca-cert")
 	cmd.Flags().String("wildcard-policy", "", "Sets the WildcardPolicy for the hostname, the default is \"None\". valid values are \"None\" and \"Subdomain\"")
 
@@ -335,15 +332,7 @@ func NewCmdCreateReencryptRoute(fullName string, f *clientcmd.Factory, out io.Wr
 
 // CreateReencryptRoute implements the behavior to run the create reencrypt route command.
 func CreateReencryptRoute(f *clientcmd.Factory, out io.Writer, cmd *cobra.Command, args []string) error {
-	kc, err := f.ClientSet()
-	if err != nil {
-		return err
-	}
-	clientConfig, err := f.ClientConfig()
-	if err != nil {
-		return err
-	}
-	routeClient, err := routeclientinternal.NewForConfig(clientConfig)
+	oc, kc, err := f.Clients()
 	if err != nil {
 		return err
 	}
@@ -359,7 +348,7 @@ func CreateReencryptRoute(f *clientcmd.Factory, out io.Writer, cmd *cobra.Comman
 	if err != nil {
 		return err
 	}
-	route, err := route.UnsecuredRoute(kc, ns, routeName, serviceName, kcmdutil.GetFlagString(cmd, "port"), false)
+	route, err := cmdutil.UnsecuredRoute(kc, ns, routeName, serviceName, kcmdutil.GetFlagString(cmd, "port"), false)
 	if err != nil {
 		return err
 	}
@@ -405,19 +394,24 @@ func CreateReencryptRoute(f *clientcmd.Factory, out io.Writer, cmd *cobra.Comman
 	actualRoute := route
 
 	if !dryRun {
-		actualRoute, err = routeClient.Route().Routes(ns).Create(route)
+		actualRoute, err = oc.Routes(ns).Create(route)
 		if err != nil {
 			return err
 		}
 	}
-
-	shortOutput := kcmdutil.GetFlagString(cmd, "output") == "name"
-	if !shortOutput && kcmdutil.GetFlagString(cmd, "output") != "" {
-		kcmdutil.PrintObject(cmd, actualRoute, out)
-	} else {
-		kcmdutil.PrintSuccess(shortOutput, out, actualRoute, dryRun, "created")
+	mapper, typer := f.Object()
+	resourceMapper := &resource.Mapper{
+		ObjectTyper:  typer,
+		RESTMapper:   mapper,
+		ClientMapper: resource.ClientMapperFunc(f.ClientForMapping),
+	}
+	info, err := resourceMapper.InfoForObject(actualRoute, []schema.GroupVersionKind{{Group: ""}})
+	if err != nil {
+		return err
 	}
 
+	shortOutput := kcmdutil.GetFlagString(cmd, "output") == "name"
+	kcmdutil.PrintSuccess(mapper, shortOutput, out, info.Mapping.Resource, info.Name, dryRun, "created")
 	return nil
 }
 

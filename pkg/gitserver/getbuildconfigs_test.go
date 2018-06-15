@@ -8,7 +8,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 
 	buildapi "github.com/openshift/origin/pkg/build/apis/build"
-	buildfake "github.com/openshift/origin/pkg/build/generated/internalclientset/fake"
+	"github.com/openshift/origin/pkg/client/testclient"
 )
 
 func bc(name string, annotation string) *buildapi.BuildConfig {
@@ -61,7 +61,7 @@ func TestGetRepositoryBuildConfigs(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		client := buildfake.NewSimpleClientset(test.bcs...)
+		client := testclient.NewSimpleFake(test.bcs...)
 		output := &bytes.Buffer{}
 		GetRepositoryBuildConfigs(client, test.searchFor, output)
 		for _, c := range test.shouldContain {

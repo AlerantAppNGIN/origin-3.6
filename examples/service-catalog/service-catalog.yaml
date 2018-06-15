@@ -4,6 +4,29 @@ metadata:
   name: service-catalog
 objects:
 
+- kind: ClusterRole
+  apiVersion: v1
+  metadata:
+    name: servicecatalog-serviceclass-viewer
+  rules:
+  - apiGroups:
+    - servicecatalog.k8s.io
+    resources:
+    - serviceclasses
+    verbs:
+    - list
+    - watch
+    - get
+
+- kind: ClusterRoleBinding
+  apiVersion: v1
+  metadata:
+    name: servicecatalog-serviceclass-viewer-binding
+  roleRef:
+    name: servicecatalog-serviceclass-viewer
+  groupNames:
+  - system:authenticated
+
 - kind: ServiceAccount
   apiVersion: v1
   metadata:
@@ -13,6 +36,195 @@ objects:
   apiVersion: v1
   metadata:
     name: service-catalog-apiserver
+
+- kind: ClusterRole
+  apiVersion: v1
+  metadata:
+    name: sar-creator
+  rules:
+  - apiGroups:
+    - ""
+    resources:
+    - subjectaccessreviews.authorization.k8s.io
+    verbs:
+    - create
+
+- kind: ClusterRoleBinding
+  apiVersion: v1
+  metadata:
+    name: service-catalog-sar-creator-binding
+  roleRef:
+    name: sar-creator
+  userNames:
+    - system:serviceaccount:kube-service-catalog:service-catalog-apiserver
+
+- kind: ClusterRole
+  apiVersion: v1
+  metadata:
+    name: namespace-viewer
+  rules:
+  - apiGroups:
+    - ""
+    resources:
+    - namespaces
+    verbs:
+    - list
+    - watch
+    - get
+
+- kind: ClusterRoleBinding
+  apiVersion: v1
+  metadata:
+    name: service-catalog-namespace-viewer-binding
+  roleRef:
+    name: namespace-viewer
+  userNames:
+    - system:serviceaccount:service-catalog:service-catalog-apiserver
+
+- kind: ClusterRoleBinding
+  apiVersion: v1
+  metadata:
+    name: service-catalog-controller-namespace-viewer-binding
+  roleRef:
+    name: namespace-viewer
+  userNames:
+    - system:serviceaccount:service-catalog:service-catalog-controller
+
+- kind: ClusterRole
+  apiVersion: v1
+  metadata:
+    name: service-catalog-controller
+  rules:
+  - apiGroups:
+    - ""
+    resources:
+    - secrets
+    verbs:
+    - create
+    - update
+    - patch
+    - delete
+    - get
+    - list
+    - watch
+  - apiGroups:
+    - servicecatalog.k8s.io
+    resources:
+    - brokers/status
+    - instances/status
+    - bindings/status
+    verbs:
+    - update
+  - apiGroups:
+    - servicecatalog.k8s.io
+    resources:
+    - brokers
+    - instances
+    - bindings
+    verbs:
+    - list
+    - watch
+  - apiGroups:
+    - ""
+    resources:
+    - events
+    verbs:
+    - patch
+    - create
+  - apiGroups:
+    - servicecatalog.k8s.io
+    resources:
+    - serviceclasses
+    verbs:
+    - create
+    - delete
+    - update
+    - patch
+    - get
+    - list
+    - watch
+  - apiGroups:
+    - settings.k8s.io
+    resources:
+    - podpresets
+    verbs:
+    - create
+    - update
+    - delete
+    - get
+    - list
+    - watch
+
+- kind: ClusterRoleBinding
+  apiVersion: v1
+  metadata:
+    name: service-catalog-controller-binding
+  roleRef:
+    name: service-catalog-controller
+  userNames:
+    - system:serviceaccount:service-catalog:service-catalog-controller
+  
+- kind: Role
+  apiVersion: v1
+  metadata:
+    name: endpoint-accessor
+  rules:
+  - apiGroups:
+    - ""
+    resources:
+    - endpoints
+    verbs:
+    - list
+    - watch
+    - get
+    - create
+    - update
+
+- kind: RoleBinding
+  apiVersion: v1
+  metadata:
+    name: endpointer-accessor-binding
+  roleRef:
+    name: endpoint-accessor
+    namespace: service-catalog
+  userNames:
+    - system:serviceaccount:service-catalog:service-catalog-controller
+
+- kind: Role
+  apiVersion: v1
+  metadata:
+    name: extension-apiserver-authentication-reader
+    namespace: ${KUBE_SYSTEM_NAMESPACE}
+  rules:
+  - apiGroups:
+    - ""
+    resourceNames:
+    - extension-apiserver-authentication
+    resources:
+    - configmaps
+    verbs:
+    - get
+
+- kind: RoleBinding
+  apiVersion: v1
+  metadata:
+    name: extension-apiserver-authentication-reader-binding
+    namespace: ${KUBE_SYSTEM_NAMESPACE}
+  roleRef:
+    name: extension-apiserver-authentication-reader
+    namespace: kube-system
+  userNames:
+    - system:serviceaccount:service-catalog:service-catalog-apiserver
+
+- kind: ClusterRoleBinding
+  apiVersion: v1
+  metadata:
+    name: system:auth-delegator-binding
+  roleRef:
+    name: system:auth-delegator
+  userNames:
+    - system:serviceaccount:service-catalog:service-catalog-apiserver
+
 
 - kind: Deployment
   apiVersion: extensions/v1beta1
@@ -38,11 +250,10 @@ objects:
         serviceAccountName: service-catalog-apiserver
         containers:
         - command: 
-          - service-catalog
-          args:
           - apiserver
-          - --enable-admission-plugins
-          - KubernetesNamespaceLifecycle,DefaultServicePlan,ServiceBindingsLifecycle,ServicePlanChangeValidator,BrokerAuthSarCheck
+          args:
+          - --admission-control
+          - KubernetesNamespaceLifecycle
           - --storage-type
           - etcd
           - --secure-port
@@ -50,11 +261,9 @@ objects:
           - --etcd-servers
           - http://localhost:2379
           - -v
-          - "3"
+          - "10"
           - --cors-allowed-origins
           - ${CORS_ALLOWED_ORIGIN}
-          - --feature-gates
-          - OriginatingIdentity=true
           image: ${SERVICE_CATALOG_IMAGE}
           imagePullPolicy: IfNotPresent
           name: apiserver
@@ -70,7 +279,7 @@ objects:
         - env:
           - name: ETCD_DATA_DIR
             value: /data-dir
-          image: quay.io/coreos/etcd:v3.3
+          image: quay.io/coreos/etcd
           imagePullPolicy: IfNotPresent
           name: etcd
           resources: {}
@@ -137,34 +346,24 @@ objects:
         serviceAccountName: service-catalog-controller
         containers:
         - command: 
-          - service-catalog
-          args:
           - controller-manager
-          - --secure-port
-          - "6443"
+          args:
           - -v
-          - "3"
-          - --cluster-id-configmap-namespace=kube-service-catalog
+          - "5"
           - --leader-election-namespace
-          - kube-service-catalog
-          - --leader-elect-resource-lock
-          - configmaps
+          - service-catalog
           - --broker-relist-interval
           - "5m"
-          - --feature-gates
-          - OriginatingIdentity=true
-          - --feature-gates
-          - AsyncBindingOperations=true
           image: ${SERVICE_CATALOG_IMAGE}
           imagePullPolicy: IfNotPresent
           name: controller-manager
           ports:
-          - containerPort: 6443
+          - containerPort: 8080
             protocol: TCP
           resources: {}
           terminationMessagePath: /dev/termination-log
           volumeMounts:
-          - mountPath: /var/run/kubernetes-service-catalog
+          - mountPath: /etc/service-catalog-ssl
             name: service-catalog-ssl
             readOnly: true
         dnsPolicy: ClusterFirst
@@ -175,43 +374,23 @@ objects:
         - name: service-catalog-ssl
           secret:
             defaultMode: 420
-            secretName: controllermanager-ssl
             items:
             - key: tls.crt
               path: apiserver.crt
-            - key: tls.key
-              path: apiserver.key
+            secretName: apiserver-ssl
 - kind: Service
   apiVersion: v1
   metadata:
     name: controller-manager
-    annotations:
-      service.alpha.openshift.io/serving-cert-secret-name: 'controllermanager-ssl'
-      prometheus.io/scrape: "true"
-      prometheus.io/scheme: https
   spec:
-    type: ClusterIP
     ports:
-    - name: secure
-      port: 6443
+    - port: 6443
       protocol: TCP
       targetPort: 6443
     selector:
       app: controller-manager
     sessionAffinity: None
-- apiVersion: apiregistration.k8s.io/v1beta1
-  kind: APIService
-  metadata:
-    name: v1beta1.servicecatalog.k8s.io
-  spec:
-    group: servicecatalog.k8s.io
-    version: v1beta1
-    service:
-      namespace: kube-service-catalog
-      name: apiserver
-    insecureSkipTLSVerify: true
-    groupPriorityMinimum: 200
-    versionPriority: 20
+    type: ClusterIP
 
 parameters:
 - description: CORS allowed origin for the API server, if you need to specify multiple modify the Deployment after creation
@@ -229,3 +408,8 @@ parameters:
   name: SERVICE_CATALOG_SERVICE_IP
   required: true
   value: 172.30.1.2
+- description: Do not change this value.
+  displayName: Name of the kube-system namespace
+  name: KUBE_SYSTEM_NAMESPACE
+  required: true
+  value: kube-system

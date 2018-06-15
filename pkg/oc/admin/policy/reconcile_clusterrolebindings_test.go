@@ -3,60 +3,66 @@ package policy
 import (
 	"testing"
 
-	kapihelper "k8s.io/kubernetes/pkg/apis/core/helper"
-	"k8s.io/kubernetes/pkg/apis/rbac"
+	kapi "k8s.io/kubernetes/pkg/api"
+	kapihelper "k8s.io/kubernetes/pkg/api/helper"
+
+	authorizationapi "github.com/openshift/origin/pkg/authorization/apis/authorization"
 )
 
-func binding(roleName string, subjects []rbac.Subject) *rbac.ClusterRoleBinding {
-	return &rbac.ClusterRoleBinding{RoleRef: rbac.RoleRef{Name: roleName}, Subjects: subjects}
+func binding(roleRef kapi.ObjectReference, subjects []kapi.ObjectReference) *authorizationapi.ClusterRoleBinding {
+	return &authorizationapi.ClusterRoleBinding{RoleRef: roleRef, Subjects: subjects}
 }
 
-func subjects(names ...string) []rbac.Subject {
-	r := []rbac.Subject{}
+func ref(name string) kapi.ObjectReference {
+	return kapi.ObjectReference{Name: name}
+}
+
+func refs(names ...string) []kapi.ObjectReference {
+	r := []kapi.ObjectReference{}
 	for _, name := range names {
-		r = append(r, rbac.Subject{Name: name})
+		r = append(r, ref(name))
 	}
 	return r
 }
 
 func TestDiffObjectReferenceLists(t *testing.T) {
 	tests := map[string]struct {
-		A             []rbac.Subject
-		B             []rbac.Subject
-		ExpectedOnlyA []rbac.Subject
-		ExpectedOnlyB []rbac.Subject
+		A             []kapi.ObjectReference
+		B             []kapi.ObjectReference
+		ExpectedOnlyA []kapi.ObjectReference
+		ExpectedOnlyB []kapi.ObjectReference
 	}{
 		"empty": {},
 
 		"matching, order-independent": {
-			A: subjects("foo", "bar"),
-			B: subjects("bar", "foo"),
+			A: refs("foo", "bar"),
+			B: refs("bar", "foo"),
 		},
 
 		"partial match": {
-			A:             subjects("foo", "bar"),
-			B:             subjects("foo", "baz"),
-			ExpectedOnlyA: subjects("bar"),
-			ExpectedOnlyB: subjects("baz"),
+			A:             refs("foo", "bar"),
+			B:             refs("foo", "baz"),
+			ExpectedOnlyA: refs("bar"),
+			ExpectedOnlyB: refs("baz"),
 		},
 
 		"missing": {
-			A:             subjects("foo"),
-			B:             subjects("bar"),
-			ExpectedOnlyA: subjects("foo"),
-			ExpectedOnlyB: subjects("bar"),
+			A:             refs("foo"),
+			B:             refs("bar"),
+			ExpectedOnlyA: refs("foo"),
+			ExpectedOnlyB: refs("bar"),
 		},
 
 		"remove duplicates": {
-			A:             subjects("foo", "foo"),
-			B:             subjects("bar", "bar"),
-			ExpectedOnlyA: subjects("foo"),
-			ExpectedOnlyB: subjects("bar"),
+			A:             refs("foo", "foo"),
+			B:             refs("bar", "bar"),
+			ExpectedOnlyA: refs("foo"),
+			ExpectedOnlyB: refs("bar"),
 		},
 	}
 
 	for k, tc := range tests {
-		onlyA, onlyB := DiffSubjects(tc.A, tc.B)
+		onlyA, onlyB := DiffObjectReferenceLists(tc.A, tc.B)
 		if !kapihelper.Semantic.DeepEqual(onlyA, tc.ExpectedOnlyA) {
 			t.Errorf("%s: Expected %#v, got %#v", k, tc.ExpectedOnlyA, onlyA)
 		}
@@ -68,25 +74,25 @@ func TestDiffObjectReferenceLists(t *testing.T) {
 
 func TestComputeUpdate(t *testing.T) {
 	tests := map[string]struct {
-		ExpectedBinding *rbac.ClusterRoleBinding
-		ActualBinding   *rbac.ClusterRoleBinding
-		ExcludeSubjects []rbac.Subject
+		ExpectedBinding *authorizationapi.ClusterRoleBinding
+		ActualBinding   *authorizationapi.ClusterRoleBinding
+		ExcludeSubjects []kapi.ObjectReference
 		Union           bool
 
-		ExpectedUpdatedBinding *rbac.ClusterRoleBinding
+		ExpectedUpdatedBinding *authorizationapi.ClusterRoleBinding
 		ExpectedUpdateNeeded   bool
 	}{
 		"match without union": {
-			ExpectedBinding: binding("role", subjects("a")),
-			ActualBinding:   binding("role", subjects("a")),
+			ExpectedBinding: binding(ref("role"), refs("a")),
+			ActualBinding:   binding(ref("role"), refs("a")),
 			Union:           false,
 
 			ExpectedUpdatedBinding: nil,
 			ExpectedUpdateNeeded:   false,
 		},
 		"match with union": {
-			ExpectedBinding: binding("role", subjects("a")),
-			ActualBinding:   binding("role", subjects("a")),
+			ExpectedBinding: binding(ref("role"), refs("a")),
+			ActualBinding:   binding(ref("role"), refs("a")),
 			Union:           true,
 
 			ExpectedUpdatedBinding: nil,
@@ -94,25 +100,25 @@ func TestComputeUpdate(t *testing.T) {
 		},
 
 		"different roleref with identical subjects": {
-			ExpectedBinding: binding("role", subjects("a")),
-			ActualBinding:   binding("differentRole", subjects("a")),
+			ExpectedBinding: binding(ref("role"), refs("a")),
+			ActualBinding:   binding(ref("differentRole"), refs("a")),
 			Union:           true,
 
-			ExpectedUpdatedBinding: binding("role", subjects("a")),
+			ExpectedUpdatedBinding: binding(ref("role"), refs("a")),
 			ExpectedUpdateNeeded:   true,
 		},
 
 		"extra subjects without union": {
-			ExpectedBinding: binding("role", subjects("a")),
-			ActualBinding:   binding("role", subjects("a", "b")),
+			ExpectedBinding: binding(ref("role"), refs("a")),
+			ActualBinding:   binding(ref("role"), refs("a", "b")),
 			Union:           false,
 
-			ExpectedUpdatedBinding: binding("role", subjects("a")),
+			ExpectedUpdatedBinding: binding(ref("role"), refs("a")),
 			ExpectedUpdateNeeded:   true,
 		},
 		"extra subjects with union": {
-			ExpectedBinding: binding("role", subjects("a")),
-			ActualBinding:   binding("role", subjects("a", "b")),
+			ExpectedBinding: binding(ref("role"), refs("a")),
+			ActualBinding:   binding(ref("role"), refs("a", "b")),
 			Union:           true,
 
 			ExpectedUpdatedBinding: nil,
@@ -120,56 +126,56 @@ func TestComputeUpdate(t *testing.T) {
 		},
 
 		"missing subjects without union": {
-			ExpectedBinding: binding("role", subjects("a", "c")),
-			ActualBinding:   binding("role", subjects("a", "b")),
+			ExpectedBinding: binding(ref("role"), refs("a", "c")),
+			ActualBinding:   binding(ref("role"), refs("a", "b")),
 			Union:           false,
 
-			ExpectedUpdatedBinding: binding("role", subjects("a", "c")),
+			ExpectedUpdatedBinding: binding(ref("role"), refs("a", "c")),
 			ExpectedUpdateNeeded:   true,
 		},
 		"missing subjects with union": {
-			ExpectedBinding: binding("role", subjects("a", "c")),
-			ActualBinding:   binding("role", subjects("a", "b")),
+			ExpectedBinding: binding(ref("role"), refs("a", "c")),
+			ActualBinding:   binding(ref("role"), refs("a", "b")),
 			Union:           true,
 
-			ExpectedUpdatedBinding: binding("role", subjects("a", "c", "b")),
+			ExpectedUpdatedBinding: binding(ref("role"), refs("a", "c", "b")),
 			ExpectedUpdateNeeded:   true,
 		},
 
 		"do not add should make update unnecessary": {
-			ExpectedBinding: binding("role", subjects("a", "b")),
-			ActualBinding:   binding("role", subjects("a")),
-			ExcludeSubjects: subjects("b"),
+			ExpectedBinding: binding(ref("role"), refs("a", "b")),
+			ActualBinding:   binding(ref("role"), refs("a")),
+			ExcludeSubjects: refs("b"),
 			Union:           false,
 
 			ExpectedUpdatedBinding: nil,
 			ExpectedUpdateNeeded:   false,
 		},
 		"do not add should not add": {
-			ExpectedBinding: binding("role", subjects("a", "b", "c")),
-			ActualBinding:   binding("role", subjects("a")),
-			ExcludeSubjects: subjects("c"),
+			ExpectedBinding: binding(ref("role"), refs("a", "b", "c")),
+			ActualBinding:   binding(ref("role"), refs("a")),
+			ExcludeSubjects: refs("c"),
 			Union:           false,
 
-			ExpectedUpdatedBinding: binding("role", subjects("a", "b")),
+			ExpectedUpdatedBinding: binding(ref("role"), refs("a", "b")),
 			ExpectedUpdateNeeded:   true,
 		},
 		"do not add should not remove": {
-			ExpectedBinding: binding("role", subjects("a", "b")),
-			ActualBinding:   binding("role", subjects("a", "b", "c")),
-			ExcludeSubjects: subjects("b"),
+			ExpectedBinding: binding(ref("role"), refs("a", "b")),
+			ActualBinding:   binding(ref("role"), refs("a", "b", "c")),
+			ExcludeSubjects: refs("b"),
 			Union:           false,
 
-			ExpectedUpdatedBinding: binding("role", subjects("a", "b")),
+			ExpectedUpdatedBinding: binding(ref("role"), refs("a", "b")),
 			ExpectedUpdateNeeded:   true,
 		},
 		"do not add complex": {
-			ExpectedBinding: binding("role", subjects("matching1", "matching2", "missing1", "missing2")),
-			ActualBinding:   binding("role", subjects("matching1", "matching2", "extra1", "extra2")),
-			ExcludeSubjects: subjects("matching1", "missing1", "extra1"),
+			ExpectedBinding: binding(ref("role"), refs("matching1", "matching2", "missing1", "missing2")),
+			ActualBinding:   binding(ref("role"), refs("matching1", "matching2", "extra1", "extra2")),
+			ExcludeSubjects: refs("matching1", "missing1", "extra1"),
 			Union:           false,
 
-			ExpectedUpdatedBinding: binding("role", subjects("matching1", "matching2", "missing2")),
+			ExpectedUpdatedBinding: binding(ref("role"), refs("matching1", "matching2", "missing2")),
 			ExpectedUpdateNeeded:   true,
 		},
 	}

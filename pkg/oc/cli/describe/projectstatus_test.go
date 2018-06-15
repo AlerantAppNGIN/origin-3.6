@@ -2,36 +2,21 @@ package describe
 
 import (
 	"bytes"
-	"io/ioutil"
 	"strings"
 	"testing"
 	"text/tabwriter"
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
-	"k8s.io/apimachinery/pkg/util/yaml"
-	clientgotesting "k8s.io/client-go/testing"
-	"k8s.io/kubernetes/pkg/api/legacyscheme"
-	kubefakeclient "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset/fake"
-	kubeclientscheme "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset/scheme"
+	kapi "k8s.io/kubernetes/pkg/api"
 
 	oapi "github.com/openshift/origin/pkg/api"
-	appsfakeclient "github.com/openshift/origin/pkg/apps/generated/internalclientset/fake"
-	appsclientscheme "github.com/openshift/origin/pkg/apps/generated/internalclientset/scheme"
-	buildfakeclient "github.com/openshift/origin/pkg/build/generated/internalclientset/fake"
-	buildclientscheme "github.com/openshift/origin/pkg/build/generated/internalclientset/scheme"
-	imagefakeclient "github.com/openshift/origin/pkg/image/generated/internalclientset/fake"
-	imageclientscheme "github.com/openshift/origin/pkg/image/generated/internalclientset/scheme"
-	osgraph "github.com/openshift/origin/pkg/oc/graph/genericgraph"
+	osgraph "github.com/openshift/origin/pkg/api/graph"
+	"github.com/openshift/origin/pkg/client/testclient"
 	projectapi "github.com/openshift/origin/pkg/project/apis/project"
-	projectfakeclient "github.com/openshift/origin/pkg/project/generated/internalclientset/fake"
-	projectclientscheme "github.com/openshift/origin/pkg/project/generated/internalclientset/scheme"
-	routefakeclient "github.com/openshift/origin/pkg/route/generated/internalclientset/fake"
-	routeclientscheme "github.com/openshift/origin/pkg/route/generated/internalclientset/scheme"
 )
 
 func mustParseTime(t string) time.Time {
@@ -328,23 +313,6 @@ func TestProjectStatus(t *testing.T) {
 			},
 			Time: mustParseTime("2015-04-07T04:12:25Z"),
 		},
-		"with deployment": {
-			File:  "deployment.yaml",
-			ErrFn: func(err error) bool { return err == nil },
-			Extra: []runtime.Object{
-				&projectapi.Project{
-					ObjectMeta: metav1.ObjectMeta{Name: "example", Namespace: ""},
-				},
-			},
-			Contains: []string{
-				"In project example on server https://example.com:8443\n",
-				"svc/ruby-deploy",
-				"deployment/ruby-deploy deploys istag/ruby-deploy:latest <-",
-				"bc/ruby-deploy source builds https://github.com/openshift/ruby-ex.git on istag/ruby-22-centos7:latest",
-				"not built yet",
-			},
-			Time: mustParseTime("2015-04-07T04:12:25Z"),
-		},
 		"with stateful sets": {
 			File: "statefulset.yaml",
 			Extra: []runtime.Object{
@@ -356,8 +324,7 @@ func TestProjectStatus(t *testing.T) {
 			Contains: []string{
 				"In project example on server https://example.com:8443\n",
 				"svc/galera (headless):3306",
-				"statefulset/mysql manages erkules/galera:basic",
-				"created less than a second ago - 3 pods",
+				"statefulset/mysql manages erkules/galera:basic, created less than a second ago - 3 pods",
 				"* pod/mysql-1 has restarted 7 times",
 			},
 			Time: mustParseTime("2015-04-07T04:12:25Z"),
@@ -433,32 +400,6 @@ func TestProjectStatus(t *testing.T) {
 			},
 			Time: mustParseTime("2016-04-07T04:12:25Z"),
 		},
-		"standalone daemonset": {
-			File: "rollingupdate-daemonset.yaml",
-			Extra: []runtime.Object{
-				&projectapi.Project{
-					ObjectMeta: metav1.ObjectMeta{Name: "example", Namespace: ""},
-				},
-			},
-			ErrFn: func(err error) bool { return err == nil },
-			Contains: []string{
-				"daemonset/bind manages gcr.io/google-containers/pause:2.0",
-				"generation #0 running for about a minute",
-			},
-			Time: mustParseTime("2016-04-07T04:12:25Z"),
-		},
-		"hpa non-missing scaleref": {
-			File: "hpa-with-scale-ref.yaml",
-			Extra: []runtime.Object{
-				&projectapi.Project{
-					ObjectMeta: metav1.ObjectMeta{Name: "example", Namespace: ""},
-				},
-			},
-			ErrFn: func(err error) bool { return err == nil },
-			Contains: []string{
-				"deployment/ruby-deploy deploys istag/ruby-deploy:latest",
-			},
-		},
 	}
 	oldTimeFn := timeNowFn
 	defer func() { timeNowFn = oldTimeFn }()
@@ -473,7 +414,7 @@ func TestProjectStatus(t *testing.T) {
 		if len(test.File) > 0 {
 			// Load data from a folder dedicated to mock data, which is never loaded into the API during tests
 			var err error
-			objs, err = readObjectsFromPath("../../../../pkg/oc/graph/genericgraph/test/"+test.File, "example", legacyscheme.Codecs.UniversalDecoder(), legacyscheme.Scheme)
+			objs, err = testclient.ReadObjectsFromPath("../../../../pkg/api/graph/test/"+test.File, "example", kapi.Codecs.UniversalDecoder(), kapi.Scheme)
 			if err != nil {
 				t.Errorf("%s: unexpected error: %v", k, err)
 			}
@@ -481,28 +422,8 @@ func TestProjectStatus(t *testing.T) {
 		for _, o := range test.Extra {
 			objs = append(objs, o)
 		}
-
-		kc := kubefakeclient.NewSimpleClientset(filterByScheme(kubeclientscheme.Scheme, objs...)...)
-		projectClient := projectfakeclient.NewSimpleClientset(filterByScheme(projectclientscheme.Scheme, objs...)...)
-		buildClient := buildfakeclient.NewSimpleClientset(filterByScheme(buildclientscheme.Scheme, objs...)...)
-		imageClient := imagefakeclient.NewSimpleClientset(filterByScheme(imageclientscheme.Scheme, objs...)...)
-		appsClient := appsfakeclient.NewSimpleClientset(filterByScheme(appsclientscheme.Scheme, objs...)...)
-		routeClient := routefakeclient.NewSimpleClientset(filterByScheme(routeclientscheme.Scheme, objs...)...)
-
-		d := ProjectStatusDescriber{
-			KubeClient:                  kc,
-			ProjectClient:               projectClient.Project(),
-			BuildClient:                 buildClient.Build(),
-			ImageClient:                 imageClient.Image(),
-			AppsClient:                  appsClient.Apps(),
-			RouteClient:                 routeClient.Route(),
-			Server:                      "https://example.com:8443",
-			Suggest:                     true,
-			CommandBaseName:             "oc",
-			LogsCommandName:             "oc logs -p",
-			SecurityPolicyCommandFormat: "policycommand %s %s",
-		}
-		t.Logf("describing %q ...", test.File)
+		oc, kc := testclient.NewFixtureClients(objs...)
+		d := ProjectStatusDescriber{K: kc, C: oc, Server: "https://example.com:8443", Suggest: true, CommandBaseName: "oc", LogsCommandName: "oc logs -p", SecurityPolicyCommandFormat: "policycommand %s %s"}
 		out, err := d.Describe("example", "")
 		if !test.ErrFn(err) {
 			t.Errorf("%s: unexpected error: %v", k, err)
@@ -539,32 +460,8 @@ func TestProjectStatusErrors(t *testing.T) {
 		},
 	}
 	for k, test := range testCases {
-		projectClient := projectfakeclient.NewSimpleClientset()
-		buildClient := buildfakeclient.NewSimpleClientset()
-		imageClient := imagefakeclient.NewSimpleClientset()
-		routeClient := routefakeclient.NewSimpleClientset()
-		appsClient := appsfakeclient.NewSimpleClientset()
-		projectClient.PrependReactor("*", "*", func(_ clientgotesting.Action) (bool, runtime.Object, error) {
-			return true, nil, test.Err
-		})
-		kc := kubefakeclient.NewSimpleClientset()
-		kc.PrependReactor("*", "*", func(action clientgotesting.Action) (bool, runtime.Object, error) {
-			return true, nil, test.Err
-		})
-
-		d := ProjectStatusDescriber{
-			KubeClient:                  kc,
-			ProjectClient:               projectClient.Project(),
-			BuildClient:                 buildClient.Build(),
-			ImageClient:                 imageClient.Image(),
-			AppsClient:                  appsClient.Apps(),
-			RouteClient:                 routeClient.Route(),
-			Server:                      "https://example.com:8443",
-			Suggest:                     true,
-			CommandBaseName:             "oc",
-			LogsCommandName:             "oc logs -p",
-			SecurityPolicyCommandFormat: "policycommand %s %s",
-		}
+		oc, kc := testclient.NewErrorClients(test.Err)
+		d := ProjectStatusDescriber{K: kc, C: oc, Server: "https://example.com:8443", Suggest: true, CommandBaseName: "oc", LogsCommandName: "oc logs -p", SecurityPolicyCommandFormat: "policycommand %s %s"}
 		_, err := d.Describe("example", "")
 		if !test.ErrFn(err) {
 			t.Errorf("%s: unexpected error: %v", k, err)
@@ -631,67 +528,4 @@ func TestPrintMarkerSuggestions(t *testing.T) {
 			t.Errorf("unexpected output, wanted %q, got %q", test.expected, out.String())
 		}
 	}
-}
-
-// ReadObjectsFromPath reads objects from the specified file for testing.
-func readObjectsFromPath(path, namespace string, decoder runtime.Decoder, typer runtime.ObjectTyper) ([]runtime.Object, error) {
-	data, err := ioutil.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	data, err = yaml.ToJSON(data)
-	if err != nil {
-		return nil, err
-	}
-	obj, err := runtime.Decode(decoder, data)
-	if err != nil {
-		return nil, err
-	}
-	if !meta.IsListType(obj) {
-		if err := setNamespace(typer, obj, namespace); err != nil {
-			return nil, err
-		}
-		return []runtime.Object{obj}, nil
-	}
-	list, err := meta.ExtractList(obj)
-	if err != nil {
-		return nil, err
-	}
-	errs := runtime.DecodeList(list, decoder)
-	if len(errs) > 0 {
-		return nil, errs[0]
-	}
-	for _, o := range list {
-		if err := setNamespace(typer, o, namespace); err != nil {
-			return nil, err
-		}
-	}
-	return list, nil
-}
-
-func setNamespace(typer runtime.ObjectTyper, obj runtime.Object, namespace string) error {
-	itemMeta, err := meta.Accessor(obj)
-	if err != nil {
-		return err
-	}
-	gvks, _, err := typer.ObjectKinds(obj)
-	if err != nil {
-		return err
-	}
-	group, err := legacyscheme.Registry.Group(gvks[0].Group)
-	if err != nil {
-		return err
-	}
-	mapping, err := group.RESTMapper.RESTMappings(gvks[0].GroupKind(), gvks[0].Version)
-	if err != nil {
-		return err
-	}
-	switch mapping[0].Scope.Name() {
-	case meta.RESTScopeNameNamespace:
-		if len(itemMeta.GetNamespace()) == 0 {
-			itemMeta.SetNamespace(namespace)
-		}
-	}
-
-	return nil
 }

@@ -7,7 +7,7 @@
 //   import "google.golang.org/api/dns/v1"
 //   ...
 //   dnsService, err := dns.New(oauthHttpClient)
-package dns // import "google.golang.org/api/dns/v1"
+package dns
 
 import (
 	"bytes"
@@ -179,8 +179,8 @@ type Change struct {
 }
 
 func (s *Change) MarshalJSON() ([]byte, error) {
-	type NoMethod Change
-	raw := NoMethod(*s)
+	type noMethod Change
+	raw := noMethod(*s)
 	return gensupport.MarshalJSON(raw, s.ForceSendFields, s.NullFields)
 }
 
@@ -228,8 +228,8 @@ type ChangesListResponse struct {
 }
 
 func (s *ChangesListResponse) MarshalJSON() ([]byte, error) {
-	type NoMethod ChangesListResponse
-	raw := NoMethod(*s)
+	type noMethod ChangesListResponse
+	raw := noMethod(*s)
 	return gensupport.MarshalJSON(raw, s.ForceSendFields, s.NullFields)
 }
 
@@ -295,8 +295,8 @@ type ManagedZone struct {
 }
 
 func (s *ManagedZone) MarshalJSON() ([]byte, error) {
-	type NoMethod ManagedZone
-	raw := NoMethod(*s)
+	type noMethod ManagedZone
+	raw := noMethod(*s)
 	return gensupport.MarshalJSON(raw, s.ForceSendFields, s.NullFields)
 }
 
@@ -342,8 +342,8 @@ type ManagedZonesListResponse struct {
 }
 
 func (s *ManagedZonesListResponse) MarshalJSON() ([]byte, error) {
-	type NoMethod ManagedZonesListResponse
-	raw := NoMethod(*s)
+	type noMethod ManagedZonesListResponse
+	raw := noMethod(*s)
 	return gensupport.MarshalJSON(raw, s.ForceSendFields, s.NullFields)
 }
 
@@ -387,8 +387,8 @@ type Project struct {
 }
 
 func (s *Project) MarshalJSON() ([]byte, error) {
-	type NoMethod Project
-	raw := NoMethod(*s)
+	type noMethod Project
+	raw := noMethod(*s)
 	return gensupport.MarshalJSON(raw, s.ForceSendFields, s.NullFields)
 }
 
@@ -439,8 +439,8 @@ type Quota struct {
 }
 
 func (s *Quota) MarshalJSON() ([]byte, error) {
-	type NoMethod Quota
-	raw := NoMethod(*s)
+	type noMethod Quota
+	raw := noMethod(*s)
 	return gensupport.MarshalJSON(raw, s.ForceSendFields, s.NullFields)
 }
 
@@ -484,8 +484,8 @@ type ResourceRecordSet struct {
 }
 
 func (s *ResourceRecordSet) MarshalJSON() ([]byte, error) {
-	type NoMethod ResourceRecordSet
-	raw := NoMethod(*s)
+	type noMethod ResourceRecordSet
+	raw := noMethod(*s)
 	return gensupport.MarshalJSON(raw, s.ForceSendFields, s.NullFields)
 }
 
@@ -531,8 +531,8 @@ type ResourceRecordSetsListResponse struct {
 }
 
 func (s *ResourceRecordSetsListResponse) MarshalJSON() ([]byte, error) {
-	type NoMethod ResourceRecordSetsListResponse
-	raw := NoMethod(*s)
+	type noMethod ResourceRecordSetsListResponse
+	raw := noMethod(*s)
 	return gensupport.MarshalJSON(raw, s.ForceSendFields, s.NullFields)
 }
 
@@ -639,7 +639,7 @@ func (c *ChangesCreateCall) Do(opts ...googleapi.CallOption) (*Change, error) {
 		},
 	}
 	target := &ret
-	if err := gensupport.DecodeResponse(target, res); err != nil {
+	if err := json.NewDecoder(res.Body).Decode(target); err != nil {
 		return nil, err
 	}
 	return ret, nil
@@ -793,7 +793,7 @@ func (c *ChangesGetCall) Do(opts ...googleapi.CallOption) (*Change, error) {
 		},
 	}
 	target := &ret
-	if err := gensupport.DecodeResponse(target, res); err != nil {
+	if err := json.NewDecoder(res.Body).Decode(target); err != nil {
 		return nil, err
 	}
 	return ret, nil
@@ -983,7 +983,7 @@ func (c *ChangesListCall) Do(opts ...googleapi.CallOption) (*ChangesListResponse
 		},
 	}
 	target := &ret
-	if err := gensupport.DecodeResponse(target, res); err != nil {
+	if err := json.NewDecoder(res.Body).Decode(target); err != nil {
 		return nil, err
 	}
 	return ret, nil
@@ -1172,7 +1172,7 @@ func (c *ManagedZonesCreateCall) Do(opts ...googleapi.CallOption) (*ManagedZone,
 		},
 	}
 	target := &ret
-	if err := gensupport.DecodeResponse(target, res); err != nil {
+	if err := json.NewDecoder(res.Body).Decode(target); err != nil {
 		return nil, err
 	}
 	return ret, nil
@@ -1422,7 +1422,7 @@ func (c *ManagedZonesGetCall) Do(opts ...googleapi.CallOption) (*ManagedZone, er
 		},
 	}
 	target := &ret
-	if err := gensupport.DecodeResponse(target, res); err != nil {
+	if err := json.NewDecoder(res.Body).Decode(target); err != nil {
 		return nil, err
 	}
 	return ret, nil
@@ -1593,7 +1593,7 @@ func (c *ManagedZonesListCall) Do(opts ...googleapi.CallOption) (*ManagedZonesLi
 		},
 	}
 	target := &ret
-	if err := gensupport.DecodeResponse(target, res); err != nil {
+	if err := json.NewDecoder(res.Body).Decode(target); err != nil {
 		return nil, err
 	}
 	return ret, nil
@@ -1770,7 +1770,7 @@ func (c *ProjectsGetCall) Do(opts ...googleapi.CallOption) (*Project, error) {
 		},
 	}
 	target := &ret
-	if err := gensupport.DecodeResponse(target, res); err != nil {
+	if err := json.NewDecoder(res.Body).Decode(target); err != nil {
 		return nil, err
 	}
 	return ret, nil
@@ -1945,7 +1945,7 @@ func (c *ResourceRecordSetsListCall) Do(opts ...googleapi.CallOption) (*Resource
 		},
 	}
 	target := &ret
-	if err := gensupport.DecodeResponse(target, res); err != nil {
+	if err := json.NewDecoder(res.Body).Decode(target); err != nil {
 		return nil, err
 	}
 	return ret, nil

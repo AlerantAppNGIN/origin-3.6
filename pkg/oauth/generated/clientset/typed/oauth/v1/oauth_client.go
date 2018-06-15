@@ -1,7 +1,7 @@
 package v1
 
 import (
-	v1 "github.com/openshift/api/oauth/v1"
+	v1 "github.com/openshift/origin/pkg/oauth/apis/oauth/v1"
 	"github.com/openshift/origin/pkg/oauth/generated/clientset/scheme"
 	serializer "k8s.io/apimachinery/pkg/runtime/serializer"
 	rest "k8s.io/client-go/rest"
@@ -9,10 +9,7 @@ import (
 
 type OauthV1Interface interface {
 	RESTClient() rest.Interface
-	OAuthAccessTokensGetter
-	OAuthAuthorizeTokensGetter
 	OAuthClientsGetter
-	OAuthClientAuthorizationsGetter
 }
 
 // OauthV1Client is used to interact with features provided by the oauth.openshift.io group.
@@ -20,20 +17,8 @@ type OauthV1Client struct {
 	restClient rest.Interface
 }
 
-func (c *OauthV1Client) OAuthAccessTokens() OAuthAccessTokenInterface {
-	return newOAuthAccessTokens(c)
-}
-
-func (c *OauthV1Client) OAuthAuthorizeTokens() OAuthAuthorizeTokenInterface {
-	return newOAuthAuthorizeTokens(c)
-}
-
-func (c *OauthV1Client) OAuthClients() OAuthClientInterface {
-	return newOAuthClients(c)
-}
-
-func (c *OauthV1Client) OAuthClientAuthorizations() OAuthClientAuthorizationInterface {
-	return newOAuthClientAuthorizations(c)
+func (c *OauthV1Client) OAuthClients(namespace string) OAuthClientInterface {
+	return newOAuthClients(c, namespace)
 }
 
 // NewForConfig creates a new OauthV1Client for the given config.

@@ -6,11 +6,10 @@ import (
 	"testing"
 
 	"github.com/MakeNowJust/heredoc"
-	configcmd "github.com/openshift/origin/pkg/bulk"
-	imagefake "github.com/openshift/origin/pkg/image/generated/internalclientset/fake"
-	"github.com/openshift/origin/pkg/oc/generate/app"
-	newcmd "github.com/openshift/origin/pkg/oc/generate/cmd"
-	templatefake "github.com/openshift/origin/pkg/template/generated/internalclientset/fake"
+	"github.com/openshift/origin/pkg/client/testclient"
+	configcmd "github.com/openshift/origin/pkg/config/cmd"
+	"github.com/openshift/origin/pkg/generate/app"
+	newcmd "github.com/openshift/origin/pkg/generate/app/cmd"
 )
 
 // TestNewBuildRun ensures that Run command calls the right actions
@@ -64,11 +63,10 @@ func TestNewBuildRun(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		templateClient := templatefake.NewSimpleClientset()
-		imageClient := imagefake.NewSimpleClientset()
+		client := testclient.NewSimpleFake()
 
 		o.Config = test.config
-		o.Config.SetOpenShiftClient(imageClient.Image(), templateClient.Template(), nil, "openshift", nil)
+		o.Config.SetOpenShiftClient(client, "openshift", nil)
 
 		o.Config.DockerSearcher = MockSearcher{
 			OnSearch: func(precise bool, terms ...string) (app.ComponentMatches, []error) {
@@ -88,8 +86,7 @@ func TestNewBuildRun(t *testing.T) {
 			t.Fatalf("[%s] expected error: %v, got nil", test.name, test.expectedErr)
 		}
 
-		got := imageClient.Actions()
-		got = append(got, templateClient.Actions()...)
+		got := client.Actions()
 		if len(test.expectedActions) != len(got) {
 			t.Fatalf("action length mismatch: expected %d, got %d", len(test.expectedActions), len(got))
 		}
@@ -106,10 +103,6 @@ func TestNewBuildRun(t *testing.T) {
 // MockSearcher implements Searcher.
 type MockSearcher struct {
 	OnSearch func(precise bool, terms ...string) (app.ComponentMatches, []error)
-}
-
-func (m MockSearcher) Type() string {
-	return ""
 }
 
 // Search mocks a search.

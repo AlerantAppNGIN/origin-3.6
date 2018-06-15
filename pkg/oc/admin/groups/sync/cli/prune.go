@@ -13,14 +13,13 @@ import (
 	"k8s.io/kubernetes/pkg/kubectl/cmd/templates"
 	cmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
 
-	"github.com/openshift/origin/pkg/cmd/server/apis/config"
-	"github.com/openshift/origin/pkg/cmd/server/apis/config/validation/ldap"
-	"github.com/openshift/origin/pkg/oauthserver/ldaputil"
-	"github.com/openshift/origin/pkg/oauthserver/ldaputil/ldapclient"
+	"github.com/openshift/origin/pkg/auth/ldaputil"
+	"github.com/openshift/origin/pkg/auth/ldaputil/ldapclient"
+	osclient "github.com/openshift/origin/pkg/client"
+	"github.com/openshift/origin/pkg/cmd/server/api"
+	"github.com/openshift/origin/pkg/cmd/server/api/validation"
+	"github.com/openshift/origin/pkg/cmd/util/clientcmd"
 	"github.com/openshift/origin/pkg/oc/admin/groups/sync"
-	"github.com/openshift/origin/pkg/oc/cli/util/clientcmd"
-	userclientinternal "github.com/openshift/origin/pkg/user/generated/internalclientset"
-	usertypedclient "github.com/openshift/origin/pkg/user/generated/internalclientset/typed/user/internalversion"
 )
 
 const PruneRecommendedName = "prune"
@@ -53,7 +52,7 @@ var (
 
 type PruneOptions struct {
 	// Config is the LDAP sync config read from file
-	Config *config.LDAPSyncConfig
+	Config *api.LDAPSyncConfig
 
 	// Whitelist are the names of OpenShift group or LDAP group UIDs to use for syncing
 	Whitelist []string
@@ -64,8 +63,8 @@ type PruneOptions struct {
 	// Confirm determines whether or not to write to OpenShift
 	Confirm bool
 
-	// GroupInterface is the interface used to interact with OpenShift Group objects
-	GroupInterface usertypedclient.GroupInterface
+	// GroupsInterface is the interface used to interact with OpenShift Group objects
+	GroupInterface osclient.GroupInterface
 
 	// Stderr is the writer to write warnings and errors to
 	Stderr io.Writer
@@ -91,12 +90,18 @@ func NewCmdPrune(name, fullName string, f *clientcmd.Factory, out io.Writer) *co
 
 	cmd := &cobra.Command{
 		Use:     fmt.Sprintf("%s [WHITELIST] [--whitelist=WHITELIST-FILE] [--blacklist=BLACKLIST-FILE] --sync-config=CONFIG-SOURCE", name),
-		Short:   "Remove old OpenShift groups referencing missing records on an external provider",
+		Short:   "Prune OpenShift groups referencing missing records on an external provider.",
 		Long:    pruneLong,
 		Example: fmt.Sprintf(pruneExamples, fullName),
 		Run: func(c *cobra.Command, args []string) {
-			cmdutil.CheckErr(options.Complete(whitelistFile, blacklistFile, configFile, args, f))
-			cmdutil.CheckErr(options.Validate())
+			if err := options.Complete(whitelistFile, blacklistFile, configFile, args, f); err != nil {
+				cmdutil.CheckErr(cmdutil.UsageError(c, err.Error()))
+			}
+
+			if err := options.Validate(); err != nil {
+				cmdutil.CheckErr(cmdutil.UsageError(c, err.Error()))
+			}
+
 			err := options.Run(c, f)
 			if err != nil {
 				if aggregate, ok := err.(kerrs.Aggregate); ok {
@@ -127,37 +132,32 @@ func NewCmdPrune(name, fullName string, f *clientcmd.Factory, out io.Writer) *co
 
 func (o *PruneOptions) Complete(whitelistFile, blacklistFile, configFile string, args []string, f *clientcmd.Factory) error {
 	var err error
+	o.Whitelist, err = buildOpenShiftGroupNameList(args, whitelistFile)
+	if err != nil {
+		return err
+	}
+
+	o.Blacklist, err = buildOpenShiftGroupNameList([]string{}, blacklistFile)
+	if err != nil {
+		return err
+	}
 
 	o.Config, err = decodeSyncConfigFromFile(configFile)
 	if err != nil {
 		return err
 	}
 
-	o.Whitelist, err = buildOpenShiftGroupNameList(args, whitelistFile, o.Config.LDAPGroupUIDToOpenShiftGroupNameMapping)
+	osClient, _, err := f.Clients()
 	if err != nil {
 		return err
 	}
-
-	o.Blacklist, err = buildOpenShiftGroupNameList([]string{}, blacklistFile, o.Config.LDAPGroupUIDToOpenShiftGroupNameMapping)
-	if err != nil {
-		return err
-	}
-
-	clientConfig, err := f.ClientConfig()
-	if err != nil {
-		return err
-	}
-	userClient, err := userclientinternal.NewForConfig(clientConfig)
-	if err != nil {
-		return err
-	}
-	o.GroupInterface = userClient.User().Groups()
+	o.GroupInterface = osClient.Groups()
 
 	return nil
 }
 
 func (o *PruneOptions) Validate() error {
-	results := ldap.ValidateLDAPSyncConfig(o.Config)
+	results := validation.ValidateLDAPSyncConfig(o.Config)
 	if o.GroupInterface == nil {
 		results.Errors = append(results.Errors, field.Required(field.NewPath("groupInterface"), ""))
 	}
@@ -171,7 +171,7 @@ func (o *PruneOptions) Validate() error {
 // Run creates the GroupSyncer specified and runs it to sync groups
 // the arguments are only here because its the only way to get the printer we need
 func (o *PruneOptions) Run(cmd *cobra.Command, f *clientcmd.Factory) error {
-	bindPassword, err := config.ResolveStringValue(o.Config.BindPassword)
+	bindPassword, err := api.ResolveStringValue(o.Config.BindPassword)
 	if err != nil {
 		return err
 	}
@@ -213,7 +213,7 @@ func (o *PruneOptions) Run(cmd *cobra.Command, f *clientcmd.Factory) error {
 
 }
 
-func buildPruneBuilder(clientConfig ldapclient.Config, pruneConfig *config.LDAPSyncConfig) (PruneBuilder, error) {
+func buildPruneBuilder(clientConfig ldapclient.Config, pruneConfig *api.LDAPSyncConfig) (PruneBuilder, error) {
 	switch {
 	case pruneConfig.RFC2307Config != nil:
 		return &RFC2307Builder{ClientConfig: clientConfig, Config: pruneConfig.RFC2307Config}, nil
@@ -236,7 +236,7 @@ func (o *PruneOptions) GetBlacklist() []string {
 	return o.Blacklist
 }
 
-func (o *PruneOptions) GetClient() usertypedclient.GroupInterface {
+func (o *PruneOptions) GetClient() osclient.GroupInterface {
 	return o.GroupInterface
 }
 

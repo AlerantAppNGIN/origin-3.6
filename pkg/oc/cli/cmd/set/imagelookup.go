@@ -12,14 +12,14 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/kubernetes/pkg/api/legacyscheme"
+	kapi "k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/kubectl/cmd/templates"
 	kcmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
 	"k8s.io/kubernetes/pkg/kubectl/resource"
 
 	ometa "github.com/openshift/origin/pkg/api/meta"
+	"github.com/openshift/origin/pkg/cmd/util/clientcmd"
 	imageapi "github.com/openshift/origin/pkg/image/apis/image"
-	"github.com/openshift/origin/pkg/oc/cli/util/clientcmd"
 )
 
 var (
@@ -164,9 +164,7 @@ func (o *ImageLookupOptions) Complete(f *clientcmd.Factory, cmd *cobra.Command, 
 	o.PrintTable = (len(args) == 0 && !o.All) || o.List
 
 	mapper, _ := f.Object()
-	o.Builder = f.NewBuilder().
-		Internal().
-		LocalParam(o.Local).
+	o.Builder = f.NewBuilder(!o.Local).
 		ContinueOnError().
 		NamespaceParam(cmdNamespace).DefaultNamespace().
 		FilenameParam(explicit, &resource.FilenameOptions{Recursive: false, Filenames: o.Filenames}).
@@ -174,33 +172,33 @@ func (o *ImageLookupOptions) Complete(f *clientcmd.Factory, cmd *cobra.Command, 
 
 	switch {
 	case o.Local && len(args) > 0:
-		return kcmdutil.UsageErrorf(cmd, "Pass files with -f when using --local")
+		return kcmdutil.UsageError(cmd, "Pass files with -f when using --local")
 	case o.Local:
 		// perform no lookups on the server
 		// TODO: discovery still requires a running server, doesn't fall back correctly
 	case len(args) == 0 && len(o.Filenames) == 0:
 		o.Builder = o.Builder.
-			LabelSelectorParam(o.Selector).
+			SelectorParam(o.Selector).
 			SelectAllParam(true).
 			ResourceTypes("imagestreams")
 	case o.List:
 		o.Builder = o.Builder.
-			LabelSelectorParam(o.Selector).
+			SelectorParam(o.Selector).
 			SelectAllParam(o.All).
 			ResourceTypeOrNameArgs(true, args...)
 	default:
 		o.Builder = o.Builder.
-			LabelSelectorParam(o.Selector).
+			SelectorParam(o.Selector).
 			SelectAllParam(o.All).
 			ResourceNames("imagestreams", args...)
 	}
 
 	output := kcmdutil.GetFlagString(cmd, "output")
 	if len(output) != 0 || o.Local || kcmdutil.GetDryRunFlag(cmd) {
-		o.PrintObject = func(obj runtime.Object) error { return kcmdutil.PrintObject(cmd, obj, o.Out) }
+		o.PrintObject = func(obj runtime.Object) error { return f.PrintObject(cmd, o.Local, mapper, obj, o.Out) }
 	}
 
-	o.Encoder = kcmdutil.InternalVersionJSONEncoder()
+	o.Encoder = f.JSONEncoder()
 	o.ShortOutput = kcmdutil.GetFlagString(cmd, "output") == "name"
 	o.Mapper = mapper
 
@@ -268,7 +266,7 @@ func (o *ImageLookupOptions) Run() error {
 		return fmt.Errorf("%s/%s no changes", infos[0].Mapping.Resource, infos[0].Name)
 	}
 	if o.PrintObject != nil {
-		object, err := clientcmd.AsVersionedObject(infos, !singleItemImplied, o.OutputVersion, legacyscheme.Codecs.LegacyCodec(o.OutputVersion))
+		object, err := resource.AsVersionedObject(infos, !singleItemImplied, o.OutputVersion, kapi.Codecs.LegacyCodec(o.OutputVersion))
 		if err != nil {
 			return err
 		}
@@ -299,7 +297,7 @@ func (o *ImageLookupOptions) Run() error {
 		}
 
 		info.Refresh(obj, true)
-		kcmdutil.PrintSuccess(o.ShortOutput, o.Out, info.Object, false, "updated")
+		kcmdutil.PrintSuccess(o.Mapper, o.ShortOutput, o.Out, info.Mapping.Resource, info.Name, false, "updated")
 	}
 	if failed {
 		return kcmdutil.ErrExit

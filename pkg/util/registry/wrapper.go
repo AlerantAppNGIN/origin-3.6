@@ -3,7 +3,6 @@ package registry
 import (
 	"k8s.io/apimachinery/pkg/apis/meta/internalversion"
 	"k8s.io/apimachinery/pkg/apis/meta/v1"
-	metav1beta1 "k8s.io/apimachinery/pkg/apis/meta/v1beta1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apiserver/pkg/endpoints/request"
 	"k8s.io/apiserver/pkg/registry/rest"
@@ -14,7 +13,6 @@ import (
 type NoWatchStorage interface {
 	rest.Getter
 	rest.Lister
-	rest.TableConvertor
 	rest.CreaterUpdater
 	rest.GracefulDeleter
 }
@@ -41,17 +39,13 @@ func (s *noWatchStorageErrWrapper) List(ctx request.Context, options *internalve
 	return obj, errors.SyncStatusError(ctx, err)
 }
 
-func (s *noWatchStorageErrWrapper) ConvertToTable(ctx request.Context, object runtime.Object, tableOptions runtime.Object) (*metav1beta1.Table, error) {
-	return s.delegate.ConvertToTable(ctx, object, tableOptions)
-}
-
-func (s *noWatchStorageErrWrapper) Create(ctx request.Context, in runtime.Object, createValidation rest.ValidateObjectFunc, includeUninitialized bool) (runtime.Object, error) {
-	obj, err := s.delegate.Create(ctx, in, createValidation, includeUninitialized)
+func (s *noWatchStorageErrWrapper) Create(ctx request.Context, in runtime.Object, includeUninitialized bool) (runtime.Object, error) {
+	obj, err := s.delegate.Create(ctx, in, includeUninitialized)
 	return obj, errors.SyncStatusError(ctx, err)
 }
 
-func (s *noWatchStorageErrWrapper) Update(ctx request.Context, name string, objInfo rest.UpdatedObjectInfo, createValidation rest.ValidateObjectFunc, updateValidation rest.ValidateObjectUpdateFunc) (runtime.Object, bool, error) {
-	obj, created, err := s.delegate.Update(ctx, name, objInfo, createValidation, updateValidation)
+func (s *noWatchStorageErrWrapper) Update(ctx request.Context, name string, objInfo rest.UpdatedObjectInfo) (runtime.Object, bool, error) {
+	obj, created, err := s.delegate.Update(ctx, name, objInfo)
 	return obj, created, errors.SyncStatusError(ctx, err)
 }
 

@@ -9,20 +9,20 @@ import (
 	apirequest "k8s.io/apiserver/pkg/endpoints/request"
 	"k8s.io/apiserver/pkg/registry/rest"
 
+	"github.com/openshift/origin/pkg/client"
 	imageapi "github.com/openshift/origin/pkg/image/apis/image"
-	imageclient "github.com/openshift/origin/pkg/image/generated/internalclientset/typed/image/internalversion"
 )
 
 // REST implements the RESTStorage interface for ImageSignature
 type REST struct {
-	imageClient imageclient.ImagesGetter
+	imageClient client.ImageInterface
 }
 
 var _ rest.Creater = &REST{}
-var _ rest.GracefulDeleter = &REST{}
+var _ rest.Deleter = &REST{}
 
 // NewREST returns a new REST.
-func NewREST(imageClient imageclient.ImagesGetter) *REST {
+func NewREST(imageClient client.ImageInterface) *REST {
 	return &REST{imageClient: imageClient}
 }
 
@@ -31,18 +31,11 @@ func (r *REST) New() runtime.Object {
 	return &imageapi.ImageSignature{}
 }
 
-func (r *REST) Create(ctx apirequest.Context, obj runtime.Object, createValidation rest.ValidateObjectFunc, _ bool) (runtime.Object, error) {
+func (r *REST) Create(ctx apirequest.Context, obj runtime.Object, _ bool) (runtime.Object, error) {
 	signature := obj.(*imageapi.ImageSignature)
 
 	if err := rest.BeforeCreate(Strategy, ctx, obj); err != nil {
 		return nil, err
-	}
-	// at this point we have a fully formed object.  It is time to call the validators that the apiserver
-	// handling chain wants to enforce.
-	if createValidation != nil {
-		if err := createValidation(obj.DeepCopyObject()); err != nil {
-			return nil, err
-		}
 	}
 
 	imageName, _, err := imageapi.SplitImageSignatureName(signature.Name)
@@ -50,7 +43,7 @@ func (r *REST) Create(ctx apirequest.Context, obj runtime.Object, createValidati
 		return nil, kapierrors.NewBadRequest(err.Error())
 	}
 
-	image, err := r.imageClient.Images().Get(imageName, metav1.GetOptions{})
+	image, err := r.imageClient.Get(imageName, metav1.GetOptions{})
 	if err != nil {
 		return nil, err
 	}
@@ -62,7 +55,7 @@ func (r *REST) Create(ctx apirequest.Context, obj runtime.Object, createValidati
 
 	image.Signatures = append(image.Signatures, *signature)
 
-	image, err = r.imageClient.Images().Update(image)
+	image, err = r.imageClient.Update(image)
 	if err != nil {
 		return nil, err
 	}
@@ -75,29 +68,29 @@ func (r *REST) Create(ctx apirequest.Context, obj runtime.Object, createValidati
 	return &image.Signatures[byName], nil
 }
 
-func (r *REST) Delete(ctx apirequest.Context, name string, options *metav1.DeleteOptions) (runtime.Object, bool, error) {
+func (r *REST) Delete(ctx apirequest.Context, name string) (runtime.Object, error) {
 	imageName, _, err := imageapi.SplitImageSignatureName(name)
 	if err != nil {
-		return nil, false, kapierrors.NewBadRequest("ImageSignatures must be accessed with <imageName>@<signatureName>")
+		return nil, kapierrors.NewBadRequest("ImageSignatures must be accessed with <imageName>@<signatureName>")
 	}
 
-	image, err := r.imageClient.Images().Get(imageName, metav1.GetOptions{})
+	image, err := r.imageClient.Get(imageName, metav1.GetOptions{})
 	if err != nil {
-		return nil, false, err
+		return nil, err
 	}
 
 	index := imageapi.IndexOfImageSignatureByName(image.Signatures, name)
 	if index < 0 {
-		return nil, false, kapierrors.NewNotFound(imageapi.Resource("imageSignatures"), name)
+		return nil, kapierrors.NewNotFound(imageapi.Resource("imageSignatures"), name)
 	}
 
 	size := len(image.Signatures)
 	copy(image.Signatures[index:size-1], image.Signatures[index+1:size])
 	image.Signatures = image.Signatures[0 : size-1]
 
-	if _, err := r.imageClient.Images().Update(image); err != nil {
-		return nil, false, err
+	if _, err := r.imageClient.Update(image); err != nil {
+		return nil, err
 	}
 
-	return &metav1.Status{Status: metav1.StatusSuccess}, true, nil
+	return &metav1.Status{Status: metav1.StatusSuccess}, nil
 }

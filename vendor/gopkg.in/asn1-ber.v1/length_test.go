@@ -11,7 +11,7 @@ func TestReadLength(t *testing.T) {
 	testcases := map[string]struct {
 		Data []byte
 
-		ExpectedLength    int64
+		ExpectedLength    int
 		ExpectedBytesRead int
 		ExpectedError     string
 	}{
@@ -68,19 +68,7 @@ func TestReadLength(t *testing.T) {
 			ExpectedLength:    127,
 			ExpectedBytesRead: 2,
 		},
-		"long-definite-form max length (32-bit)": {
-			Data: []byte{
-				LengthLongFormBitmask | 4,
-				0x7F,
-				0xFF,
-				0xFF,
-				0xFF,
-				0xFF,
-			},
-			ExpectedLength:    math.MaxInt32,
-			ExpectedBytesRead: 5,
-		},
-		"long-definite-form max length (64-bit)": {
+		"long-definite-form max length": {
 			Data: []byte{
 				LengthLongFormBitmask | 8,
 				0x7F,
@@ -98,11 +86,6 @@ func TestReadLength(t *testing.T) {
 	}
 
 	for k, tc := range testcases {
-		// Skip tests requiring 64-bit integers on platforms that don't support them
-		if tc.ExpectedLength != int64(int(tc.ExpectedLength)) {
-			continue
-		}
-
 		reader := bytes.NewBuffer(tc.Data)
 		length, read, err := readLength(reader)
 
@@ -121,7 +104,7 @@ func TestReadLength(t *testing.T) {
 			t.Errorf("%s: expected read %d, got %d", k, tc.ExpectedBytesRead, read)
 		}
 
-		if int64(length) != tc.ExpectedLength {
+		if length != tc.ExpectedLength {
 			t.Errorf("%s: expected length %d, got %d", k, tc.ExpectedLength, length)
 		}
 	}
@@ -129,7 +112,7 @@ func TestReadLength(t *testing.T) {
 
 func TestEncodeLength(t *testing.T) {
 	testcases := map[string]struct {
-		Length        int64
+		Length        int
 		ExpectedBytes []byte
 	}{
 		"0": {
@@ -150,18 +133,7 @@ func TestEncodeLength(t *testing.T) {
 			ExpectedBytes: []byte{LengthLongFormBitmask | 1, 128},
 		},
 
-		"max long-form length (32-bit)": {
-			Length: math.MaxInt32,
-			ExpectedBytes: []byte{
-				LengthLongFormBitmask | 4,
-				0x7F,
-				0xFF,
-				0xFF,
-				0xFF,
-			},
-		},
-
-		"max long-form length (64-bit)": {
+		"max long-form length": {
 			Length: math.MaxInt64,
 			ExpectedBytes: []byte{
 				LengthLongFormBitmask | 8,
@@ -178,12 +150,7 @@ func TestEncodeLength(t *testing.T) {
 	}
 
 	for k, tc := range testcases {
-		// Skip tests requiring 64-bit integers on platforms that don't support them
-		if tc.Length != int64(int(tc.Length)) {
-			continue
-		}
-
-		b := encodeLength(int(tc.Length))
+		b := encodeLength(tc.Length)
 		if bytes.Compare(tc.ExpectedBytes, b) != 0 {
 			t.Errorf("%s: Expected\n\t%#v\ngot\n\t%#v", k, tc.ExpectedBytes, b)
 		}

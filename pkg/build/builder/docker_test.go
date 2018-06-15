@@ -10,29 +10,28 @@ import (
 	"testing"
 
 	"github.com/fsouza/go-dockerclient"
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	kapi "k8s.io/kubernetes/pkg/api"
 
 	"github.com/openshift/source-to-image/pkg/tar"
 	s2ifs "github.com/openshift/source-to-image/pkg/util/fs"
 
-	buildapiv1 "github.com/openshift/api/build/v1"
-	buildfake "github.com/openshift/client-go/build/clientset/versioned/fake"
-	"github.com/openshift/origin/pkg/build/builder/util/dockerfile"
-
-	"github.com/openshift/origin/pkg/git"
+	buildapi "github.com/openshift/origin/pkg/build/apis/build"
+	"github.com/openshift/origin/pkg/build/util/dockerfile"
+	"github.com/openshift/origin/pkg/client/testclient"
+	"github.com/openshift/origin/pkg/generate/git"
 )
 
 func TestInsertEnvAfterFrom(t *testing.T) {
 	tests := map[string]struct {
 		original string
-		env      []corev1.EnvVar
+		env      []kapi.EnvVar
 		want     string
 	}{
 		"no FROM instruction": {
 			original: `RUN echo "invalid Dockerfile"
 `,
-			env: []corev1.EnvVar{
+			env: []kapi.EnvVar{
 				{Name: "PATH", Value: "/bin"},
 			},
 			want: `RUN echo "invalid Dockerfile"
@@ -40,14 +39,14 @@ func TestInsertEnvAfterFrom(t *testing.T) {
 		"empty env": {
 			original: `FROM busybox
 `,
-			env: []corev1.EnvVar{},
+			env: []kapi.EnvVar{},
 			want: `FROM busybox
 `},
 		"single FROM instruction": {
 			original: `FROM busybox
 RUN echo "hello world"
 `,
-			env: []corev1.EnvVar{
+			env: []kapi.EnvVar{
 				{Name: "PATH", Value: "/bin"},
 			},
 			want: `FROM busybox
@@ -59,7 +58,7 @@ RUN echo "hello world"
 FROM busybox
 RUN echo "hello world"
 `,
-			env: []corev1.EnvVar{
+			env: []kapi.EnvVar{
 				{Name: "PATH", Value: "/bin"},
 				{Name: "GOPATH", Value: "/go"},
 				{Name: "PATH", Value: "/go/bin:$PATH"},
@@ -82,9 +81,9 @@ RUN echo "hello world"`},
 			continue
 		}
 		insertEnvAfterFrom(got, test.env)
-		if !bytes.Equal(dockerfile.Write(got), dockerfile.Write(want)) {
+		if !bytes.Equal(dockerfile.ParseTreeToDockerfile(got), dockerfile.ParseTreeToDockerfile(want)) {
 			t.Errorf("%s: insertEnvAfterFrom(node, %+v) = %+v; want %+v", name, test.env, got, want)
-			t.Logf("resulting Dockerfile:\n%s", dockerfile.Write(got))
+			t.Logf("resulting Dockerfile:\n%s", dockerfile.ParseTreeToDockerfile(got))
 		}
 	}
 }
@@ -134,9 +133,9 @@ RUN echo "hello world"
 			continue
 		}
 		replaceLastFrom(got, test.image)
-		if !bytes.Equal(dockerfile.Write(got), dockerfile.Write(want)) {
+		if !bytes.Equal(dockerfile.ParseTreeToDockerfile(got), dockerfile.ParseTreeToDockerfile(want)) {
 			t.Errorf("test[%d]: replaceLastFrom(node, %+v) = %+v; want %+v", i, test.image, got, want)
-			t.Logf("resulting Dockerfile:\n%s", dockerfile.Write(got))
+			t.Logf("resulting Dockerfile:\n%s", dockerfile.ParseTreeToDockerfile(got))
 		}
 	}
 }
@@ -146,24 +145,24 @@ func TestDockerfilePath(t *testing.T) {
 	tests := []struct {
 		contextDir     string
 		dockerfilePath string
-		dockerStrategy *buildapiv1.DockerBuildStrategy
+		dockerStrategy *buildapi.DockerBuildStrategy
 	}{
 		// default Dockerfile path
 		{
 			dockerfilePath: "Dockerfile",
-			dockerStrategy: &buildapiv1.DockerBuildStrategy{},
+			dockerStrategy: &buildapi.DockerBuildStrategy{},
 		},
 		// custom Dockerfile path in the root context
 		{
 			dockerfilePath: "mydockerfile",
-			dockerStrategy: &buildapiv1.DockerBuildStrategy{
+			dockerStrategy: &buildapi.DockerBuildStrategy{
 				DockerfilePath: "mydockerfile",
 			},
 		},
 		// custom Dockerfile path in a sub directory
 		{
 			dockerfilePath: "dockerfiles/mydockerfile",
-			dockerStrategy: &buildapiv1.DockerBuildStrategy{
+			dockerStrategy: &buildapi.DockerBuildStrategy{
 				DockerfilePath: "dockerfiles/mydockerfile",
 			},
 		},
@@ -172,7 +171,7 @@ func TestDockerfilePath(t *testing.T) {
 		{
 			contextDir:     "somedir",
 			dockerfilePath: "dockerfiles/mydockerfile",
-			dockerStrategy: &buildapiv1.DockerBuildStrategy{
+			dockerStrategy: &buildapi.DockerBuildStrategy{
 				DockerfilePath: "dockerfiles/mydockerfile",
 			},
 		},
@@ -218,20 +217,20 @@ func TestDockerfilePath(t *testing.T) {
 			continue
 		}
 
-		build := &buildapiv1.Build{
-			Spec: buildapiv1.BuildSpec{
-				CommonSpec: buildapiv1.CommonSpec{
-					Source: buildapiv1.BuildSource{
-						Git: &buildapiv1.GitBuildSource{
+		build := &buildapi.Build{
+			Spec: buildapi.BuildSpec{
+				CommonSpec: buildapi.CommonSpec{
+					Source: buildapi.BuildSource{
+						Git: &buildapi.GitBuildSource{
 							URI: "http://github.com/openshift/origin.git",
 						},
 						ContextDir: test.contextDir,
 					},
-					Strategy: buildapiv1.BuildStrategy{
+					Strategy: buildapi.BuildStrategy{
 						DockerStrategy: test.dockerStrategy,
 					},
-					Output: buildapiv1.BuildOutput{
-						To: &corev1.ObjectReference{
+					Output: buildapi.BuildOutput{
+						To: &kapi.ObjectReference{
 							Kind: "DockerImage",
 							Name: "test/test-result:latest",
 						},
@@ -285,7 +284,7 @@ func TestDockerfilePath(t *testing.T) {
 		}
 
 		// check that the docker client is called with the right Dockerfile parameter
-		if err = dockerBuilder.dockerBuild(buildDir, "", []buildapiv1.SecretBuildSource{}); err != nil {
+		if err = dockerBuilder.dockerBuild(buildDir, "", []buildapi.SecretBuildSource{}); err != nil {
 			t.Errorf("failed to build: %v", err)
 			continue
 		}
@@ -294,19 +293,19 @@ func TestDockerfilePath(t *testing.T) {
 }
 
 func TestEmptySource(t *testing.T) {
-	build := &buildapiv1.Build{
+	build := &buildapi.Build{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "buildid",
 			Namespace: "default",
 		},
-		Spec: buildapiv1.BuildSpec{
-			CommonSpec: buildapiv1.CommonSpec{
-				Source: buildapiv1.BuildSource{},
-				Strategy: buildapiv1.BuildStrategy{
-					DockerStrategy: &buildapiv1.DockerBuildStrategy{},
+		Spec: buildapi.BuildSpec{
+			CommonSpec: buildapi.CommonSpec{
+				Source: buildapi.BuildSource{},
+				Strategy: buildapi.BuildStrategy{
+					DockerStrategy: &buildapi.DockerBuildStrategy{},
 				},
-				Output: buildapiv1.BuildOutput{
-					To: &corev1.ObjectReference{
+				Output: buildapi.BuildOutput{
+					To: &kapi.ObjectReference{
 						Kind: "DockerImage",
 						Name: "test/test-result:latest",
 					},
@@ -315,10 +314,10 @@ func TestEmptySource(t *testing.T) {
 		},
 	}
 
-	client := buildfake.Clientset{}
+	client := testclient.Fake{}
 
 	dockerBuilder := &DockerBuilder{
-		client: client.Build().Builds(""),
+		client: client.Builds(""),
 		build:  build,
 	}
 
@@ -348,28 +347,28 @@ USER 1001`
 		},
 	}
 
-	build := &buildapiv1.Build{
+	build := &buildapi.Build{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "buildid",
 			Namespace: "default",
 		},
-		Spec: buildapiv1.BuildSpec{
-			CommonSpec: buildapiv1.CommonSpec{
-				Source: buildapiv1.BuildSource{
+		Spec: buildapi.BuildSpec{
+			CommonSpec: buildapi.CommonSpec{
+				Source: buildapi.BuildSource{
 					ContextDir: "",
 					Dockerfile: &dockerFile,
 				},
-				Strategy: buildapiv1.BuildStrategy{
-					DockerStrategy: &buildapiv1.DockerBuildStrategy{
+				Strategy: buildapi.BuildStrategy{
+					DockerStrategy: &buildapi.DockerBuildStrategy{
 						DockerfilePath: "",
-						From: &corev1.ObjectReference{
+						From: &kapi.ObjectReference{
 							Kind: "DockerImage",
 							Name: "scratch",
 						},
 					},
 				},
-				Output: buildapiv1.BuildOutput{
-					To: &corev1.ObjectReference{
+				Output: buildapi.BuildOutput{
+					To: &kapi.ObjectReference{
 						Kind: "ImageStreamTag",
 						Name: "scratch",
 					},
@@ -378,7 +377,7 @@ USER 1001`
 		},
 	}
 
-	client := buildfake.Clientset{}
+	client := testclient.Fake{}
 
 	buildDir, err := ioutil.TempDir("", "dockerfile-path")
 	if err != nil {
@@ -386,7 +385,7 @@ USER 1001`
 	}
 
 	dockerBuilder := &DockerBuilder{
-		client:       client.Build().Builds(""),
+		client:       client.Builds(""),
 		build:        build,
 		dockerClient: dockerClient,
 		tar:          tar.New(s2ifs.NewFileSystem()),
@@ -401,5 +400,68 @@ USER 1001`
 		} else {
 			t.Errorf("Received unexpected error: %v", err)
 		}
+	}
+}
+
+func TestGetDockerfileFrom(t *testing.T) {
+	tests := map[string]struct {
+		dockerfileContent string
+		want              []string
+	}{
+		"no FROM instruction": {
+			dockerfileContent: `RUN echo "invalid Dockerfile"
+`,
+			want: []string{},
+		},
+		"single FROM instruction": {
+			dockerfileContent: `FROM scratch
+RUN echo "hello world"
+`,
+			want: []string{"scratch"},
+		},
+		"multi FROM instruction": {
+			dockerfileContent: `FROM scratch
+FROM busybox
+RUN echo "hello world"
+`,
+			want: []string{"scratch", "busybox"},
+		},
+	}
+
+	for i, test := range tests {
+		buildDir, err := ioutil.TempDir("", "dockerfile-path")
+		if err != nil {
+			t.Errorf("failed to create tmpdir: %v", err)
+			continue
+		}
+		defer func() {
+			if err := os.RemoveAll(buildDir); err != nil {
+				t.Fatal(err)
+			}
+		}()
+		dockerfilePath := filepath.Join(buildDir, defaultDockerfilePath)
+		dockerfileContent := test.dockerfileContent
+		if err = os.MkdirAll(filepath.Dir(dockerfilePath), os.FileMode(0750)); err != nil {
+			t.Errorf("failed to create directory %s: %v", filepath.Dir(dockerfilePath), err)
+			continue
+		}
+		if err = ioutil.WriteFile(dockerfilePath, []byte(dockerfileContent), os.FileMode(0644)); err != nil {
+			t.Errorf("failed to write dockerfile to %s: %v", dockerfilePath, err)
+			continue
+		}
+		froms := getDockerfileFrom(dockerfilePath)
+		if len(froms) != len(test.want) {
+			t.Errorf("test[%s]: getDockerfileFrom(dockerfilepath, %s) = %+v; want %+v", i, dockerfilePath, froms, test.want)
+			t.Logf("Dockerfile froms::\n%v", froms)
+			continue
+		}
+		for fi := range froms {
+			if froms[fi] != test.want[fi] {
+				t.Errorf("test[%s]: getDockerfileFrom(dockerfilepath, %s) = %+v; want %+v", i, dockerfilePath, froms, test.want)
+				t.Logf("Dockerfile froms::\n%v", froms)
+				break
+			}
+		}
+		os.RemoveAll(buildDir)
 	}
 }

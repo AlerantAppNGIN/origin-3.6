@@ -175,8 +175,7 @@ func TestNamespaceDeleteInUse(t *testing.T) {
 
 func TestNamespaceDeleteAnotherError(t *testing.T) {
 	client := newTestClient(&FakeRoundTripper{message: "another error here", status: 410})
-	expect := "API error (Gone): another error here"
-	if err := client.NamespaceDelete(types.DeleteOptions{Name: "testdeleteinuseme"}); err.Error() != expect {
+	if err := client.NamespaceDelete(types.DeleteOptions{Name: "testdeleteinuseme"}); err.Error() != "API error (410): another error here" {
 		t.Errorf("TestNamespaceDeleteAnotherError: wrong error. Want %#v. Got %#v.", "another error here", err.Error())
 	}
 }

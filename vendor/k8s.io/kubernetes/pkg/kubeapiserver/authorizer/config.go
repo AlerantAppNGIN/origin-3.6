@@ -25,7 +25,6 @@ import (
 	"k8s.io/apiserver/pkg/authorization/authorizerfactory"
 	"k8s.io/apiserver/pkg/authorization/union"
 	"k8s.io/apiserver/plugin/pkg/authorizer/webhook"
-	versionedinformers "k8s.io/client-go/informers"
 	"k8s.io/kubernetes/pkg/auth/authorizer/abac"
 	"k8s.io/kubernetes/pkg/auth/nodeidentifier"
 	informers "k8s.io/kubernetes/pkg/client/informers/informers_generated/internalversion"
@@ -52,28 +51,23 @@ type AuthorizationConfig struct {
 	// TTL for caching of unauthorized responses from the webhook server.
 	WebhookCacheUnauthorizedTTL time.Duration
 
-	InformerFactory          informers.SharedInformerFactory
-	VersionedInformerFactory versionedinformers.SharedInformerFactory
+	InformerFactory informers.SharedInformerFactory
 }
 
 // New returns the right sort of union of multiple authorizer.Authorizer objects
 // based on the authorizationMode or an error.
-func (config AuthorizationConfig) New() (authorizer.Authorizer, authorizer.RuleResolver, error) {
+func (config AuthorizationConfig) New() (authorizer.Authorizer, error) {
 	if len(config.AuthorizationModes) == 0 {
-		return nil, nil, errors.New("At least one authorization mode should be passed")
+		return nil, errors.New("At least one authorization mode should be passed")
 	}
 
-	var (
-		authorizers   []authorizer.Authorizer
-		ruleResolvers []authorizer.RuleResolver
-	)
+	var authorizers []authorizer.Authorizer
 	authorizerMap := make(map[string]bool)
 
 	for _, authorizationMode := range config.AuthorizationModes {
 		if authorizerMap[authorizationMode] {
-			return nil, nil, fmt.Errorf("Authorization mode %s specified more than once", authorizationMode)
+			return nil, fmt.Errorf("Authorization mode %s specified more than once", authorizationMode)
 		}
-
 		// Keep cases in sync with constant list above.
 		switch authorizationMode {
 		case modes.ModeNode:
@@ -82,41 +76,37 @@ func (config AuthorizationConfig) New() (authorizer.Authorizer, authorizer.RuleR
 				graph,
 				config.InformerFactory.Core().InternalVersion().Pods(),
 				config.InformerFactory.Core().InternalVersion().PersistentVolumes(),
-				config.VersionedInformerFactory.Storage().V1beta1().VolumeAttachments(),
 			)
 			nodeAuthorizer := node.NewAuthorizer(graph, nodeidentifier.NewDefaultNodeIdentifier(), bootstrappolicy.NodeRules())
 			authorizers = append(authorizers, nodeAuthorizer)
 
+			// Don't bind system:nodes to the system:node role
+			bootstrappolicy.AddClusterRoleBindingFilter(bootstrappolicy.OmitNodesGroupBinding)
+
 		case modes.ModeAlwaysAllow:
-			alwaysAllowAuthorizer := authorizerfactory.NewAlwaysAllowAuthorizer()
-			authorizers = append(authorizers, alwaysAllowAuthorizer)
-			ruleResolvers = append(ruleResolvers, alwaysAllowAuthorizer)
+			authorizers = append(authorizers, authorizerfactory.NewAlwaysAllowAuthorizer())
 		case modes.ModeAlwaysDeny:
-			alwaysDenyAuthorizer := authorizerfactory.NewAlwaysDenyAuthorizer()
-			authorizers = append(authorizers, alwaysDenyAuthorizer)
-			ruleResolvers = append(ruleResolvers, alwaysDenyAuthorizer)
+			authorizers = append(authorizers, authorizerfactory.NewAlwaysDenyAuthorizer())
 		case modes.ModeABAC:
 			if config.PolicyFile == "" {
-				return nil, nil, errors.New("ABAC's authorization policy file not passed")
+				return nil, errors.New("ABAC's authorization policy file not passed")
 			}
 			abacAuthorizer, err := abac.NewFromFile(config.PolicyFile)
 			if err != nil {
-				return nil, nil, err
+				return nil, err
 			}
 			authorizers = append(authorizers, abacAuthorizer)
-			ruleResolvers = append(ruleResolvers, abacAuthorizer)
 		case modes.ModeWebhook:
 			if config.WebhookConfigFile == "" {
-				return nil, nil, errors.New("Webhook's configuration file not passed")
+				return nil, errors.New("Webhook's configuration file not passed")
 			}
 			webhookAuthorizer, err := webhook.New(config.WebhookConfigFile,
 				config.WebhookCacheAuthorizedTTL,
 				config.WebhookCacheUnauthorizedTTL)
 			if err != nil {
-				return nil, nil, err
+				return nil, err
 			}
 			authorizers = append(authorizers, webhookAuthorizer)
-			ruleResolvers = append(ruleResolvers, webhookAuthorizer)
 		case modes.ModeRBAC:
 			rbacAuthorizer := rbac.New(
 				&rbac.RoleGetter{Lister: config.InformerFactory.Rbac().InternalVersion().Roles().Lister()},
@@ -125,19 +115,18 @@ func (config AuthorizationConfig) New() (authorizer.Authorizer, authorizer.RuleR
 				&rbac.ClusterRoleBindingLister{Lister: config.InformerFactory.Rbac().InternalVersion().ClusterRoleBindings().Lister()},
 			)
 			authorizers = append(authorizers, rbacAuthorizer)
-			ruleResolvers = append(ruleResolvers, rbacAuthorizer)
 		default:
-			return nil, nil, fmt.Errorf("Unknown authorization mode %s specified", authorizationMode)
+			return nil, fmt.Errorf("Unknown authorization mode %s specified", authorizationMode)
 		}
 		authorizerMap[authorizationMode] = true
 	}
 
 	if !authorizerMap[modes.ModeABAC] && config.PolicyFile != "" {
-		return nil, nil, errors.New("Cannot specify --authorization-policy-file without mode ABAC")
+		return nil, errors.New("Cannot specify --authorization-policy-file without mode ABAC")
 	}
 	if !authorizerMap[modes.ModeWebhook] && config.WebhookConfigFile != "" {
-		return nil, nil, errors.New("Cannot specify --authorization-webhook-config-file without mode Webhook")
+		return nil, errors.New("Cannot specify --authorization-webhook-config-file without mode Webhook")
 	}
 
-	return union.New(authorizers...), union.NewRuleResolvers(ruleResolvers...), nil
+	return union.New(authorizers...), nil
 }

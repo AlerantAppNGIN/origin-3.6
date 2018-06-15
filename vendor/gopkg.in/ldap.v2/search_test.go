@@ -15,7 +15,7 @@ func TestNewEntry(t *testing.T) {
 		"delta":   {"value"},
 		"epsilon": {"value"},
 	}
-	executedEntry := NewEntry(dn, attributes)
+	exectedEntry := NewEntry(dn, attributes)
 
 	iteration := 0
 	for {
@@ -23,8 +23,8 @@ func TestNewEntry(t *testing.T) {
 			break
 		}
 		testEntry := NewEntry(dn, attributes)
-		if !reflect.DeepEqual(executedEntry, testEntry) {
-			t.Fatalf("subsequent calls to NewEntry did not yield the same result:\n\texpected:\n\t%s\n\tgot:\n\t%s\n", executedEntry, testEntry)
+		if !reflect.DeepEqual(exectedEntry, testEntry) {
+			t.Fatalf("consequent calls to NewEntry did not yield the same result:\n\texpected:\n\t%s\n\tgot:\n\t%s\n", exectedEntry, testEntry)
 		}
 		iteration = iteration + 1
 	}

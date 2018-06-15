@@ -14,10 +14,10 @@ import (
 	restclient "k8s.io/client-go/rest"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 
-	configapi "github.com/openshift/origin/pkg/cmd/server/apis/config"
+	"github.com/openshift/origin/pkg/client"
+	configapi "github.com/openshift/origin/pkg/cmd/server/api"
 	"github.com/openshift/origin/pkg/oc/cli/cmd"
 	"github.com/openshift/origin/pkg/oc/cli/cmd/login"
-	userclient "github.com/openshift/origin/pkg/user/generated/internalclientset/typed/user/internalversion"
 	testutil "github.com/openshift/origin/test/util"
 	testserver "github.com/openshift/origin/test/util/server"
 )
@@ -162,7 +162,6 @@ func TestOAuthOIDC(t *testing.T) {
 		StartingKubeConfig: &clientcmdapi.Config{},
 		Reader:             bytes.NewBufferString("mylogin\nmypassword\n"),
 		Out:                loginOutput,
-		ErrOut:             ioutil.Discard,
 	}
 	if err := loginOptions.GatherInfo(); err != nil {
 		t.Fatalf("Error logging in: %v\n%v", err, loginOutput.String())
@@ -183,10 +182,7 @@ func TestOAuthOIDC(t *testing.T) {
 		},
 		BearerToken: loginOptions.Config.BearerToken,
 	}
-	userClient, err := userclient.NewForConfig(userConfig)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	userClient, err := client.New(userConfig)
 	userWhoamiOptions := cmd.WhoAmIOptions{UserInterface: userClient.Users(), Out: ioutil.Discard}
 	retrievedUser, err := userWhoamiOptions.WhoAmI()
 	if err != nil {

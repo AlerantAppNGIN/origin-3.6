@@ -7,14 +7,14 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/kubernetes/pkg/kubectl/cmd/templates"
 	cmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
 
-	"github.com/openshift/origin/pkg/oc/cli/util/clientcmd"
+	"github.com/openshift/origin/pkg/client"
+	"github.com/openshift/origin/pkg/cmd/util/clientcmd"
 	userapi "github.com/openshift/origin/pkg/user/apis/user"
-	userclientinternal "github.com/openshift/origin/pkg/user/generated/internalclientset"
-	userclient "github.com/openshift/origin/pkg/user/generated/internalclientset/typed/user/internalversion"
 )
 
 const IdentityRecommendedName = "identity"
@@ -39,10 +39,11 @@ type CreateIdentityOptions struct {
 	ProviderName     string
 	ProviderUserName string
 
-	IdentityClient userclient.IdentityInterface
+	IdentityClient client.IdentityInterface
 
 	DryRun bool
 
+	Mapper       meta.RESTMapper
 	OutputFormat string
 	Out          io.Writer
 	Printer      ObjectPrinter
@@ -86,20 +87,17 @@ func (o *CreateIdentityOptions) Complete(cmd *cobra.Command, f *clientcmd.Factor
 
 	o.DryRun = cmdutil.GetFlagBool(cmd, "dry-run")
 
-	clientConfig, err := f.ClientConfig()
+	client, _, err := f.Clients()
 	if err != nil {
 		return err
 	}
-	client, err := userclientinternal.NewForConfig(clientConfig)
-	if err != nil {
-		return err
-	}
-	o.IdentityClient = client.User().Identities()
+	o.IdentityClient = client.Identities()
 
+	o.Mapper, _ = f.Object()
 	o.OutputFormat = cmdutil.GetFlagString(cmd, "output")
 
 	o.Printer = func(obj runtime.Object, out io.Writer) error {
-		return cmdutil.PrintObject(cmd, obj, out)
+		return f.PrintObject(cmd, false, o.Mapper, obj, out)
 	}
 
 	return nil
@@ -114,6 +112,9 @@ func (o *CreateIdentityOptions) Validate() error {
 	}
 	if o.IdentityClient == nil {
 		return fmt.Errorf("IdentityClient is required")
+	}
+	if o.Mapper == nil {
+		return fmt.Errorf("Mapper is required")
 	}
 	if o.Out == nil {
 		return fmt.Errorf("Out is required")
@@ -141,7 +142,7 @@ func (o *CreateIdentityOptions) Run() error {
 	}
 
 	if useShortOutput := o.OutputFormat == "name"; useShortOutput || len(o.OutputFormat) == 0 {
-		cmdutil.PrintSuccess(useShortOutput, o.Out, actualIdentity, o.DryRun, "created")
+		cmdutil.PrintSuccess(o.Mapper, useShortOutput, o.Out, "identity", actualIdentity.Name, o.DryRun, "created")
 		return nil
 	}
 

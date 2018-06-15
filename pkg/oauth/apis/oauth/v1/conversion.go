@@ -2,105 +2,34 @@ package v1
 
 import (
 	"k8s.io/apimachinery/pkg/runtime"
+
+	oapi "github.com/openshift/origin/pkg/api"
+	oauthapi "github.com/openshift/origin/pkg/oauth/apis/oauth"
 )
 
 func addConversionFuncs(scheme *runtime.Scheme) error {
-	return nil
-}
+	if err := scheme.AddFieldLabelConversionFunc("v1", "OAuthAccessToken",
+		oapi.GetFieldLabelConversionFunc(oauthapi.OAuthAccessTokenToSelectableFields(&oauthapi.OAuthAccessToken{}), nil),
+	); err != nil {
+		return err
+	}
 
-func addLegacyFieldSelectorKeyConversions(scheme *runtime.Scheme) error {
-	if err := scheme.AddFieldLabelConversionFunc(LegacySchemeGroupVersion.String(), "OAuthAccessToken", legacyOAuthAccessTokenFieldSelectorKeyConversionFunc); err != nil {
+	if err := scheme.AddFieldLabelConversionFunc("v1", "OAuthAuthorizeToken",
+		oapi.GetFieldLabelConversionFunc(oauthapi.OAuthAuthorizeTokenToSelectableFields(&oauthapi.OAuthAuthorizeToken{}), nil),
+	); err != nil {
 		return err
 	}
-	if err := scheme.AddFieldLabelConversionFunc(LegacySchemeGroupVersion.String(), "OAuthAuthorizeToken", legacyOAuthAuthorizeTokenFieldSelectorKeyConversionFunc); err != nil {
-		return err
-	}
-	if err := scheme.AddFieldLabelConversionFunc(LegacySchemeGroupVersion.String(), "OAuthClientAuthorization", legacyOAuthClientAuthorizationFieldSelectorKeyConversionFunc); err != nil {
-		return err
-	}
-	return nil
-}
 
-func addFieldSelectorKeyConversions(scheme *runtime.Scheme) error {
-	if err := scheme.AddFieldLabelConversionFunc(SchemeGroupVersion.String(), "OAuthAccessToken", oauthAccessTokenFieldSelectorKeyConversionFunc); err != nil {
+	if err := scheme.AddFieldLabelConversionFunc("v1", "OAuthClient",
+		oapi.GetFieldLabelConversionFunc(oauthapi.OAuthClientToSelectableFields(&oauthapi.OAuthClient{}), nil),
+	); err != nil {
 		return err
 	}
-	if err := scheme.AddFieldLabelConversionFunc(SchemeGroupVersion.String(), "OAuthAuthorizeToken", oauthAuthorizeTokenFieldSelectorKeyConversionFunc); err != nil {
-		return err
-	}
-	if err := scheme.AddFieldLabelConversionFunc(SchemeGroupVersion.String(), "OAuthClientAuthorization", oauthClientAuthorizationFieldSelectorKeyConversionFunc); err != nil {
+
+	if err := scheme.AddFieldLabelConversionFunc("v1", "OAuthClientAuthorization",
+		oapi.GetFieldLabelConversionFunc(oauthapi.OAuthClientAuthorizationToSelectableFields(&oauthapi.OAuthClientAuthorization{}), nil),
+	); err != nil {
 		return err
 	}
 	return nil
-}
-
-// because field selectors can vary in support by version they are exposed under, we have one function for each
-// groupVersion we're registering for
-
-func legacyOAuthAccessTokenFieldSelectorKeyConversionFunc(label, value string) (internalLabel, internalValue string, err error) {
-	switch label {
-	case "clientName",
-		"userName",
-		"userUID",
-		"authorizeToken":
-		return label, value, nil
-	default:
-		return runtime.DefaultMetaV1FieldSelectorConversion(label, value)
-	}
-}
-
-func oauthAccessTokenFieldSelectorKeyConversionFunc(label, value string) (internalLabel, internalValue string, err error) {
-	switch label {
-	case "clientName",
-		"userName",
-		"userUID",
-		"authorizeToken":
-		return label, value, nil
-	default:
-		return runtime.DefaultMetaV1FieldSelectorConversion(label, value)
-	}
-}
-
-func legacyOAuthAuthorizeTokenFieldSelectorKeyConversionFunc(label, value string) (internalLabel, internalValue string, err error) {
-	switch label {
-	case "clientName",
-		"userName",
-		"userUID":
-		return label, value, nil
-	default:
-		return runtime.DefaultMetaV1FieldSelectorConversion(label, value)
-	}
-}
-
-func oauthAuthorizeTokenFieldSelectorKeyConversionFunc(label, value string) (internalLabel, internalValue string, err error) {
-	switch label {
-	case "clientName",
-		"userName",
-		"userUID":
-		return label, value, nil
-	default:
-		return runtime.DefaultMetaV1FieldSelectorConversion(label, value)
-	}
-}
-
-func legacyOAuthClientAuthorizationFieldSelectorKeyConversionFunc(label, value string) (internalLabel, internalValue string, err error) {
-	switch label {
-	case "clientName",
-		"userName",
-		"userUID":
-		return label, value, nil
-	default:
-		return runtime.DefaultMetaV1FieldSelectorConversion(label, value)
-	}
-}
-
-func oauthClientAuthorizationFieldSelectorKeyConversionFunc(label, value string) (internalLabel, internalValue string, err error) {
-	switch label {
-	case "clientName",
-		"userName",
-		"userUID":
-		return label, value, nil
-	default:
-		return runtime.DefaultMetaV1FieldSelectorConversion(label, value)
-	}
 }

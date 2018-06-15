@@ -5,8 +5,7 @@ import (
 	"os"
 
 	"github.com/openshift/origin/pkg/cmd/openshift"
-	cmdsanity "github.com/openshift/origin/tools/clicheck/sanity"
-	"k8s.io/apimachinery/pkg/util/wait"
+	cmdsanity "github.com/openshift/origin/pkg/cmd/util/sanity"
 )
 
 var (
@@ -15,7 +14,7 @@ var (
 		"openshift start kubernetes", // TODO enable when we upstream all these conventions
 		"openshift cli create quota", // TODO has examples starting with '//', enable when we upstream all these conventions
 		"openshift cli adm",          // already checked in 'openshift admin'
-		"openshift cli ex",           // we will only care about experimental when they get promoted
+		"openshift ex",               // we will only care about experimental when they get promoted
 		"openshift cli types",
 	}
 )
@@ -23,7 +22,7 @@ var (
 func main() {
 	errors := []error{}
 
-	oc := openshift.NewCommandOpenShift("openshift", wait.NeverStop)
+	oc := openshift.NewCommandOpenShift("openshift")
 	result := cmdsanity.CheckCmdTree(oc, cmdsanity.AllCmdChecks, skip)
 	errors = append(errors, result...)
 

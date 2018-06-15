@@ -15,17 +15,10 @@ BLANK_LINE_OR_COMMENT_REGEX="([[:space:]]*$|#.*)"
 PORT_REGEX="[[:digit:]]+"
 PROTO_REGEX="(tcp|udp)"
 IP_REGEX="[[:digit:]]+\.[[:digit:]]+\.[[:digit:]]+\.[[:digit:]]+"
-CIDR_MASK_REGEX="/[[:digit:]]+"
 
-if [[ "${EGRESS_SOURCE:-}" =~ ^${IP_REGEX}${CIDR_MASK_REGEX}$ ]]; then
-    EGRESS_SOURCE_IFADDR="${EGRESS_SOURCE}"
-    EGRESS_SOURCE="${EGRESS_SOURCE%/*}"
-elif [[ "${EGRESS_SOURCE:-}" =~ ^${IP_REGEX}$ ]]; then
-    EGRESS_SOURCE_IFADDR="${EGRESS_SOURCE}/32"
-else
+if [[ ! "${EGRESS_SOURCE:-}" =~ ^${IP_REGEX}$ ]]; then
     die "EGRESS_SOURCE unspecified or invalid"
 fi
-
 if [[ ! "${EGRESS_GATEWAY:-}" =~ ^${IP_REGEX}$ ]]; then
     die "EGRESS_GATEWAY unspecified or invalid"
 fi
@@ -38,12 +31,12 @@ function setup_network() {
     # The pod may die and get restarted; only try to add the
     # address/route/rules if they are not already there.
     if ! ip route get "${EGRESS_GATEWAY}" | grep -q macvlan0; then
-        ip addr add "${EGRESS_SOURCE_IFADDR}" dev macvlan0
-        ip link set up dev macvlan0
+    ip addr add "${EGRESS_SOURCE}"/32 dev macvlan0
+    ip link set up dev macvlan0
 
-        ip route add "${EGRESS_GATEWAY}"/32 dev macvlan0
-        ip route del default
-        ip route add default via "${EGRESS_GATEWAY}" dev macvlan0
+    ip route add "${EGRESS_GATEWAY}"/32 dev macvlan0
+    ip route del default
+    ip route add default via "${EGRESS_GATEWAY}" dev macvlan0
     fi
 
     # Update neighbor ARP caches in case another node previously had the IP. (This is
@@ -106,7 +99,7 @@ function gen_iptables_rules() {
             fi
         fi
     done <<< "${EGRESS_DESTINATION}"
-    echo -A POSTROUTING -o macvlan0 -j SNAT --to-source "${EGRESS_SOURCE}"
+    echo -A POSTROUTING -j SNAT --to-source "${EGRESS_SOURCE}"
 }
 
 function setup_iptables() {
@@ -150,10 +143,6 @@ case "${EGRESS_ROUTER_MODE:=legacy}" in
         ;;
 
     http-proxy)
-        setup_network
-        ;;
-
-    dns-proxy)
         setup_network
         ;;
 

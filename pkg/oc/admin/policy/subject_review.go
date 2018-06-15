@@ -12,18 +12,16 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/apiserver/pkg/authentication/serviceaccount"
-	"k8s.io/kubernetes/pkg/api/legacyscheme"
-	kapi "k8s.io/kubernetes/pkg/apis/core"
+	kapi "k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/kubectl/cmd/templates"
 	kcmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
 	"k8s.io/kubernetes/pkg/kubectl/resource"
 	kprinters "k8s.io/kubernetes/pkg/printers"
 
-	securityapiv1 "github.com/openshift/api/security/v1"
-	"github.com/openshift/origin/pkg/oc/cli/util/clientcmd"
+	"github.com/openshift/origin/pkg/client"
+	"github.com/openshift/origin/pkg/cmd/util/clientcmd"
 	securityapi "github.com/openshift/origin/pkg/security/apis/security"
-	securityclientinternal "github.com/openshift/origin/pkg/security/generated/internalclientset"
-	securitytypedclient "github.com/openshift/origin/pkg/security/generated/internalclientset/typed/security/internalversion"
+	securityapiv1 "github.com/openshift/origin/pkg/security/apis/security/v1"
 )
 
 var (
@@ -45,8 +43,8 @@ var (
 const SubjectReviewRecommendedName = "scc-subject-review"
 
 type sccSubjectReviewOptions struct {
-	sccSubjectReviewClient     securitytypedclient.PodSecurityPolicySubjectReviewsGetter
-	sccSelfSubjectReviewClient securitytypedclient.PodSecurityPolicySelfSubjectReviewsGetter
+	sccSubjectReviewClient     client.PodSecurityPolicySubjectReviewsNamespacer
+	sccSelfSubjectReviewClient client.PodSecurityPolicySelfSubjectReviewsNamespacer
 	namespace                  string
 	enforceNamespace           bool
 	out                        io.Writer
@@ -82,14 +80,14 @@ func NewCmdSccSubjectReview(name, fullName string, f *clientcmd.Factory, out io.
 
 func (o *sccSubjectReviewOptions) Complete(f *clientcmd.Factory, args []string, cmd *cobra.Command, out io.Writer) error {
 	if len(args) == 0 && len(o.FilenameOptions.Filenames) == 0 {
-		return kcmdutil.UsageErrorf(cmd, "one or more resources must be specified")
+		return kcmdutil.UsageError(cmd, cmd.Use)
 	}
 	if len(o.User) > 0 && len(o.serviceAccount) > 0 {
-		return kcmdutil.UsageErrorf(cmd, "--user and --serviceaccount are mutually exclusive")
+		return fmt.Errorf("--user and --serviceaccount are mutually exclusive")
 	}
 	if len(o.serviceAccount) > 0 { // check whether user supplied a list of SA
 		if len(strings.Split(o.serviceAccount, ",")) > 1 {
-			return kcmdutil.UsageErrorf(cmd, "only one Service Account is supported")
+			return fmt.Errorf("only one Service Account is supported")
 		}
 		if strings.HasPrefix(o.serviceAccount, serviceaccount.ServiceAccountUsernamePrefix) {
 			_, user, err := serviceaccount.SplitUsername(o.serviceAccount)
@@ -104,24 +102,17 @@ func (o *sccSubjectReviewOptions) Complete(f *clientcmd.Factory, args []string, 
 	if err != nil {
 		return err
 	}
-	clientConfig, err := f.ClientConfig()
-	if err != nil {
-		return err
-	}
-	securityClient, err := securityclientinternal.NewForConfig(clientConfig)
+	oclient, _, err := f.Clients()
 	if err != nil {
 		return fmt.Errorf("unable to obtain client: %v", err)
 	}
-	o.sccSubjectReviewClient = securityClient.Security()
-	o.sccSelfSubjectReviewClient = securityClient.Security()
-	o.builder = f.NewBuilder()
+	o.sccSubjectReviewClient = oclient
+	o.sccSelfSubjectReviewClient = oclient
+	o.builder = f.NewBuilder(true)
 	o.RESTClientFactory = f.ClientForMapping
 
-	output := kcmdutil.GetFlagString(cmd, "output")
-	wide := len(output) > 0 && output == "wide"
-
-	if len(output) > 0 && !wide {
-		printer, err := kcmdutil.PrinterForOptions(kcmdutil.ExtractCmdPrintOptions(cmd, false))
+	if len(kcmdutil.GetFlagString(cmd, "output")) != 0 {
+		printer, err := f.PrinterForCommand(cmd, false, nil, kprinters.PrintOptions{})
 		if err != nil {
 			return err
 		}
@@ -139,7 +130,6 @@ func (o *sccSubjectReviewOptions) Run(args []string) error {
 		userOrSA = o.serviceAccount
 	}
 	r := o.builder.
-		Internal().
 		NamespaceParam(o.namespace).
 		FilenameParam(o.enforceNamespace, &o.FilenameOptions).
 		ResourceTypeOrNameArgs(true, args...).
@@ -172,7 +162,7 @@ func (o *sccSubjectReviewOptions) Run(args []string) error {
 				return fmt.Errorf("unable to compute Pod Security Policy Subject Review for %q: %v", objectName, err)
 			}
 			versionedObj := &securityapiv1.PodSecurityPolicySubjectReview{}
-			if err := legacyscheme.Scheme.Convert(unversionedObj, versionedObj, nil); err != nil {
+			if err := kapi.Scheme.Convert(unversionedObj, versionedObj, nil); err != nil {
 				return err
 			}
 			response = versionedObj
@@ -182,7 +172,7 @@ func (o *sccSubjectReviewOptions) Run(args []string) error {
 				return fmt.Errorf("unable to compute Pod Security Policy Subject Review for %q: %v", objectName, err)
 			}
 			versionedObj := &securityapiv1.PodSecurityPolicySelfSubjectReview{}
-			if err := legacyscheme.Scheme.Convert(unversionedObj, versionedObj, nil); err != nil {
+			if err := kapi.Scheme.Convert(unversionedObj, versionedObj, nil); err != nil {
 				return err
 			}
 			response = versionedObj
@@ -252,11 +242,11 @@ func (s *sccSubjectReviewHumanReadablePrinter) print(info *resource.Info, obj ru
 		fmt.Fprintf(w, "%s\t\n", strings.Join(columns, "\t"))
 		s.noHeaders = true // printed only the first time if requested
 	}
-	gvks, _, err := legacyscheme.Scheme.ObjectKinds(info.Object)
+	gvk, _, err := kapi.Scheme.ObjectKind(info.Object)
 	if err != nil {
 		return err
 	}
-	kind := gvks[0].Kind
+	kind := gvk.Kind
 	allowedBy, err := getAllowedBy(obj)
 	if err != nil {
 		return err

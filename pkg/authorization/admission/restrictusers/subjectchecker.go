@@ -3,21 +3,22 @@ package restrictusers
 import (
 	"fmt"
 
+	kclientset "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset"
+
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	kerrors "k8s.io/apimachinery/pkg/util/errors"
-	"k8s.io/kubernetes/pkg/apis/rbac"
-	kclientset "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset"
+	kapi "k8s.io/kubernetes/pkg/api"
 
-	authorizationapi "github.com/openshift/api/authorization/v1"
-	userapi "github.com/openshift/api/user/v1"
-	userclient "github.com/openshift/client-go/user/clientset/versioned/typed/user/v1"
+	authorizationapi "github.com/openshift/origin/pkg/authorization/apis/authorization"
+	oclient "github.com/openshift/origin/pkg/client"
+	userapi "github.com/openshift/origin/pkg/user/apis/user"
 )
 
 // SubjectChecker determines whether rolebindings on a subject (user, group, or
 // service account) are allowed in a project.
 type SubjectChecker interface {
-	Allowed(rbac.Subject, *RoleBindingRestrictionContext) (bool, error)
+	Allowed(kapi.ObjectReference, *RoleBindingRestrictionContext) (bool, error)
 }
 
 // UnionSubjectChecker represents the union of zero or more SubjectCheckers.
@@ -30,7 +31,7 @@ func NewUnionSubjectChecker(checkers []SubjectChecker) UnionSubjectChecker {
 
 // Allowed determines whether the given subject is allowed in rolebindings in
 // the project.
-func (checkers UnionSubjectChecker) Allowed(subject rbac.Subject, ctx *RoleBindingRestrictionContext) (bool, error) {
+func (checkers UnionSubjectChecker) Allowed(subject kapi.ObjectReference, ctx *RoleBindingRestrictionContext) (bool, error) {
 	errs := []error{}
 	for _, checker := range []SubjectChecker(checkers) {
 		allowed, err := checker.Allowed(subject, ctx)
@@ -47,8 +48,8 @@ func (checkers UnionSubjectChecker) Allowed(subject rbac.Subject, ctx *RoleBindi
 // RoleBindingRestrictionContext holds context that is used when determining
 // whether a RoleBindingRestriction allows rolebindings on a particular subject.
 type RoleBindingRestrictionContext struct {
-	userClient userclient.UserV1Interface
-	kclient    kclientset.Interface
+	oclient oclient.Interface
+	kclient kclientset.Interface
 
 	// groupCache maps user name to groups.
 	groupCache GroupCache
@@ -66,11 +67,11 @@ type RoleBindingRestrictionContext struct {
 
 // NewRoleBindingRestrictionContext returns a new RoleBindingRestrictionContext
 // object.
-func NewRoleBindingRestrictionContext(ns string, kc kclientset.Interface, userClient userclient.UserV1Interface, groupCache GroupCache) (*RoleBindingRestrictionContext, error) {
+func NewRoleBindingRestrictionContext(ns string, kc kclientset.Interface, oc oclient.Interface, groupCache GroupCache) (*RoleBindingRestrictionContext, error) {
 	return &RoleBindingRestrictionContext{
 		namespace:       ns,
 		kclient:         kc,
-		userClient:      userClient,
+		oclient:         oc,
 		groupCache:      groupCache,
 		userToLabelSet:  map[string]labels.Set{},
 		groupToLabelSet: map[string]labels.Set{},
@@ -78,8 +79,12 @@ func NewRoleBindingRestrictionContext(ns string, kc kclientset.Interface, userCl
 }
 
 // labelSetForUser returns the label set for the given user subject.
-func (ctx *RoleBindingRestrictionContext) labelSetForUser(subject rbac.Subject) (labels.Set, error) {
-	if subject.Kind != rbac.UserKind {
+func (ctx *RoleBindingRestrictionContext) labelSetForUser(subject kapi.ObjectReference) (labels.Set, error) {
+	if subject.Kind == authorizationapi.SystemUserKind {
+		return labels.Set{}, nil
+	}
+
+	if subject.Kind != authorizationapi.UserKind {
 		return labels.Set{}, fmt.Errorf("not a user: %q", subject.Name)
 	}
 
@@ -88,7 +93,7 @@ func (ctx *RoleBindingRestrictionContext) labelSetForUser(subject rbac.Subject) 
 		return labelSet, nil
 	}
 
-	user, err := ctx.userClient.Users().Get(subject.Name, metav1.GetOptions{})
+	user, err := ctx.oclient.Users().Get(subject.Name, metav1.GetOptions{})
 	if err != nil {
 		return labels.Set{}, err
 	}
@@ -99,8 +104,12 @@ func (ctx *RoleBindingRestrictionContext) labelSetForUser(subject rbac.Subject) 
 }
 
 // groupsForUser returns the groups for the given user subject.
-func (ctx *RoleBindingRestrictionContext) groupsForUser(subject rbac.Subject) ([]*userapi.Group, error) {
-	if subject.Kind != rbac.UserKind {
+func (ctx *RoleBindingRestrictionContext) groupsForUser(subject kapi.ObjectReference) ([]*userapi.Group, error) {
+	if subject.Kind == authorizationapi.SystemUserKind {
+		return []*userapi.Group{}, nil
+	}
+
+	if subject.Kind != authorizationapi.UserKind {
 		return []*userapi.Group{}, fmt.Errorf("not a user: %q", subject.Name)
 	}
 
@@ -108,8 +117,12 @@ func (ctx *RoleBindingRestrictionContext) groupsForUser(subject rbac.Subject) ([
 }
 
 // labelSetForGroup returns the label set for the given group subject.
-func (ctx *RoleBindingRestrictionContext) labelSetForGroup(subject rbac.Subject) (labels.Set, error) {
-	if subject.Kind != rbac.GroupKind {
+func (ctx *RoleBindingRestrictionContext) labelSetForGroup(subject kapi.ObjectReference) (labels.Set, error) {
+	if subject.Kind == authorizationapi.SystemGroupKind {
+		return labels.Set{}, nil
+	}
+
+	if subject.Kind != authorizationapi.GroupKind {
 		return labels.Set{}, fmt.Errorf("not a group: %q", subject.Name)
 	}
 
@@ -118,7 +131,7 @@ func (ctx *RoleBindingRestrictionContext) labelSetForGroup(subject rbac.Subject)
 		return labelSet, nil
 	}
 
-	group, err := ctx.userClient.Groups().Get(subject.Name, metav1.GetOptions{})
+	group, err := ctx.oclient.Groups().Get(subject.Name, metav1.GetOptions{})
 	if err != nil {
 		return labels.Set{}, err
 	}
@@ -141,8 +154,9 @@ func NewUserSubjectChecker(userRestriction *authorizationapi.UserRestriction) Us
 
 // Allowed determines whether the given user subject is allowed in rolebindings
 // in the project.
-func (checker UserSubjectChecker) Allowed(subject rbac.Subject, ctx *RoleBindingRestrictionContext) (bool, error) {
-	if subject.Kind != rbac.UserKind {
+func (checker UserSubjectChecker) Allowed(subject kapi.ObjectReference, ctx *RoleBindingRestrictionContext) (bool, error) {
+	if subject.Kind != authorizationapi.UserKind &&
+		subject.Kind != authorizationapi.SystemUserKind {
 		return false, nil
 	}
 
@@ -150,6 +164,11 @@ func (checker UserSubjectChecker) Allowed(subject rbac.Subject, ctx *RoleBinding
 		if subject.Name == userName {
 			return true, nil
 		}
+	}
+
+	// System users can match only by name.
+	if subject.Kind != authorizationapi.UserKind {
+		return false, nil
 	}
 
 	if len(checker.userRestriction.Groups) != 0 {
@@ -201,8 +220,9 @@ func NewGroupSubjectChecker(groupRestriction *authorizationapi.GroupRestriction)
 
 // Allowed determines whether the given group subject is allowed in rolebindings
 // in the project.
-func (checker GroupSubjectChecker) Allowed(subject rbac.Subject, ctx *RoleBindingRestrictionContext) (bool, error) {
-	if subject.Kind != rbac.GroupKind {
+func (checker GroupSubjectChecker) Allowed(subject kapi.ObjectReference, ctx *RoleBindingRestrictionContext) (bool, error) {
+	if subject.Kind != authorizationapi.GroupKind &&
+		subject.Kind != authorizationapi.SystemGroupKind {
 		return false, nil
 	}
 
@@ -210,6 +230,11 @@ func (checker GroupSubjectChecker) Allowed(subject rbac.Subject, ctx *RoleBindin
 		if subject.Name == groupName {
 			return true, nil
 		}
+	}
+
+	// System groups can match only by name.
+	if subject.Kind != authorizationapi.GroupKind {
+		return false, nil
 	}
 
 	if len(checker.groupRestriction.Selectors) != 0 {
@@ -248,8 +273,8 @@ func NewServiceAccountSubjectChecker(serviceAccountRestriction *authorizationapi
 
 // Allowed determines whether the given serviceaccount subject is allowed in
 // rolebindings in the project.
-func (checker ServiceAccountSubjectChecker) Allowed(subject rbac.Subject, ctx *RoleBindingRestrictionContext) (bool, error) {
-	if subject.Kind != rbac.ServiceAccountKind {
+func (checker ServiceAccountSubjectChecker) Allowed(subject kapi.ObjectReference, ctx *RoleBindingRestrictionContext) (bool, error) {
+	if subject.Kind != authorizationapi.ServiceAccountKind {
 		return false, nil
 	}
 

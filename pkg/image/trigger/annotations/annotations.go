@@ -78,7 +78,7 @@ func findContainerBySelector(spec ometa.PodSpecReferenceMutator, init bool, sele
 		return spec.GetContainerByIndex(init, i)
 	}
 	// TODO: potentially make this more flexible, like whitespace
-	if name := strings.TrimSuffix(strings.TrimPrefix(selector, "?(@.name==\""), "\")"); name != selector {
+	if name := strings.TrimSuffix(strings.TrimPrefix(selector, "?(@.name='"), "')"); name != selector {
 		return spec.GetContainerByName(name)
 	}
 	return nil, false
@@ -111,7 +111,7 @@ func ContainerForObjectFieldPath(obj runtime.Object, fieldPath string) (ometa.Co
 
 // UpdateObjectFromImages attempts to set the appropriate object information. If changes are necessary, it lazily copies
 // obj and returns it, or if no changes are necessary returns nil.
-func UpdateObjectFromImages(obj runtime.Object, tagRetriever trigger.TagRetriever) (runtime.Object, error) {
+func UpdateObjectFromImages(obj runtime.Object, copier runtime.ObjectCopier, tagRetriever trigger.TagRetriever) (runtime.Object, error) {
 	var updated runtime.Object
 	m, err := meta.Accessor(obj)
 	if err != nil {
@@ -161,7 +161,10 @@ func UpdateObjectFromImages(obj runtime.Object, tagRetriever trigger.TagRetrieve
 
 		if container.GetImage() != ref {
 			if updated == nil {
-				updated = obj.DeepCopyObject()
+				updated, err = copier.Copy(obj)
+				if err != nil {
+					return nil, err
+				}
 				spec, _ = ometa.GetPodSpecReferenceMutator(updated)
 				container, _ = findContainerBySelector(spec, init, selector)
 			}
@@ -170,33 +173,6 @@ func UpdateObjectFromImages(obj runtime.Object, tagRetriever trigger.TagRetrieve
 		}
 	}
 	return updated, nil
-}
-
-// ContainerImageChanged returns true if any container image referenced by newTriggers changed.
-func ContainerImageChanged(oldObj, newObj runtime.Object, newTriggers []triggerapi.ObjectFieldTrigger) bool {
-	for _, trigger := range newTriggers {
-		if trigger.Paused {
-			continue
-		}
-
-		newContainer, _, err := ContainerForObjectFieldPath(newObj, trigger.FieldPath)
-		if err != nil {
-			glog.V(5).Infof("%v", err)
-			continue
-		}
-
-		oldContainer, _, err := ContainerForObjectFieldPath(oldObj, trigger.FieldPath)
-		if err != nil {
-			// might just be a result of the update
-			continue
-		}
-
-		if newContainer.GetImage() != oldContainer.GetImage() {
-			return true
-		}
-	}
-
-	return false
 }
 
 // annotationTriggerIndexer uses annotations on objects to trigger changes.
@@ -263,8 +239,6 @@ func (i annotationTriggerIndexer) Index(obj, old interface{}) (string, *trigger.
 			change = cache.Added
 		case !reflect.DeepEqual(oldTriggers, triggers):
 			change = cache.Updated
-		case ContainerImageChanged(old.(runtime.Object), obj.(runtime.Object), triggers):
-			change = cache.Updated
 		}
 	}
 
@@ -284,10 +258,11 @@ type AnnotationUpdater interface {
 
 type AnnotationReactor struct {
 	Updater AnnotationUpdater
+	Copier  runtime.ObjectCopier
 }
 
-func (r *AnnotationReactor) ImageChanged(obj runtime.Object, tagRetriever trigger.TagRetriever) error {
-	changed, err := UpdateObjectFromImages(obj, tagRetriever)
+func (r *AnnotationReactor) ImageChanged(obj interface{}, tagRetriever trigger.TagRetriever) error {
+	changed, err := UpdateObjectFromImages(obj.(runtime.Object), r.Copier, tagRetriever)
 	if err != nil {
 		return err
 	}

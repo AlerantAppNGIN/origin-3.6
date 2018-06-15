@@ -9,17 +9,15 @@ import (
 	"net/http"
 	"os"
 	"strings"
-	"sync"
 
 	"github.com/golang/glog"
 	"golang.org/x/net/websocket"
-	"k8s.io/kubernetes/pkg/api/legacyscheme"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apiserver/pkg/endpoints/discovery"
 	apirequest "k8s.io/apiserver/pkg/endpoints/request"
+	kapi "k8s.io/kubernetes/pkg/api"
 
-	_ "github.com/openshift/origin/pkg/api/install"
 	"github.com/openshift/origin/pkg/cmd/util"
 )
 
@@ -112,7 +110,6 @@ type TestHttpService struct {
 	NamespaceListResponse string
 
 	listeners []net.Listener
-	wg        sync.WaitGroup
 }
 
 const (
@@ -292,16 +289,21 @@ func (s *TestHttpService) handleWebSocket(ws *websocket.Conn) {
 
 // Stop stops the service by closing any registered listeners
 func (s *TestHttpService) Stop() {
-	for _, l := range s.listeners {
-		glog.Infof("Stopping listener at %s\n", l.Addr().String())
-		l.Close()
+	if s.listeners != nil && len(s.listeners) > 0 {
+		for _, l := range s.listeners {
+			if l != nil {
+				glog.Infof("Stopping listener at %s\n", l.Addr().String())
+				l.Close()
+			}
+		}
 	}
-	s.wg.Wait()
 }
 
 // Start will start the http service to simulate the master and client urls.  It sets up the appropriate watch
 // endpoints and serves the secure and non-secure traffic.
 func (s *TestHttpService) Start() error {
+	s.listeners = make([]net.Listener, 3)
+
 	if err := s.startMaster(); err != nil {
 		return err
 	}
@@ -338,7 +340,7 @@ func (s *TestHttpService) startMaster() error {
 	masterServer.HandleFunc("/apis/extensions/v1beta1/watch/ingresses", s.handleIngressWatch)
 
 	contextMapper := apirequest.NewRequestContextMapper()
-	h := discovery.NewRootAPIsHandler(discovery.DefaultAddresses{DefaultAddress: s.MasterHttpAddr}, legacyscheme.Codecs, contextMapper)
+	h := discovery.NewRootAPIsHandler(discovery.DefaultAddresses{DefaultAddress: s.MasterHttpAddr}, kapi.Codecs, contextMapper)
 	h.AddGroup(metav1.APIGroup{
 		Name:     "route.openshift.io",
 		Versions: []metav1.GroupVersionForDiscovery{{GroupVersion: "route.openshift.io/v1", Version: "v1"}},
@@ -421,13 +423,12 @@ func (s *TestHttpService) startServing(addr string, handler http.Handler) error 
 
 	glog.Infof("Started, serving at %s\n", listener.Addr().String())
 
-	s.wg.Add(1)
 	go func() {
 		err := http.Serve(listener, handler)
-		if err != nil && !strings.Contains(err.Error(), "use of closed network connection") {
+
+		if err != nil {
 			glog.Errorf("HTTP server failed: %v", err)
 		}
-		s.wg.Done()
 	}()
 
 	return nil
@@ -454,13 +455,10 @@ func (s *TestHttpService) startServingTLS(addr string, cert []byte, key []byte, 
 	s.listeners = append(s.listeners, listener)
 	glog.Infof("Started, serving TLS at %s\n", listener.Addr().String())
 
-	s.wg.Add(1)
 	go func() {
-		err := http.Serve(listener, handler)
-		if err != nil && !strings.Contains(err.Error(), "use of closed network connection") {
+		if err := http.Serve(listener, handler); err != nil {
 			glog.Errorf("HTTPS server failed: %v", err)
 		}
-		s.wg.Done()
 	}()
 
 	return nil

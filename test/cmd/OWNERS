@@ -1,17 +1,22 @@
 reviewers:
+  - smarterclayton
+  - deads2k
+  - stevekuznetsov
   - juanvallejo
+  - bparees
+  - liggitt
+  - fabianofranz
   - pecameron
   - knobunc
-  - ironcladlou
-  - squeed
   - dcbw
   - danwinship
-  - soltysh
 approvers:
+  - smarterclayton
+  - deads2k
   - stevekuznetsov
+  - bparees
+  - liggitt
   - knobunc
-  - ironcladlou
-  - squeed
   - dcbw
   - danwinship
-  - soltysh
+  - fabianofranz

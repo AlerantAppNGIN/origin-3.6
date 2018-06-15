@@ -7,12 +7,12 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/watch"
-	kapi "k8s.io/kubernetes/pkg/apis/core"
+	kapi "k8s.io/kubernetes/pkg/api"
 
 	testutil "github.com/openshift/origin/test/util"
 	testserver "github.com/openshift/origin/test/util/server"
 
-	"github.com/openshift/service-serving-cert-signer/pkg/controller/servingcert"
+	"github.com/openshift/origin/pkg/service/controller/servingcert"
 )
 
 func TestServiceServingCertSigner(t *testing.T) {
@@ -27,11 +27,15 @@ func TestServiceServingCertSigner(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	clusterAdminClient, err := testutil.GetClusterAdminClient(clusterAdminKubeConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
 	clusterAdminKubeClientset, err := testutil.GetClusterAdminKubeClient(clusterAdminKubeConfig)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := testserver.CreateNewProject(clusterAdminConfig, "service-serving-cert-signer", "deads"); err != nil {
+	if _, err := testserver.CreateNewProject(clusterAdminClient, *clusterAdminConfig, "service-serving-cert-signer", "deads"); err != nil {
 		t.Fatal(err)
 	}
 

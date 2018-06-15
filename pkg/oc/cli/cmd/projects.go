@@ -5,7 +5,6 @@ import (
 	"io"
 	"sort"
 
-	kapierrors "k8s.io/apimachinery/pkg/api/errors"
 	restclient "k8s.io/client-go/rest"
 	kclientcmd "k8s.io/client-go/tools/clientcmd"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
@@ -14,13 +13,11 @@ import (
 	kcmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
 
 	oapi "github.com/openshift/origin/pkg/api"
-	clientcfg "github.com/openshift/origin/pkg/client/config"
+	"github.com/openshift/origin/pkg/client"
+	"github.com/openshift/origin/pkg/cmd/util/clientcmd"
 	cliconfig "github.com/openshift/origin/pkg/oc/cli/config"
-	"github.com/openshift/origin/pkg/oc/cli/util/clientcmd"
 	projectapi "github.com/openshift/origin/pkg/project/apis/project"
 	projectapihelpers "github.com/openshift/origin/pkg/project/apis/project/helpers"
-	projectclientinternal "github.com/openshift/origin/pkg/project/generated/internalclientset"
-	projectclient "github.com/openshift/origin/pkg/project/generated/internalclientset/typed/project/internalversion"
 
 	"github.com/spf13/cobra"
 )
@@ -28,7 +25,7 @@ import (
 type ProjectsOptions struct {
 	Config       clientcmdapi.Config
 	ClientConfig *restclient.Config
-	Client       projectclient.ProjectInterface
+	Client       *client.Client
 	KubeClient   kclientset.Interface
 	Out          io.Writer
 	PathOptions  *kclientcmd.PathOptions
@@ -72,7 +69,7 @@ func NewCmdProjects(fullName string, f *clientcmd.Factory, out io.Writer) *cobra
 			options.PathOptions = cliconfig.NewPathOptions(cmd)
 
 			if err := options.Complete(f, args, fullName, out); err != nil {
-				kcmdutil.CheckErr(kcmdutil.UsageErrorf(cmd, err.Error()))
+				kcmdutil.CheckErr(kcmdutil.UsageError(cmd, err.Error()))
 			}
 
 			if err := options.RunProjects(); err != nil {
@@ -93,25 +90,20 @@ func (o *ProjectsOptions) Complete(f *clientcmd.Factory, args []string, commandN
 	o.CommandName = commandName
 
 	var err error
-	o.Config, err = f.RawConfig()
+	o.Config, err = f.OpenShiftClientConfig().RawConfig()
 	if err != nil {
 		return err
 	}
 
-	o.ClientConfig, err = f.ClientConfig()
+	o.ClientConfig, err = f.OpenShiftClientConfig().ClientConfig()
 	if err != nil {
 		return err
 	}
 
-	o.KubeClient, err = f.ClientSet()
+	o.Client, o.KubeClient, err = f.Clients()
 	if err != nil {
 		return err
 	}
-	projectClient, err := projectclientinternal.NewForConfig(o.ClientConfig)
-	if err != nil {
-		return err
-	}
-	o.Client = projectClient.Project()
 
 	o.Out = out
 
@@ -143,7 +135,7 @@ func (o ProjectsOptions) RunProjects() error {
 
 	var defaultContextName string
 	if currentContext != nil {
-		defaultContextName = clientcfg.GetContextNickname(currentContext.Namespace, currentContext.Cluster, currentContext.AuthInfo)
+		defaultContextName = cliconfig.GetContextNickname(currentContext.Namespace, currentContext.Cluster, currentContext.AuthInfo)
 	}
 
 	var msg string
@@ -196,7 +188,7 @@ func (o ProjectsOptions) RunProjects() error {
 
 		if len(projects) > 0 && !o.DisplayShort {
 			if !currentProjectExists {
-				if kapierrors.IsForbidden(currentProjectErr) {
+				if clientcmd.IsForbidden(currentProjectErr) {
 					fmt.Printf("You do not have rights to view project %q. Please switch to an existing one.\n", currentProject)
 				}
 				return currentProjectErr

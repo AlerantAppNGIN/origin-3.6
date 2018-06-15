@@ -10,15 +10,15 @@ import (
 	"github.com/spf13/cobra"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	kapi "k8s.io/kubernetes/pkg/apis/core"
+	kapi "k8s.io/kubernetes/pkg/api"
 	kclientset "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset"
 	"k8s.io/kubernetes/pkg/kubectl/cmd/templates"
 	kcmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
 
-	appsapi "github.com/openshift/origin/pkg/apps/apis/apps"
-	appsclientinternal "github.com/openshift/origin/pkg/apps/generated/internalclientset/typed/apps/internalversion"
-	"github.com/openshift/origin/pkg/oc/cli/deploymentconfigs/prune"
-	"github.com/openshift/origin/pkg/oc/cli/util/clientcmd"
+	"github.com/openshift/origin/pkg/client"
+	"github.com/openshift/origin/pkg/cmd/util/clientcmd"
+	deployapi "github.com/openshift/origin/pkg/deploy/apis/apps"
+	"github.com/openshift/origin/pkg/deploy/prune"
 )
 
 const PruneDeploymentsRecommendedName = "deployments"
@@ -47,9 +47,9 @@ type PruneDeploymentsOptions struct {
 	KeepFailed      int
 	Namespace       string
 
-	AppsClient appsclientinternal.DeploymentConfigsGetter
-	KubeClient kclientset.Interface
-	Out        io.Writer
+	OSClient client.Interface
+	KClient  kclientset.Interface
+	Out      io.Writer
 }
 
 // NewCmdPruneDeployments implements the OpenShift cli prune deployments command.
@@ -62,10 +62,11 @@ func NewCmdPruneDeployments(f *clientcmd.Factory, parentName, name string, out i
 	}
 
 	cmd := &cobra.Command{
-		Use:     name,
-		Short:   "Remove old completed and failed deployments",
-		Long:    deploymentsLongDesc,
-		Example: fmt.Sprintf(deploymentsExample, parentName, name),
+		Use:        name,
+		Short:      "Remove old completed and failed deployments",
+		Long:       deploymentsLongDesc,
+		Example:    fmt.Sprintf(deploymentsExample, parentName, name),
+		SuggestFor: []string{"deployment", "deployments"},
 		Run: func(cmd *cobra.Command, args []string) {
 			kcmdutil.CheckErr(opts.Complete(f, cmd, args, out))
 			kcmdutil.CheckErr(opts.Validate())
@@ -86,7 +87,7 @@ func NewCmdPruneDeployments(f *clientcmd.Factory, parentName, name string, out i
 // which can be validated and used for pruning deployments.
 func (o *PruneDeploymentsOptions) Complete(f *clientcmd.Factory, cmd *cobra.Command, args []string, out io.Writer) error {
 	if len(args) > 0 {
-		return kcmdutil.UsageErrorf(cmd, "no arguments are allowed to this command")
+		return kcmdutil.UsageError(cmd, "no arguments are allowed to this command")
 	}
 
 	o.Namespace = metav1.NamespaceAll
@@ -99,20 +100,12 @@ func (o *PruneDeploymentsOptions) Complete(f *clientcmd.Factory, cmd *cobra.Comm
 	}
 	o.Out = out
 
-	kubeClient, err := f.ClientSet()
+	osClient, kClient, err := f.Clients()
 	if err != nil {
 		return err
 	}
-	clientConfig, err := f.ClientConfig()
-	if err != nil {
-		return err
-	}
-	appsClient, err := appsclientinternal.NewForConfig(clientConfig)
-	if err != nil {
-		return err
-	}
-	o.AppsClient = appsClient
-	o.KubeClient = kubeClient
+	o.OSClient = osClient
+	o.KClient = kClient
 
 	return nil
 }
@@ -133,16 +126,16 @@ func (o PruneDeploymentsOptions) Validate() error {
 
 // Run contains all the necessary functionality for the OpenShift cli prune deployments command.
 func (o PruneDeploymentsOptions) Run() error {
-	deploymentConfigList, err := o.AppsClient.DeploymentConfigs(o.Namespace).List(metav1.ListOptions{})
+	deploymentConfigList, err := o.OSClient.DeploymentConfigs(o.Namespace).List(metav1.ListOptions{})
 	if err != nil {
 		return err
 	}
-	deploymentConfigs := []*appsapi.DeploymentConfig{}
+	deploymentConfigs := []*deployapi.DeploymentConfig{}
 	for i := range deploymentConfigList.Items {
 		deploymentConfigs = append(deploymentConfigs, &deploymentConfigList.Items[i])
 	}
 
-	deploymentList, err := o.KubeClient.Core().ReplicationControllers(o.Namespace).List(metav1.ListOptions{})
+	deploymentList, err := o.KClient.Core().ReplicationControllers(o.Namespace).List(metav1.ListOptions{})
 	if err != nil {
 		return err
 	}
@@ -167,7 +160,7 @@ func (o PruneDeploymentsOptions) Run() error {
 	deploymentDeleter := &describingDeploymentDeleter{w: w}
 
 	if o.Confirm {
-		deploymentDeleter.delegate = prune.NewDeploymentDeleter(o.KubeClient.Core(), o.KubeClient.Core())
+		deploymentDeleter.delegate = prune.NewDeploymentDeleter(o.KClient.Core(), o.KClient.Core())
 	} else {
 		fmt.Fprintln(os.Stderr, "Dry run enabled - no modifications will be made. Add --confirm to remove deployments")
 	}

@@ -2,64 +2,99 @@ package cmd
 
 import (
 	"encoding/json"
-	"fmt"
 	"testing"
 
+	deployapi "github.com/openshift/origin/pkg/deploy/apis/apps"
 	unidlingapi "github.com/openshift/origin/pkg/unidling/api"
 
-	oappsapi "github.com/openshift/origin/pkg/apps/apis/apps"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	kruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	ktypes "k8s.io/apimachinery/pkg/types"
-	kapi "k8s.io/kubernetes/pkg/apis/core"
+	kapi "k8s.io/kubernetes/pkg/api"
 
 	// install all APIs
 	_ "github.com/openshift/origin/pkg/api/install"
-	_ "k8s.io/kubernetes/pkg/apis/core/install"
+	_ "k8s.io/kubernetes/pkg/api/install"
 )
 
-func makePod(name string, rc metav1.Object, namespace string, t *testing.T) kapi.Pod {
-	pod := kapi.Pod{
+func makePod(name, rcName string, t *testing.T) kapi.Pod {
+	// this snippet is from kube's code to set the created-by annotation
+	// (which itself does not do quite what we want here)
+
+	codec := kapi.Codecs.LegacyCodec(schema.GroupVersion{Group: kapi.GroupName, Version: "v1"})
+
+	createdByRefJson, err := kruntime.Encode(codec, &kapi.SerializedReference{
+		Reference: kapi.ObjectReference{
+			Kind:      "ReplicationController",
+			Name:      rcName,
+			Namespace: "somens",
+		},
+	})
+
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+
+	return kapi.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
-			Namespace: namespace,
+			Namespace: "somens",
+			Annotations: map[string]string{
+				kapi.CreatedByAnnotation: string(createdByRefJson),
+			},
 		},
 	}
-	pod.OwnerReferences = append(pod.OwnerReferences,
-		*metav1.NewControllerRef(rc, kapi.SchemeGroupVersion.WithKind("ReplicationController")))
-
-	return pod
 }
 
-func makeRC(name string, dc metav1.Object, namespace string, t *testing.T) *kapi.ReplicationController {
+func makeRC(name, dcName, createdByDCName string, t *testing.T) *kapi.ReplicationController {
 	rc := kapi.ReplicationController{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        name,
-			Namespace:   namespace,
+			Namespace:   "somens",
 			Annotations: make(map[string]string),
 		},
 	}
 
-	if dc != nil {
-		rc.OwnerReferences = append(rc.OwnerReferences, *metav1.NewControllerRef(dc,
-			oappsapi.SchemeGroupVersion.WithKind("DeploymentConfig")))
+	if createdByDCName != "" {
+		codec := kapi.Codecs.LegacyCodec(schema.GroupVersion{Group: kapi.GroupName, Version: "v1"})
+		createdByRefJson, err := kruntime.Encode(codec, &kapi.SerializedReference{
+			Reference: kapi.ObjectReference{
+				Kind:      "DeploymentConfig",
+				Name:      createdByDCName,
+				Namespace: "somens",
+			},
+		})
+
+		if err != nil {
+			t.Fatalf("Unexpected error: %v", err)
+		}
+
+		rc.Annotations[kapi.CreatedByAnnotation] = string(createdByRefJson)
+	}
+
+	if dcName != "" {
+		rc.Annotations[deployapi.DeploymentConfigAnnotation] = dcName
 	}
 
 	return &rc
 }
 
-func makePodRef(name, namespace string) *kapi.ObjectReference {
+func makePodRef(name string) *kapi.ObjectReference {
 	return &kapi.ObjectReference{
 		Kind:      "Pod",
 		Name:      name,
-		Namespace: namespace,
+		Namespace: "somens",
 	}
 }
 
-func makeRCRef(name string) *metav1.OwnerReference {
-	return metav1.NewControllerRef(&metav1.ObjectMeta{Name: name},
-		kapi.SchemeGroupVersion.WithKind("ReplicationController"))
+func makeRCRef(name string) *kapi.ObjectReference {
+	return &kapi.ObjectReference{
+		Kind:      "ReplicationController",
+		Name:      name,
+		Namespace: "somens",
+	}
 }
 
 func TestFindIdlablesForEndpoints(t *testing.T) {
@@ -68,10 +103,10 @@ func TestFindIdlablesForEndpoints(t *testing.T) {
 			{
 				Addresses: []kapi.EndpointAddress{
 					{
-						TargetRef: makePodRef("somepod1", "somens1"),
+						TargetRef: makePodRef("somepod1"),
 					},
 					{
-						TargetRef: makePodRef("somepod2", "somens1"),
+						TargetRef: makePodRef("somepod2"),
 					},
 					{
 						TargetRef: &kapi.ObjectReference{
@@ -86,46 +121,28 @@ func TestFindIdlablesForEndpoints(t *testing.T) {
 				Addresses: []kapi.EndpointAddress{
 					{},
 					{
-						TargetRef: makePodRef("somepod3", "somens1"),
+						TargetRef: makePodRef("somepod3"),
 					},
 					{
-						TargetRef: makePodRef("somepod4", "somens1"),
+						TargetRef: makePodRef("somepod4"),
 					},
 					{
-						TargetRef: makePodRef("somepod5", "somens1"),
+						TargetRef: makePodRef("somepod5"),
 					},
 					{
-						TargetRef: makePodRef("missingpod", "somens1"),
-					},
-				},
-			},
-			{
-				Addresses: []kapi.EndpointAddress{
-					{},
-					{
-						TargetRef: makePodRef("somepod1", "somens2"),
+						TargetRef: makePodRef("missingpod"),
 					},
 				},
 			},
 		},
 	}
 
-	controllers := map[string]metav1.Object{
-		"somens1/somerc1": makeRC("somerc1", &metav1.ObjectMeta{Name: "somedc1"}, "somens1", t),
-		"somens1/somerc2": makeRC("somerc2", nil, "somens1", t),
-		"somens1/somerc3": makeRC("somerc3", &metav1.ObjectMeta{Name: "somedc2"}, "somens1", t),
-		"somens1/somerc4": makeRC("somerc4", &metav1.ObjectMeta{Name: "somedc2"}, "somens1", t),
-		// make sure we test having multiple namespaces with identically-named RCs
-		"somens2/somerc2": makeRC("somerc2", nil, "somens2", t),
-	}
-
 	pods := map[kapi.ObjectReference]kapi.Pod{
-		*makePodRef("somepod1", "somens1"): makePod("somepod1", controllers["somens1/somerc1"], "somens1", t),
-		*makePodRef("somepod2", "somens1"): makePod("somepod2", controllers["somens1/somerc2"], "somens1", t),
-		*makePodRef("somepod3", "somens1"): makePod("somepod3", controllers["somens1/somerc1"], "somens1", t),
-		*makePodRef("somepod4", "somens1"): makePod("somepod4", controllers["somens1/somerc3"], "somens1", t),
-		*makePodRef("somepod5", "somens1"): makePod("somepod5", controllers["somens1/somerc4"], "somens1", t),
-		*makePodRef("somepod1", "somens2"): makePod("somepod5", controllers["somens2/somerc2"], "somens2", t),
+		*makePodRef("somepod1"): makePod("somepod1", "somerc1", t),
+		*makePodRef("somepod2"): makePod("somepod2", "somerc2", t),
+		*makePodRef("somepod3"): makePod("somepod3", "somerc1", t),
+		*makePodRef("somepod4"): makePod("somepod4", "somerc3", t),
+		*makePodRef("somepod5"): makePod("somepod5", "somerc4", t),
 	}
 
 	getPod := func(ref kapi.ObjectReference) (*kapi.Pod, error) {
@@ -135,8 +152,16 @@ func TestFindIdlablesForEndpoints(t *testing.T) {
 		return nil, kerrors.NewNotFound(schema.GroupResource{Group: kapi.GroupName, Resource: "Pod"}, ref.Name)
 	}
 
-	getController := func(ref namespacedOwnerReference) (metav1.Object, error) {
-		if controller, ok := controllers[fmt.Sprintf("%s/%s", ref.namespace, ref.Name)]; ok {
+	controllers := map[kapi.ObjectReference]kruntime.Object{
+		// prefer CreatedByAnnotation to DeploymentConfigAnnotation
+		*makeRCRef("somerc1"): makeRC("somerc1", "nonsense-value", "somedc1", t),
+		*makeRCRef("somerc2"): makeRC("somerc2", "", "", t),
+		*makeRCRef("somerc3"): makeRC("somerc3", "somedc2", "", t),
+		*makeRCRef("somerc4"): makeRC("somerc4", "", "somedc2", t),
+	}
+
+	getController := func(ref kapi.ObjectReference) (kruntime.Object, error) {
+		if controller, ok := controllers[ref]; ok {
 			return controller, nil
 		}
 
@@ -146,44 +171,25 @@ func TestFindIdlablesForEndpoints(t *testing.T) {
 
 	}
 
-	refSet, err := findScalableResourcesForEndpoints(endpoints, getPod, getController)
+	codec := kapi.Codecs.LegacyCodec(schema.GroupVersion{Group: kapi.GroupName, Version: "v1"})
+	refSet, err := findScalableResourcesForEndpoints(endpoints, codec, getPod, getController)
 
 	if err != nil {
 		t.Fatalf("Unexpected error while finding idlables: %v", err)
 	}
 
-	expectedRefs := []namespacedCrossGroupObjectReference{
+	expectedRefs := []unidlingapi.CrossGroupObjectReference{
 		{
-			CrossGroupObjectReference: unidlingapi.CrossGroupObjectReference{
-				Kind:  "DeploymentConfig",
-				Name:  "somedc1",
-				Group: oappsapi.GroupName,
-			},
-			namespace: "somens1",
+			Kind: "DeploymentConfig",
+			Name: "somedc1",
 		},
 		{
-			CrossGroupObjectReference: unidlingapi.CrossGroupObjectReference{
-				Kind:  "DeploymentConfig",
-				Name:  "somedc2",
-				Group: oappsapi.GroupName,
-			},
-			namespace: "somens1",
+			Kind: "DeploymentConfig",
+			Name: "somedc2",
 		},
 		{
-			CrossGroupObjectReference: unidlingapi.CrossGroupObjectReference{
-				Kind:  "ReplicationController",
-				Name:  "somerc2",
-				Group: kapi.GroupName,
-			},
-			namespace: "somens1",
-		},
-		{
-			CrossGroupObjectReference: unidlingapi.CrossGroupObjectReference{
-				Kind:  "ReplicationController",
-				Name:  "somerc2",
-				Group: kapi.GroupName,
-			},
-			namespace: "somens2",
+			Kind: "ReplicationController",
+			Name: "somerc2",
 		},
 	}
 
@@ -193,7 +199,7 @@ func TestFindIdlablesForEndpoints(t *testing.T) {
 
 	for _, ref := range expectedRefs {
 		if _, ok := refSet[ref]; !ok {
-			t.Errorf("expected scalable %q to be present, but was not in %v", ref.Name, refSet)
+			t.Errorf("expected ReplicationController %q to be present, but was not", ref.Name)
 		}
 	}
 }
@@ -243,45 +249,26 @@ func TestPairScalesWithIdlables(t *testing.T) {
 		}: {},
 	}
 
-	scales := map[namespacedCrossGroupObjectReference]int32{
+	scales := map[unidlingapi.CrossGroupObjectReference]int32{
 		{
-			CrossGroupObjectReference: unidlingapi.CrossGroupObjectReference{
-				Kind: "ReplicationController",
-				Name: "somerc1",
-			},
-			namespace: "somens1",
+			Kind: "ReplicationController",
+			Name: "somerc1",
 		}: 2,
 		{
-			CrossGroupObjectReference: unidlingapi.CrossGroupObjectReference{
-				Kind: "ReplicationController",
-				Name: "somerc1",
-			},
-			namespace: "somens2",
-		}: 3,
-		{
-			CrossGroupObjectReference: unidlingapi.CrossGroupObjectReference{
-				Kind: "ReplicationController",
-				Name: "somerc2",
-			},
-			namespace: "somens1",
+			Kind: "ReplicationController",
+			Name: "somerc2",
 		}: 5,
 		{
-			CrossGroupObjectReference: unidlingapi.CrossGroupObjectReference{
-				Kind: "DeploymentConfig",
-				Name: "somedc1",
-			},
-			namespace: "somens1",
+			Kind: "DeploymentConfig",
+			Name: "somedc1",
 		}: 0,
 		{
-			CrossGroupObjectReference: unidlingapi.CrossGroupObjectReference{
-				Kind: "DeploymentConfig",
-				Name: "somedc2",
-			},
-			namespace: "somens1",
+			Kind: "DeploymentConfig",
+			Name: "somedc2",
 		}: 0,
 	}
 
-	newScaleRefs, err := pairScalesWithScaleRefs(ktypes.NamespacedName{Name: "somesvc", Namespace: "somens1"}, oldAnnotations, newRawRefs, scales)
+	newScaleRefs, err := pairScalesWithScaleRefs(ktypes.NamespacedName{Name: "somesvc"}, oldAnnotations, newRawRefs, scales)
 
 	expectedScaleRefs := map[unidlingapi.RecordedScaleReference]struct{}{
 		{

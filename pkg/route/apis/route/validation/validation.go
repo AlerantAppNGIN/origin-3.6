@@ -14,18 +14,17 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	kvalidation "k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/validation/field"
-	"k8s.io/client-go/util/cert"
-	"k8s.io/kubernetes/pkg/apis/core/validation"
+	"k8s.io/kubernetes/pkg/api/validation"
 
+	oapi "github.com/openshift/origin/pkg/api"
+	cmdutil "github.com/openshift/origin/pkg/cmd/util"
 	routeapi "github.com/openshift/origin/pkg/route/apis/route"
 )
-
-var ValidateRouteName = validation.NameIsDNSSubdomain
 
 // ValidateRoute tests if required fields in the route are set.
 func ValidateRoute(route *routeapi.Route) field.ErrorList {
 	//ensure meta is set properly
-	result := validation.ValidateObjectMeta(&route.ObjectMeta, true, ValidateRouteName, field.NewPath("metadata"))
+	result := validation.ValidateObjectMeta(&route.ObjectMeta, true, oapi.GetNameValidationFunc(validation.ValidatePodName), field.NewPath("metadata"))
 
 	specPath := field.NewPath("spec")
 
@@ -246,7 +245,7 @@ func ExtendedValidateRoute(route *routeapi.Route) field.ErrorList {
 
 	if len(tlsConfig.CACertificate) > 0 {
 		certPool := x509.NewCertPool()
-		if certs, err := cert.ParseCertsPEM([]byte(tlsConfig.CACertificate)); err != nil {
+		if certs, err := cmdutil.CertificatesFromPEM([]byte(tlsConfig.CACertificate)); err != nil {
 			errmsg := fmt.Sprintf("failed to parse CA certificate: %v", err)
 			result = append(result, field.Invalid(tlsFieldPath.Child("caCertificate"), "redacted ca certificate data", errmsg))
 		} else {
@@ -299,7 +298,7 @@ func ExtendedValidateRoute(route *routeapi.Route) field.ErrorList {
 	}
 
 	if len(tlsConfig.DestinationCACertificate) > 0 {
-		if _, err := cert.ParseCertsPEM([]byte(tlsConfig.DestinationCACertificate)); err != nil {
+		if _, err := cmdutil.CertificatesFromPEM([]byte(tlsConfig.DestinationCACertificate)); err != nil {
 			errmsg := fmt.Sprintf("failed to parse destination CA certificate: %v", err)
 			result = append(result, field.Invalid(tlsFieldPath.Child("destinationCACertificate"), "redacted destination ca certificate data", errmsg))
 		} else {
@@ -426,7 +425,7 @@ func validateInsecureEdgeTerminationPolicy(tls *routeapi.TLSConfig, fldPath *fie
 // validateCertificatePEM checks if a certificate PEM is valid and
 // optionally verifies the certificate using the options.
 func validateCertificatePEM(certPEM string, options *x509.VerifyOptions) ([]*x509.Certificate, error) {
-	certs, err := cert.ParseCertsPEM([]byte(certPEM))
+	certs, err := cmdutil.CertificatesFromPEM([]byte(certPEM))
 	if err != nil {
 		return nil, err
 	}

@@ -9,9 +9,6 @@ import (
 	"strings"
 )
 
-// case insensitively match all key=value variables containing the word "proxy"
-var proxyRegex = regexp.MustCompile("(?i).*proxy.*")
-
 // ReadEnvironmentFile reads the content for a file that contains a list of
 // environment variables and values. The key-pairs are separated by a new line
 // character. The file can also have comments (both '#' and '//' are supported).
@@ -44,6 +41,8 @@ func ReadEnvironmentFile(path string) (map[string]string, error) {
 // SafeForLoggingEnv attempts to strip sensitive information from proxy
 // environment variable strings in key=value form.
 func SafeForLoggingEnv(env []string) []string {
+	// case insensitively match all key=value variables containing the word "proxy"
+	proxyRegex := regexp.MustCompile("(?i).*proxy.*")
 	newEnv := make([]string, len(env))
 	copy(newEnv, env)
 	for i, entry := range newEnv {
@@ -65,12 +64,7 @@ func SafeForLoggingURL(input string) (string, error) {
 	if err != nil {
 		return input, err
 	}
-	if u.User == nil {
-		return input, nil
-	}
-	if _, passwordSet := u.User.Password(); passwordSet {
-		// wipe out the user info from the url.
-		u.User = url.User("redacted")
-	}
+	// wipe out the user info from the url.
+	u.User = url.User("redacted")
 	return u.String(), nil
 }

@@ -29,8 +29,6 @@ type FakeDocker struct {
 	callLog []methodCall
 }
 
-var _ DockerClient = &FakeDocker{}
-
 type methodCall struct {
 	methodName string
 	args       []interface{}

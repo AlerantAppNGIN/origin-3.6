@@ -5,10 +5,8 @@ import (
 	"k8s.io/apiserver/pkg/registry/generic"
 	"k8s.io/apiserver/pkg/registry/generic/registry"
 	"k8s.io/apiserver/pkg/registry/rest"
-	"k8s.io/kubernetes/pkg/printers"
-	printerstorage "k8s.io/kubernetes/pkg/printers/storage"
+	kapi "k8s.io/kubernetes/pkg/api"
 
-	printersinternal "github.com/openshift/origin/pkg/printers/internalversion"
 	templateapi "github.com/openshift/origin/pkg/template/apis/template"
 	"github.com/openshift/origin/pkg/template/registry/template"
 	"github.com/openshift/origin/pkg/util/restoptions"
@@ -24,11 +22,11 @@ var _ rest.StandardStorage = &REST{}
 // NewREST returns a RESTStorage object that will work against templates.
 func NewREST(optsGetter restoptions.Getter) (*REST, error) {
 	store := &registry.Store{
+		Copier:                   kapi.Scheme,
 		NewFunc:                  func() runtime.Object { return &templateapi.Template{} },
 		NewListFunc:              func() runtime.Object { return &templateapi.TemplateList{} },
+		PredicateFunc:            template.Matcher,
 		DefaultQualifiedResource: templateapi.Resource("templates"),
-
-		TableConvertor: printerstorage.TableConvertor{TablePrinter: printers.NewTablePrinter().With(printersinternal.AddHandlers)},
 
 		CreateStrategy: template.Strategy,
 		UpdateStrategy: template.Strategy,
@@ -37,7 +35,7 @@ func NewREST(optsGetter restoptions.Getter) (*REST, error) {
 		ReturnDeletedObject: true,
 	}
 
-	options := &generic.StoreOptions{RESTOptions: optsGetter}
+	options := &generic.StoreOptions{RESTOptions: optsGetter, AttrFunc: template.GetAttrs}
 	if err := store.CompleteWithOptions(options); err != nil {
 		return nil, err
 	}

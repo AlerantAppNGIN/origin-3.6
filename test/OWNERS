@@ -8,10 +8,6 @@ reviewers:
   - csrwng
   - soltysh
   - enj
-  - ericavonb
-  - mrogers950
-  - simo5
-  - tnozicka
 approvers:
   - smarterclayton
   - deads2k
@@ -19,4 +15,3 @@ approvers:
   - bparees
   - stevekuznetsov
   - enj
-  - tnozicka

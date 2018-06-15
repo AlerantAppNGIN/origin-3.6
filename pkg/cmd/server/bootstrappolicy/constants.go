@@ -4,7 +4,6 @@ package bootstrappolicy
 const (
 	DefaultOpenShiftSharedResourcesNamespace = "openshift"
 	DefaultOpenShiftInfraNamespace           = "openshift-infra"
-	DefaultOpenShiftNodeNamespace            = "openshift-node"
 )
 
 // users
@@ -46,25 +45,16 @@ const (
 	NodeReadersGroup        = "system:node-readers"
 )
 
-// Service Account Names that are not controller related
-const (
-	InfraNodeBootstrapServiceAccountName = "node-bootstrapper"
-)
-
 // Roles
 const (
 	ClusterAdminRoleName       = "cluster-admin"
 	SudoerRoleName             = "sudoer"
-	ScopeImpersonationRoleName = "system:scope-impersonation"
 	ClusterReaderRoleName      = "cluster-reader"
 	StorageAdminRoleName       = "storage-admin"
 	ClusterDebuggerRoleName    = "cluster-debugger"
 	AdminRoleName              = "admin"
 	EditRoleName               = "edit"
 	ViewRoleName               = "view"
-	AggregatedAdminRoleName    = "system:openshift:aggregate-to-admin"
-	AggregatedEditRoleName     = "system:openshift:aggregate-to-edit"
-	AggregatedViewRoleName     = "system:openshift:aggregate-to-view"
 	SelfProvisionerRoleName    = "self-provisioner"
 	BasicUserRoleName          = "basic-user"
 	StatusCheckerRoleName      = "cluster-status"
@@ -106,14 +96,10 @@ const (
 	NodeReaderRoleName = "system:node-reader"
 
 	OpenshiftSharedResourceViewRoleName = "shared-resource-viewer"
-
-	NodeBootstrapRoleName    = "system:node-bootstrapper"
-	NodeConfigReaderRoleName = "system:node-config-reader"
 )
 
 // RoleBindings
 const (
-	// Legacy roles that must continue to have a plural form
 	SelfAccessReviewerRoleBindingName = SelfAccessReviewerRoleName + "s"
 	SelfProvisionerRoleBindingName    = SelfProvisionerRoleName + "s"
 	DeployerRoleBindingName           = DeployerRoleName + "s"
@@ -139,27 +125,10 @@ const (
 	RegistryViewerRoleBindingName     = RegistryViewerRoleName + "s"
 	RegistryEditorRoleBindingName     = RegistryEditorRoleName + "s"
 
-	OpenshiftSharedResourceViewRoleBindingName = OpenshiftSharedResourceViewRoleName + "s"
-
-	// Bindings
 	BuildStrategyDockerRoleBindingName          = BuildStrategyDockerRoleName + "-binding"
 	BuildStrategyCustomRoleBindingName          = BuildStrategyCustomRoleName + "-binding"
 	BuildStrategySourceRoleBindingName          = BuildStrategySourceRoleName + "-binding"
 	BuildStrategyJenkinsPipelineRoleBindingName = BuildStrategyJenkinsPipelineRoleName + "-binding"
-)
 
-// Resources and Subresources
-const (
-	// Authorization resources
-	DockerBuildResource          = "builds/docker"
-	OptimizedDockerBuildResource = "builds/optimizeddocker"
-	SourceBuildResource          = "builds/source"
-	CustomBuildResource          = "builds/custom"
-	JenkinsPipelineBuildResource = "builds/jenkinspipeline"
-
-	// These are valid under the "nodes" resource
-	NodeMetricsSubresource = "metrics"
-	NodeStatsSubresource   = "stats"
-	NodeSpecSubresource    = "spec"
-	NodeLogSubresource     = "log"
+	OpenshiftSharedResourceViewRoleBindingName = OpenshiftSharedResourceViewRoleName + "s"
 )

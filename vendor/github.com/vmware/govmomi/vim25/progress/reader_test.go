@@ -17,7 +17,6 @@ limitations under the License.
 package progress
 
 import (
-	"context"
 	"io"
 	"strings"
 	"testing"
@@ -26,7 +25,7 @@ import (
 func TestReader(t *testing.T) {
 	s := "helloworld"
 	ch := make(chan Report, 1)
-	pr := NewReader(context.Background(), &dummySinker{ch}, strings.NewReader(s), int64(len(s)))
+	pr := NewReader(&dummySinker{ch}, strings.NewReader(s), int64(len(s)))
 
 	var buf [10]byte
 	var q Report

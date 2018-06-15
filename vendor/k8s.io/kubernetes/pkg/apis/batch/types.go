@@ -18,11 +18,10 @@ package batch
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	api "k8s.io/kubernetes/pkg/apis/core"
+	"k8s.io/kubernetes/pkg/api"
 )
 
 // +genclient
-// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 
 // Job represents the configuration of a single job.
 type Job struct {
@@ -43,8 +42,6 @@ type Job struct {
 	Status JobStatus
 }
 
-// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
-
 // JobList is a collection of jobs.
 type JobList struct {
 	metav1.TypeMeta
@@ -56,8 +53,6 @@ type JobList struct {
 	// items is the list of Jobs.
 	Items []Job
 }
-
-// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 
 // JobTemplate describes a template for creating copies of a predefined pod.
 type JobTemplate struct {
@@ -108,16 +103,6 @@ type JobSpec struct {
 	// before the system tries to terminate it; value must be positive integer
 	// +optional
 	ActiveDeadlineSeconds *int64
-
-	// Optional number of retries before marking this job failed.
-	// Defaults to 6
-	// +optional
-	BackoffLimit *int32
-
-	// TODO enabled it when https://github.com/kubernetes/kubernetes/issues/28486 has been fixed
-	// Optional number of failed pods to retain.
-	// +optional
-	// FailedPodsLimit *int32
 
 	// A label query over pods that should match the pod count.
 	// Normally, the system sets this field for you.
@@ -203,7 +188,6 @@ type JobCondition struct {
 }
 
 // +genclient
-// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 
 // CronJob represents the configuration of a single cron job.
 type CronJob struct {
@@ -223,8 +207,6 @@ type CronJob struct {
 	// +optional
 	Status CronJobStatus
 }
-
-// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 
 // CronJobList is a collection of cron jobs.
 type CronJobList struct {
@@ -250,10 +232,7 @@ type CronJobSpec struct {
 	StartingDeadlineSeconds *int64
 
 	// Specifies how to treat concurrent executions of a Job.
-	// Valid values are:
-	// - "Allow" (default): allows CronJobs to run concurrently;
-	// - "Forbid": forbids concurrent runs, skipping next run if previous run hasn't finished yet;
-	// - "Replace": cancels currently running job and replaces it with a new one
+	// Defaults to Allow.
 	// +optional
 	ConcurrencyPolicy ConcurrencyPolicy
 

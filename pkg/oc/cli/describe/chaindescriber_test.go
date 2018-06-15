@@ -6,14 +6,12 @@ import (
 
 	"github.com/gonum/graph"
 	"github.com/gonum/graph/concrete"
-
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/sets"
-	"k8s.io/kubernetes/pkg/api/legacyscheme"
+	kapi "k8s.io/kubernetes/pkg/api"
 
-	buildfakeclient "github.com/openshift/origin/pkg/build/generated/internalclientset/fake"
-	buildclientscheme "github.com/openshift/origin/pkg/build/generated/internalclientset/scheme"
-	imagegraph "github.com/openshift/origin/pkg/oc/graph/imagegraph/nodes"
+	"github.com/openshift/origin/pkg/client/testclient"
+	imagegraph "github.com/openshift/origin/pkg/image/graph/nodes"
 )
 
 func TestChainDescriber(t *testing.T) {
@@ -38,7 +36,7 @@ func TestChainDescriber(t *testing.T) {
 			defaultNamespace: "example",
 			name:             "ruby-22-centos7",
 			tag:              "latest",
-			path:             "../../graph/genericgraph/test/circular.yaml",
+			path:             "../../../api/graph/test/circular.yaml",
 			humanReadable: map[string]int{
 				"Cycle detected in build configurations: bc/ruby-22-centos7 -> istag/ruby-hello-world:latest -> bc/ruby-hello-world -> istag/ruby-something-else:latest -> bc/ruby-something-else -> istag/ruby-22-centos7:latest -> bc/ruby-22-centos7": 1,
 			},
@@ -201,16 +199,15 @@ func TestChainDescriber(t *testing.T) {
 		objs := []runtime.Object{}
 		if len(test.path) > 0 {
 			var err error
-			objs, err = readObjectsFromPath(test.path, test.defaultNamespace, legacyscheme.Codecs.UniversalDecoder(), legacyscheme.Scheme)
+			objs, err = testclient.ReadObjectsFromPath(test.path, test.defaultNamespace, kapi.Codecs.UniversalDecoder(), kapi.Scheme)
 			if err != nil {
 				t.Fatal(err)
 			}
 		}
+		oc, _ := testclient.NewFixtureClients(objs...)
 		ist := imagegraph.MakeImageStreamTagObjectMeta(test.defaultNamespace, test.name, test.tag)
 
-		fakeClient := buildfakeclient.NewSimpleClientset(filterByScheme(buildclientscheme.Scheme, objs...)...)
-
-		desc, err := NewChainDescriber(fakeClient.Build(), test.namespaces, test.output).Describe(ist, test.includeInputImg, test.reverse)
+		desc, err := NewChainDescriber(oc, test.namespaces, test.output).Describe(ist, test.includeInputImg, test.reverse)
 		t.Logf("%s: output:\n%s\n\n", test.testName, desc)
 		if err != test.expectedErr {
 			t.Fatalf("%s: error mismatch: expected %v, got %v", test.testName, test.expectedErr, err)
@@ -253,25 +250,6 @@ func lenReadable(value map[string]int) int {
 		length += cnt
 	}
 	return length
-}
-
-func filterByScheme(scheme *runtime.Scheme, in ...runtime.Object) []runtime.Object {
-	out := []runtime.Object{}
-	for i := range in {
-		obj := in[i]
-		gvks, _, err := scheme.ObjectKinds(obj)
-		if err != nil {
-			continue
-			//panic(err)
-		}
-		if len(gvks) == 0 {
-			continue
-		}
-
-		out = append(out, obj)
-	}
-
-	return out
 }
 
 func TestDepthFirst(t *testing.T) {

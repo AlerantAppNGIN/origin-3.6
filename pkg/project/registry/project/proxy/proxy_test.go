@@ -8,8 +8,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apiserver/pkg/authentication/user"
 	apirequest "k8s.io/apiserver/pkg/endpoints/request"
-	"k8s.io/apiserver/pkg/registry/rest"
-	kapi "k8s.io/kubernetes/pkg/apis/core"
+	kapi "k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset/fake"
 
 	oapi "github.com/openshift/origin/pkg/api"
@@ -61,7 +60,7 @@ func TestListProjects(t *testing.T) {
 func TestCreateProjectBadObject(t *testing.T) {
 	storage := REST{}
 
-	obj, err := storage.Create(apirequest.NewContext(), &projectapi.ProjectList{}, rest.ValidateAllObjectFunc, false)
+	obj, err := storage.Create(apirequest.NewContext(), &projectapi.ProjectList{}, false)
 	if obj != nil {
 		t.Errorf("Expected nil, got %v", obj)
 	}
@@ -77,7 +76,7 @@ func TestCreateInvalidProject(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Annotations: map[string]string{oapi.OpenShiftDisplayName: "h\t\ni"},
 		},
-	}, rest.ValidateAllObjectFunc, false)
+	}, false)
 	if !errors.IsInvalid(err) {
 		t.Errorf("Expected 'invalid' error, got %v", err)
 	}
@@ -88,7 +87,7 @@ func TestCreateProjectOK(t *testing.T) {
 	storage := NewREST(mockClient.Core().Namespaces(), &mockLister{}, nil, nil)
 	_, err := storage.Create(apirequest.NewContext(), &projectapi.Project{
 		ObjectMeta: metav1.ObjectMeta{Name: "foo"},
-	}, rest.ValidateAllObjectFunc, false)
+	}, false)
 	if err != nil {
 		t.Errorf("Unexpected non-nil error: %#v", err)
 	}
@@ -120,7 +119,7 @@ func TestDeleteProject(t *testing.T) {
 	storage := REST{
 		client: mockClient.Core().Namespaces(),
 	}
-	obj, _, err := storage.Delete(apirequest.NewContext(), "foo", nil)
+	obj, err := storage.Delete(apirequest.NewContext(), "foo")
 	if obj == nil {
 		t.Error("Unexpected nil obj")
 	}

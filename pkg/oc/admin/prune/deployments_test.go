@@ -4,19 +4,20 @@ import (
 	"io/ioutil"
 	"testing"
 
-	appsfake "github.com/openshift/origin/pkg/apps/generated/internalclientset/fake"
 	"k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset/fake"
+
+	"github.com/openshift/origin/pkg/client/testclient"
 )
 
 func TestDeploymentPruneNamespaced(t *testing.T) {
 	kFake := fake.NewSimpleClientset()
-	osFake := appsfake.NewSimpleClientset()
+	osFake := testclient.NewSimpleFake()
 	opts := &PruneDeploymentsOptions{
 		Namespace: "foo",
 
-		AppsClient: osFake.Apps(),
-		KubeClient: kFake,
-		Out:        ioutil.Discard,
+		OSClient: osFake,
+		KClient:  kFake,
+		Out:      ioutil.Discard,
 	}
 
 	if err := opts.Run(); err != nil {

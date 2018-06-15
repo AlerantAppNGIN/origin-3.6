@@ -1,5 +1,5 @@
 /*
-Copyright (c) 2015-2017 VMware, Inc. All Rights Reserved.
+Copyright (c) 2015 VMware, Inc. All Rights Reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -23,7 +23,6 @@ import (
 	"net"
 	"path"
 
-	"github.com/vmware/govmomi/nfc"
 	"github.com/vmware/govmomi/property"
 	"github.com/vmware/govmomi/vim25"
 	"github.com/vmware/govmomi/vim25/methods"
@@ -465,20 +464,6 @@ func (v VirtualMachine) Answer(ctx context.Context, id, answer string) error {
 	return nil
 }
 
-func (v VirtualMachine) AcquireTicket(ctx context.Context, kind string) (*types.VirtualMachineTicket, error) {
-	req := types.AcquireTicket{
-		This:       v.Reference(),
-		TicketType: kind,
-	}
-
-	res, err := methods.AcquireTicket(ctx, v.c, &req)
-	if err != nil {
-		return nil, err
-	}
-
-	return &res.Returnval, nil
-}
-
 // CreateSnapshot creates a new snapshot of a virtual machine.
 func (v VirtualMachine) CreateSnapshot(ctx context.Context, name string, description string, memory bool, quiesce bool) (*Task, error) {
 	req := types.CreateSnapshot_Task{
@@ -512,7 +497,7 @@ func (v VirtualMachine) RemoveAllSnapshot(ctx context.Context, consolidate *bool
 	return NewTask(v.c, res.Returnval), nil
 }
 
-type snapshotMap map[string][]types.ManagedObjectReference
+type snapshotMap map[string][]Reference
 
 func (m snapshotMap) add(parent string, tree []types.VirtualMachineSnapshotTree) {
 	for i, st := range tree {
@@ -526,18 +511,18 @@ func (m snapshotMap) add(parent string, tree []types.VirtualMachineSnapshotTree)
 		}
 
 		for _, name := range names {
-			m[name] = append(m[name], tree[i].Snapshot)
+			m[name] = append(m[name], &tree[i].Snapshot)
 		}
 
 		m.add(sname, st.ChildSnapshotList)
 	}
 }
 
-// FindSnapshot supports snapshot lookup by name, where name can be:
+// findSnapshot supports snapshot lookup by name, where name can be:
 // 1) snapshot ManagedObjectReference.Value (unique)
 // 2) snapshot name (may not be unique)
 // 3) snapshot tree path (may not be unique)
-func (v VirtualMachine) FindSnapshot(ctx context.Context, name string) (*types.ManagedObjectReference, error) {
+func (v VirtualMachine) findSnapshot(ctx context.Context, name string) (Reference, error) {
 	var o mo.VirtualMachine
 
 	err := v.Properties(ctx, v.Reference(), []string{"snapshot"}, &o)
@@ -557,7 +542,7 @@ func (v VirtualMachine) FindSnapshot(ctx context.Context, name string) (*types.M
 	case 0:
 		return nil, fmt.Errorf("snapshot %q not found", name)
 	case 1:
-		return &s[0], nil
+		return s[0], nil
 	default:
 		return nil, fmt.Errorf("%q resolves to %d snapshots", name, len(s))
 	}
@@ -565,7 +550,7 @@ func (v VirtualMachine) FindSnapshot(ctx context.Context, name string) (*types.M
 
 // RemoveSnapshot removes a named snapshot
 func (v VirtualMachine) RemoveSnapshot(ctx context.Context, name string, removeChildren bool, consolidate *bool) (*Task, error) {
-	snapshot, err := v.FindSnapshot(ctx, name)
+	snapshot, err := v.findSnapshot(ctx, name)
 	if err != nil {
 		return nil, err
 	}
@@ -601,7 +586,7 @@ func (v VirtualMachine) RevertToCurrentSnapshot(ctx context.Context, suppressPow
 
 // RevertToSnapshot reverts to a named snapshot
 func (v VirtualMachine) RevertToSnapshot(ctx context.Context, name string, suppressPowerOn bool) (*Task, error) {
-	snapshot, err := v.FindSnapshot(ctx, name)
+	snapshot, err := v.findSnapshot(ctx, name)
 	if err != nil {
 		return nil, err
 	}
@@ -766,33 +751,6 @@ func (v VirtualMachine) UpgradeTools(ctx context.Context, options string) (*Task
 	}
 
 	res, err := methods.UpgradeTools_Task(ctx, v.Client(), &req)
-	if err != nil {
-		return nil, err
-	}
-
-	return NewTask(v.c, res.Returnval), nil
-}
-
-func (v VirtualMachine) Export(ctx context.Context) (*nfc.Lease, error) {
-	req := types.ExportVm{
-		This: v.Reference(),
-	}
-
-	res, err := methods.ExportVm(ctx, v.Client(), &req)
-	if err != nil {
-		return nil, err
-	}
-
-	return nfc.NewLease(v.c, res.Returnval), nil
-}
-
-func (v VirtualMachine) UpgradeVM(ctx context.Context, version string) (*Task, error) {
-	req := types.UpgradeVM_Task{
-		This:    v.Reference(),
-		Version: version,
-	}
-
-	res, err := methods.UpgradeVM_Task(ctx, v.Client(), &req)
 	if err != nil {
 		return nil, err
 	}

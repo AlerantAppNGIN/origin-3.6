@@ -33,6 +33,8 @@ os::cmd::expect_success_and_text 'oc version' "oc ${os_git_regex}"
 os::cmd::expect_success_and_text 'oc version' "kubernetes ${kube_git_regex}"
 os::cmd::expect_success_and_text 'oc version' "features: Basic-Auth"
 os::cmd::expect_success_and_text 'openshift version' "openshift ${os_git_regex}"
+os::cmd::expect_success_and_text 'openshift version' "kubernetes ${kube_git_regex}"
+os::cmd::expect_success_and_text 'openshift version' "etcd ${etcd_git_regex}"
 os::cmd::expect_success_and_text "curl -k '${API_SCHEME}://${API_HOST}:${API_PORT}/version'" "${kube_git_regex}"
 os::cmd::expect_success_and_text "curl -k '${API_SCHEME}://${API_HOST}:${API_PORT}/version/openshift'" "${os_git_regex}"
 os::cmd::expect_success_and_not_text "curl -k '${API_SCHEME}://${API_HOST}:${API_PORT}/version'" "${OS_GIT_COMMIT}"
@@ -40,32 +42,50 @@ os::cmd::expect_success_and_not_text "curl -k '${API_SCHEME}://${API_HOST}:${API
 
 # variants I know I have to worry about
 # 1. oc (kube and openshift resources)
-# 2. oc adm (kube and openshift resources)
+# 2. openshift kubectl (kube and openshift resources)
+# 3. oadm and oc adm (kube and openshift resources)
+# 4  openshift cli (kube and openshift resources)
 
 # example User-Agent: oc/v1.2.0 (linux/amd64) kubernetes/bc4550d
 os::cmd::expect_success_and_text 'oc get pods --loglevel=7  2>&1 | grep -A4 "pods" | grep User-Agent' "oc/${kube_git_regex} .* kubernetes/"
 # example User-Agent: oc/v1.2.0 (linux/amd64) kubernetes/bc4550d
 os::cmd::expect_success_and_text 'oc get dc --loglevel=7  2>&1 | grep -A4 "deploymentconfig" | grep User-Agent' "oc/${kube_git_regex} .* kubernetes/"
+# example User-Agent: openshift/v1.2.0 (linux/amd64) kubernetes/bc4550d
+# this is probably broken and should be `kubectl/<kube version> kubernetes/...`
+os::cmd::expect_success_and_text 'openshift kubectl get pods --loglevel=7  2>&1 | grep -A4 "pods" | grep User-Agent' "openshift/${kube_git_regex} .* kubernetes/"
+# example User-Agent: openshift/v1.2.0 (linux/amd64) kubernetes/bc4550d
+# this is probably broken and should be `kubectl/<kube version> kubernetes/...`
+os::cmd::expect_success_and_text 'openshift kubectl get dc --loglevel=7  2>&1 | grep -A4 "deploymentconfig" | grep User-Agent' "openshift/${kube_git_regex} .* kubernetes/"
+# example User-Agent: oadm/v1.2.0 (linux/amd64) kubernetes/bc4550d
+# this is probably broken and should be `oadm/<oc version>... openshift/...`
+os::cmd::expect_success_and_text 'oadm policy reconcile-sccs --loglevel=7  2>&1 | grep -A4 "securitycontextconstraints" | grep User-Agent' "oadm/${kube_git_regex} .* kubernetes/"
 # example User-Agent: oc/v1.1.3 (linux/amd64) openshift/b348c2f
-os::cmd::expect_success_and_text 'oc adm policy who-can get pods --loglevel=7  2>&1 | grep -A4 "localresourceaccessreviews" | grep User-Agent' "oc/${kube_git_regex} .* kubernetes/"
+# TODO: figure out why this is reporting openshift and not kubernetes
+os::cmd::expect_success_and_text 'oc adm policy who-can get pods --loglevel=7  2>&1 | grep -A4 "localresourceaccessreviews" | grep User-Agent' "oc/${os_git_regex} .* openshift/"
+# example User-Agent: openshift/v1.2.0 (linux/amd64) kubernetes/bc4550d
+# this is probably broken and should be `oc/<oc version>... kubernetes/...`
+os::cmd::expect_success_and_text 'openshift cli get pods --loglevel=7  2>&1 | grep -A4 "pods" | grep User-Agent' "openshift/${kube_git_regex} .* kubernetes/"
+# example User-Agent: openshift/v1.2.0 (linux/amd64) kubernetes/bc4550d
+os::cmd::expect_success_and_text 'openshift cli get dc --loglevel=7  2>&1 | grep -A4 "deploymentconfig" | grep User-Agent' "openshift/${kube_git_regex} .* kubernetes/"
 echo "version reporting: ok"
 os::test::junit::declare_suite_end
 
 os::test::junit::declare_suite_start "cmd/basicresources/status"
+os::cmd::expect_success_and_text 'openshift cli status -h' 'openshift cli describe buildConfig'
 os::cmd::expect_success_and_text 'oc status -h' 'oc describe buildConfig'
 os::cmd::expect_success_and_text 'oc status' 'oc new-app'
+os::cmd::expect_success_and_text 'openshift cli status' 'openshift cli new-app'
 echo "status help output: ok"
 os::test::junit::declare_suite_end
 
 os::test::junit::declare_suite_start "cmd/basicresources/explain"
-os::cmd::expect_failure_and_text 'oc types' 'Deployment Configuration'
+os::cmd::expect_success_and_text 'oc types' 'Deployment Configuration'
 os::cmd::expect_failure_and_text 'oc get' 'deploymentconfig'
 os::cmd::expect_success_and_text 'oc get all --loglevel=6' 'buildconfigs'
 os::cmd::expect_success_and_text 'oc explain pods' 'Pod is a collection of containers that can run on a host'
 os::cmd::expect_success_and_text 'oc explain pods.spec' 'SecurityContext holds pod-level security attributes'
-# TODO unbreak explain
-#os::cmd::expect_success_and_text 'oc explain deploymentconfig' 'a desired deployment state'
-#os::cmd::expect_success_and_text 'oc explain deploymentconfig.spec' 'ensures that this deployment config will have zero replicas'
+os::cmd::expect_success_and_text 'oc explain deploymentconfig' 'a desired deployment state'
+os::cmd::expect_success_and_text 'oc explain deploymentconfig.spec' 'ensures that this deployment config will have zero replicas'
 echo "explain: ok"
 os::test::junit::declare_suite_end
 
@@ -150,10 +170,11 @@ echo "create subcommands: ok"
 os::test::junit::declare_suite_end
 
 os::test::junit::declare_suite_start "cmd/basicresources/statefulsets"
-os::cmd::expect_success 'oc create -f test/testdata/statefulset.yaml'
-os::cmd::try_until_success 'oc get pods testapp-0'
-os::cmd::expect_success_and_text 'oc describe statefulset testapp' 'app=testapp'
-os::cmd::expect_success 'oc delete -f test/testdata/statefulset.yaml'
+os::cmd::expect_success 'oc create -f examples/statefulsets/zookeeper/zookeeper.yaml'
+os::cmd::try_until_success 'oc get pods zoo-0'
+os::cmd::expect_success 'oc get pvc datadir-zoo-0'
+os::cmd::expect_success_and_text 'oc describe statefulset zoo' 'app=zk'
+os::cmd::expect_success 'oc delete -f examples/statefulsets/zookeeper/zookeeper.yaml'
 echo "statefulsets: ok"
 os::test::junit::declare_suite_end
 

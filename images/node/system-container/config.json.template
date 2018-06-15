@@ -342,19 +342,18 @@
         },
         {
 	    "type": "bind",
-	    "source": "$ORIGIN_DATA_DIR",
-	    "destination": "/var/lib/origin",
+	    "source": "$ORIGIN_CONFIG_DIR/openvswitch",
+	    "destination": "/etc/openvswitch",
 	    "options": [
 		"rbind",
-		"rslave",
 		"rw",
 		"mode=755"
 	    ]
         },
         {
 	    "type": "bind",
-	    "source": "$KUBELET_DATA_DIR",
-	    "destination": "/var/lib/kubelet",
+	    "source": "$ORIGIN_DATA_DIR",
+	    "destination": "/var/lib/origin",
 	    "options": [
 		"rbind",
 		"rslave",
@@ -415,24 +414,13 @@
         },
         {
 	    "type": "bind",
-	    "source": "/var/lib/docker/containers",
-	    "destination": "/var/lib/docker/containers",
+	    "source": "/var/lib/docker",
+	    "destination": "/var/lib/docker",
 	    "options": [
 		"bind",
-                "slave",
 		"rw",
 		"mode=755"
 	    ]
-        },
-        {
-            "type": "bind",
-            "source": "/var/lib/kubelet",
-            "destination": "/var/lib/kubelet",
-            "options": [
-                "rbind",
-                "rw",
-                "mode=755"
-            ]
         },
         {
 	    "type": "bind",
@@ -452,6 +440,16 @@
 		"rbind",
                 "rslave",
 		"ro"
+	    ]
+        },
+        {
+	    "type": "bind",
+	    "source": "$ORIGIN_CONFIG_DIR/sdn",
+	    "destination": "/etc/openshift-sdn",
+	    "options": [
+		"rbind",
+		"rw",
+		"mode=755"
 	    ]
         },
         {
@@ -491,17 +489,7 @@
 		"mode=755",
 		"size=65536k"
 	    ]
-	},
-	{
-	    "destination": "/opt/cni/bin",
-	    "type": "bind",
-	    "source": "/opt/cni/bin",
-	    "options": [
-		"rbind",
-		"rslave"
-	    ]
 	}
-        $ADDTL_MOUNTS
     ],
     "hooks": {},
     "linux": {
@@ -509,7 +497,12 @@
 	"resources": {
 	    "devices": [
 		{
+		    "allow": false,
+		    "access": "rwm"
+		},
+		{
 		    "allow": true,
+		    "type": "b",
 		    "access": "rwm"
 		}
 	    ]

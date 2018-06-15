@@ -1,5 +1,7 @@
 package(default_visibility = ["//visibility:public"])
 
+licenses(["notice"])
+
 load(
     "@io_bazel_rules_go//go:def.bzl",
     "go_library",
@@ -8,9 +10,9 @@ load(
 go_library(
     name = "go_default_library",
     srcs = ["storage.go"],
-    importpath = "k8s.io/kubernetes/pkg/registry/rbac/clusterrole/policybased",
+    tags = ["automanaged"],
     deps = [
-        "//pkg/apis/core/helper:go_default_library",
+        "//pkg/api/helper:go_default_library",
         "//pkg/apis/rbac:go_default_library",
         "//pkg/registry/rbac:go_default_library",
         "//pkg/registry/rbac/validation:go_default_library",

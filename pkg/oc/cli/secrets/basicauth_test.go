@@ -3,7 +3,7 @@ package secrets
 import (
 	"testing"
 
-	api "k8s.io/kubernetes/pkg/apis/core"
+	"k8s.io/kubernetes/pkg/api"
 )
 
 func TestValidateBasicAuth(t *testing.T) {

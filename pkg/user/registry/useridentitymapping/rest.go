@@ -3,7 +3,6 @@ package useridentitymapping
 import (
 	"fmt"
 
-	corev1 "k8s.io/api/core/v1"
 	kerrs "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -12,33 +11,32 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	apirequest "k8s.io/apiserver/pkg/endpoints/request"
 	"k8s.io/apiserver/pkg/registry/rest"
-	kapi "k8s.io/kubernetes/pkg/apis/core"
+	kapi "k8s.io/kubernetes/pkg/api"
 
-	userapi "github.com/openshift/api/user/v1"
-	userclient "github.com/openshift/client-go/user/clientset/versioned/typed/user/v1"
-	userinternal "github.com/openshift/origin/pkg/user/apis/user"
+	userapi "github.com/openshift/origin/pkg/user/apis/user"
+	userclient "github.com/openshift/origin/pkg/user/generated/internalclientset/typed/user/internalversion"
 )
 
 // REST implements the RESTStorage interface in terms of an image registry and
 // image repository registry. It only supports the CreateUser method and is used
 // to simplify adding a new Image and tag to an ImageRepository.
 type REST struct {
-	userClient     userclient.UserInterface
+	userClient     userclient.UserResourceInterface
 	identityClient userclient.IdentityInterface
 }
 
 var _ rest.Getter = &REST{}
 var _ rest.CreaterUpdater = &REST{}
-var _ rest.GracefulDeleter = &REST{}
+var _ rest.Deleter = &REST{}
 
 // NewREST returns a new REST.
-func NewREST(userClient userclient.UserInterface, identityClient userclient.IdentityInterface) *REST {
+func NewREST(userClient userclient.UserResourceInterface, identityClient userclient.IdentityInterface) *REST {
 	return &REST{userClient: userClient, identityClient: identityClient}
 }
 
 // New returns a new UserIdentityMapping for use with CreateUser.
 func (r *REST) New() runtime.Object {
-	return &userinternal.UserIdentityMapping{}
+	return &userapi.UserIdentityMapping{}
 }
 
 // GetIdentities returns the mapping for the named identity
@@ -48,8 +46,8 @@ func (s *REST) Get(ctx apirequest.Context, name string, options *metav1.GetOptio
 }
 
 // CreateUser associates a user and identity if they both exist, and the identity is not already mapped to a user
-func (s *REST) Create(ctx apirequest.Context, obj runtime.Object, _ rest.ValidateObjectFunc, _ bool) (runtime.Object, error) {
-	mapping, ok := obj.(*userinternal.UserIdentityMapping)
+func (s *REST) Create(ctx apirequest.Context, obj runtime.Object, _ bool) (runtime.Object, error) {
+	mapping, ok := obj.(*userapi.UserIdentityMapping)
 	if !ok {
 		return nil, kerrs.NewBadRequest("invalid type")
 	}
@@ -61,12 +59,12 @@ func (s *REST) Create(ctx apirequest.Context, obj runtime.Object, _ rest.Validat
 // UpdateUser associates an identity with a user.
 // Both the identity and user must already exist.
 // If the identity is associated with another user already, it is disassociated.
-func (s *REST) Update(ctx apirequest.Context, name string, objInfo rest.UpdatedObjectInfo, _ rest.ValidateObjectFunc, _ rest.ValidateObjectUpdateFunc) (runtime.Object, bool, error) {
+func (s *REST) Update(ctx apirequest.Context, name string, objInfo rest.UpdatedObjectInfo) (runtime.Object, bool, error) {
 	obj, err := objInfo.UpdatedObject(ctx, nil)
 	if err != nil {
 		return nil, false, err
 	}
-	mapping, ok := obj.(*userinternal.UserIdentityMapping)
+	mapping, ok := obj.(*userapi.UserIdentityMapping)
 	if !ok {
 		return nil, false, kerrs.NewBadRequest("invalid type")
 	}
@@ -75,7 +73,7 @@ func (s *REST) Update(ctx apirequest.Context, name string, objInfo rest.UpdatedO
 }
 
 func (s *REST) createOrUpdate(ctx apirequest.Context, obj runtime.Object, forceCreate bool) (runtime.Object, bool, error) {
-	mapping := obj.(*userinternal.UserIdentityMapping)
+	mapping := obj.(*userapi.UserIdentityMapping)
 	identity, identityErr, oldUser, oldUserErr, oldMapping, oldMappingErr := s.getRelatedObjects(ctx, mapping.Name, &metav1.GetOptions{})
 
 	// Ensure we didn't get any errors other than NotFound errors
@@ -126,16 +124,14 @@ func (s *REST) createOrUpdate(ctx apirequest.Context, obj runtime.Object, forceC
 	// Validate identity
 	if kerrs.IsNotFound(identityErr) {
 		errs := field.ErrorList{field.Invalid(field.NewPath("identity", "name"), mapping.Identity.Name, "referenced identity does not exist")}
-		// TODO update to openshift/api
-		return nil, false, kerrs.NewInvalid(userinternal.Kind("UserIdentityMapping"), mapping.Name, errs)
+		return nil, false, kerrs.NewInvalid(userapi.Kind("UserIdentityMapping"), mapping.Name, errs)
 	}
 
 	// GetIdentities new user
 	newUser, err := s.userClient.Get(mapping.User.Name, metav1.GetOptions{})
 	if kerrs.IsNotFound(err) {
 		errs := field.ErrorList{field.Invalid(field.NewPath("user", "name"), mapping.User.Name, "referenced user does not exist")}
-		// TODO update to openshift/api
-		return nil, false, kerrs.NewInvalid(userinternal.Kind("UserIdentityMapping"), mapping.Name, errs)
+		return nil, false, kerrs.NewInvalid(userapi.Kind("UserIdentityMapping"), mapping.Name, errs)
 	}
 	if err != nil {
 		return nil, false, err
@@ -173,18 +169,18 @@ func (s *REST) createOrUpdate(ctx apirequest.Context, obj runtime.Object, forceC
 }
 
 // Delete deletes the user association for the named identity
-func (s *REST) Delete(ctx apirequest.Context, name string, options *metav1.DeleteOptions) (runtime.Object, bool, error) {
+func (s *REST) Delete(ctx apirequest.Context, name string) (runtime.Object, error) {
 	identity, _, user, _, _, mappingErr := s.getRelatedObjects(ctx, name, &metav1.GetOptions{})
 
 	if mappingErr != nil {
-		return nil, false, mappingErr
+		return nil, mappingErr
 	}
 
 	// Disassociate the identity with the user first
 	// If this fails, Delete is re-entrant
 	if removeIdentityFromUser(identity, user) {
 		if _, err := s.userClient.Update(user); err != nil {
-			return nil, false, err
+			return nil, err
 		}
 	}
 
@@ -197,7 +193,7 @@ func (s *REST) Delete(ctx apirequest.Context, name string, options *metav1.Delet
 		}
 	}
 
-	return &metav1.Status{Status: metav1.StatusSuccess}, true, nil
+	return &metav1.Status{Status: metav1.StatusSuccess}, nil
 }
 
 // getRelatedObjects returns the identity, user, and mapping for the named identity
@@ -205,7 +201,7 @@ func (s *REST) Delete(ctx apirequest.Context, name string, options *metav1.Delet
 func (s *REST) getRelatedObjects(ctx apirequest.Context, name string, options *metav1.GetOptions) (
 	identity *userapi.Identity, identityErr error,
 	user *userapi.User, userErr error,
-	mapping *userinternal.UserIdentityMapping, mappingErr error,
+	mapping *userapi.UserIdentityMapping, mappingErr error,
 ) {
 	// Initialize errors to NotFound
 	identityErr = kerrs.NewNotFound(userapi.Resource("identity"), name)
@@ -285,7 +281,7 @@ func setIdentityUser(identity *userapi.Identity, user *userapi.User) bool {
 	if identityReferencesUser(identity, user) {
 		return false
 	}
-	identity.User = corev1.ObjectReference{
+	identity.User = kapi.ObjectReference{
 		Name: user.Name,
 		UID:  user.UID,
 	}
@@ -298,14 +294,14 @@ func unsetIdentityUser(identity *userapi.Identity) bool {
 	if !hasUserMapping(identity) {
 		return false
 	}
-	identity.User = corev1.ObjectReference{}
+	identity.User = kapi.ObjectReference{}
 	return true
 }
 
 // mappingFor returns a UserIdentityMapping for the given user and identity
 // The name and resource version of the identity mapping match the identity
-func mappingFor(user *userapi.User, identity *userapi.Identity) (*userinternal.UserIdentityMapping, error) {
-	return &userinternal.UserIdentityMapping{
+func mappingFor(user *userapi.User, identity *userapi.Identity) (*userapi.UserIdentityMapping, error) {
+	return &userapi.UserIdentityMapping{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:            identity.Name,
 			ResourceVersion: identity.ResourceVersion,

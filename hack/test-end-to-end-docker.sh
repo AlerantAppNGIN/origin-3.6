@@ -14,6 +14,11 @@ os::util::environment::setup_all_server_vars
 os::util::environment::setup_time_vars
 export HOME="${FAKE_HOME_DIR}"
 
+# Allow setting $JUNIT_REPORT to toggle output behavior
+if [[ -n "${JUNIT_REPORT:-}" ]]; then
+	export JUNIT_REPORT_OUTPUT="${LOG_DIR}/raw_test_output.log"
+fi
+
 function cleanup() {
 	return_code=$?
 
@@ -50,26 +55,15 @@ if os::util::ensure::system_binary_exists 'systemctl'; then
 	${USE_SUDO:+sudo} systemctl restart docker.service
 fi
 
-# Tag the web console image with the same tag as the other origin images
-docker pull openshift/origin-web-console:latest
-docker tag openshift/origin-web-console:latest openshift/origin-web-console:${TAG}
-
 # Setup
 os::log::info "openshift version: `openshift version`"
 os::log::info "oc version:        `oc version`"
 os::log::info "Using images:							${USE_IMAGES}"
 
 os::log::info "Starting OpenShift containerized server"
-CLUSTERUP_DIR="${BASETMPDIR}"/cluster-up
-mkdir "${CLUSTERUP_DIR}"
-oc cluster up --server-loglevel=4 --tag="${TAG}" \
-        --base-dir="${CLUSTERUP_DIR}" \
-        --write-config
-        
-oc cluster up --server-loglevel=4 --tag="${TAG}" \
-        --base-dir="${CLUSTERUP_DIR}"
-
-MASTER_CONFIG_DIR="${CLUSTERUP_DIR}/kube-apiserver"
+oc cluster up --server-loglevel=4 --version="${TAG}" \
+        --host-data-dir="${VOLUME_DIR}/etcd" \
+        --host-volumes-dir="${VOLUME_DIR}"
 
 os::test::junit::declare_suite_start "setup/start-oc_cluster_up"
 os::cmd::try_until_success "oc cluster status" "$((5*TIME_MIN))" "10"

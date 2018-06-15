@@ -8,6 +8,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/diff"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	kapi "k8s.io/kubernetes/pkg/api"
 
 	routeapi "github.com/openshift/origin/pkg/route/apis/route"
 )
@@ -1290,7 +1291,11 @@ func TestValidateRouteUpdate(t *testing.T) {
 	}
 
 	for i, tc := range tests {
-		newRoute := tc.route.DeepCopy()
+		copied, err := kapi.Scheme.Copy(tc.route)
+		if err != nil {
+			t.Fatal(err)
+		}
+		newRoute := copied.(*routeapi.Route)
 		tc.change(newRoute)
 		errs := ValidateRouteUpdate(newRoute, tc.route)
 		if len(errs) != tc.expectedErrors {

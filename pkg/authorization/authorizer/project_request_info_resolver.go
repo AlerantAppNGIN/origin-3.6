@@ -3,21 +3,21 @@ package authorizer
 import (
 	"net/http"
 
-	apirequest "k8s.io/apiserver/pkg/endpoints/request"
+	"k8s.io/apiserver/pkg/endpoints/request"
 )
 
 type projectRequestInfoResolver struct {
 	// infoFactory is used to determine info for the request
-	infoFactory apirequest.RequestInfoResolver
+	infoFactory RequestInfoFactory
 }
 
-func NewProjectRequestInfoResolver(infoFactory apirequest.RequestInfoResolver) apirequest.RequestInfoResolver {
+func NewProjectRequestInfoResolver(infoFactory RequestInfoFactory) RequestInfoFactory {
 	return &projectRequestInfoResolver{
 		infoFactory: infoFactory,
 	}
 }
 
-func (a *projectRequestInfoResolver) NewRequestInfo(req *http.Request) (*apirequest.RequestInfo, error) {
+func (a *projectRequestInfoResolver) NewRequestInfo(req *http.Request) (*request.RequestInfo, error) {
 	requestInfo, err := a.infoFactory.NewRequestInfo(req)
 	if err != nil {
 		return requestInfo, err

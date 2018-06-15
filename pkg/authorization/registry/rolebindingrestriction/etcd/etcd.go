@@ -5,12 +5,10 @@ import (
 	"k8s.io/apiserver/pkg/registry/generic"
 	"k8s.io/apiserver/pkg/registry/generic/registry"
 	"k8s.io/apiserver/pkg/registry/rest"
-	"k8s.io/kubernetes/pkg/printers"
-	printerstorage "k8s.io/kubernetes/pkg/printers/storage"
+	kapi "k8s.io/kubernetes/pkg/api"
 
 	authorizationapi "github.com/openshift/origin/pkg/authorization/apis/authorization"
 	"github.com/openshift/origin/pkg/authorization/registry/rolebindingrestriction"
-	printersinternal "github.com/openshift/origin/pkg/printers/internalversion"
 	"github.com/openshift/origin/pkg/util/restoptions"
 )
 
@@ -23,18 +21,18 @@ var _ rest.StandardStorage = &REST{}
 // NewREST returns a RESTStorage object that will work against nodes.
 func NewREST(optsGetter restoptions.Getter) (*REST, error) {
 	store := &registry.Store{
+		Copier:                   kapi.Scheme,
 		NewFunc:                  func() runtime.Object { return &authorizationapi.RoleBindingRestriction{} },
 		NewListFunc:              func() runtime.Object { return &authorizationapi.RoleBindingRestrictionList{} },
 		DefaultQualifiedResource: authorizationapi.Resource("rolebindingrestrictions"),
-
-		TableConvertor: printerstorage.TableConvertor{TablePrinter: printers.NewTablePrinter().With(printersinternal.AddHandlers)},
+		PredicateFunc:            rolebindingrestriction.Matcher,
 
 		CreateStrategy: rolebindingrestriction.Strategy,
 		UpdateStrategy: rolebindingrestriction.Strategy,
 		DeleteStrategy: rolebindingrestriction.Strategy,
 	}
 
-	options := &generic.StoreOptions{RESTOptions: optsGetter}
+	options := &generic.StoreOptions{RESTOptions: optsGetter, AttrFunc: rolebindingrestriction.GetAttrs}
 	if err := store.CompleteWithOptions(options); err != nil {
 		return nil, err
 	}

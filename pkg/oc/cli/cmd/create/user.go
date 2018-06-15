@@ -6,14 +6,14 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/kubernetes/pkg/kubectl/cmd/templates"
 	cmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
 
-	"github.com/openshift/origin/pkg/oc/cli/util/clientcmd"
+	"github.com/openshift/origin/pkg/client"
+	"github.com/openshift/origin/pkg/cmd/util/clientcmd"
 	userapi "github.com/openshift/origin/pkg/user/apis/user"
-	userclientinternal "github.com/openshift/origin/pkg/user/generated/internalclientset"
-	userclient "github.com/openshift/origin/pkg/user/generated/internalclientset/typed/user/internalversion"
 )
 
 const UserRecommendedName = "user"
@@ -38,10 +38,11 @@ type CreateUserOptions struct {
 	Name     string
 	FullName string
 
-	UserClient userclient.UserInterface
+	UserClient client.UserInterface
 
 	DryRun bool
 
+	Mapper       meta.RESTMapper
 	OutputFormat string
 	Out          io.Writer
 	Printer      ObjectPrinter
@@ -80,21 +81,17 @@ func (o *CreateUserOptions) Complete(cmd *cobra.Command, f *clientcmd.Factory, a
 
 	o.DryRun = cmdutil.GetFlagBool(cmd, "dry-run")
 
-	clientConfig, err := f.ClientConfig()
+	client, _, err := f.Clients()
 	if err != nil {
 		return err
 	}
-	client, err := userclientinternal.NewForConfig(clientConfig)
-	if err != nil {
-		return err
-	}
+	o.UserClient = client.Users()
 
-	o.UserClient = client.User()
-
+	o.Mapper, _ = f.Object()
 	o.OutputFormat = cmdutil.GetFlagString(cmd, "output")
 
 	o.Printer = func(obj runtime.Object, out io.Writer) error {
-		return cmdutil.PrintObject(cmd, obj, out)
+		return f.PrintObject(cmd, false, o.Mapper, obj, out)
 	}
 
 	return nil
@@ -106,6 +103,9 @@ func (o *CreateUserOptions) Validate() error {
 	}
 	if o.UserClient == nil {
 		return fmt.Errorf("UserClient is required")
+	}
+	if o.Mapper == nil {
+		return fmt.Errorf("Mapper is required")
 	}
 	if o.Out == nil {
 		return fmt.Errorf("Out is required")
@@ -126,14 +126,14 @@ func (o *CreateUserOptions) Run() error {
 
 	var err error
 	if !o.DryRun {
-		actualUser, err = o.UserClient.Users().Create(user)
+		actualUser, err = o.UserClient.Create(user)
 		if err != nil {
 			return err
 		}
 	}
 
 	if useShortOutput := o.OutputFormat == "name"; useShortOutput || len(o.OutputFormat) == 0 {
-		cmdutil.PrintSuccess(useShortOutput, o.Out, actualUser, o.DryRun, "created")
+		cmdutil.PrintSuccess(o.Mapper, useShortOutput, o.Out, "user", actualUser.Name, o.DryRun, "created")
 		return nil
 	}
 

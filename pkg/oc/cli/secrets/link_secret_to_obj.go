@@ -4,10 +4,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"strings"
 
-	kapi "k8s.io/kubernetes/pkg/apis/core"
+	kapi "k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/kubectl/cmd/templates"
 	kcmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
 
@@ -52,18 +51,13 @@ func NewCmdLinkSecret(name, fullName string, f kcmdutil.Factory, out io.Writer) 
 		Short:   "Link secrets to a ServiceAccount",
 		Long:    linkSecretLong,
 		Example: fmt.Sprintf(linkSecretExample, fullName),
-		PreRun: func(cmd *cobra.Command, args []string) {
-			if len(os.Args) > 1 && os.Args[1] == "add" {
-				printDeprecationWarning("secrets add", "secrets link")
-			}
-		},
 		Run: func(c *cobra.Command, args []string) {
 			if err := o.Complete(f, args); err != nil {
-				kcmdutil.CheckErr(kcmdutil.UsageErrorf(c, err.Error()))
+				kcmdutil.CheckErr(kcmdutil.UsageError(c, err.Error()))
 			}
 
 			if err := o.Validate(); err != nil {
-				kcmdutil.CheckErr(kcmdutil.UsageErrorf(c, err.Error()))
+				kcmdutil.CheckErr(kcmdutil.UsageError(c, err.Error()))
 			}
 
 			if err := o.LinkSecrets(); err != nil {
@@ -165,8 +159,4 @@ func (o LinkSecretOptions) linkSecretsToServiceAccount(serviceaccount *kapi.Serv
 	}
 
 	return nil
-}
-
-func printDeprecationWarning(command, alias string) {
-	fmt.Fprintf(os.Stderr, "%s is DEPRECATED and will be removed in a future version. Use %s instead.\n", alias, command)
 }
