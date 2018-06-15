@@ -6,7 +6,11 @@
 #
 FROM openshift/origin-source
 
-RUN INSTALL_PKGS="bsdtar ceph-common device-mapper device-mapper-persistent-data e2fsprogs epel-release ethtool findutils git hostname iptables lsof nmap-ncat socat sysvinit-tools tar tree util-linux wget which xfsprogs" && \
+COPY *.repo /etc/yum.repos.d/
+RUN INSTALL_PKGS=" \
+      which tar wget hostname sysvinit-tools util-linux \
+      socat tree findutils lsof bind-utils \
+      " && \
     yum install -y ${INSTALL_PKGS} && \
     rpm -V ${INSTALL_PKGS} && \
     yum clean all && \

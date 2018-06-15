@@ -9,19 +9,16 @@ import (
 
 	"github.com/golang/glog"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/fields"
+	"k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/wait"
-	"k8s.io/apimachinery/pkg/watch"
+	informers "k8s.io/client-go/informers/core/v1"
+	kclientset "k8s.io/client-go/kubernetes"
+	listers "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
-	"k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/api/v1"
-	kclientset "k8s.io/kubernetes/pkg/client/clientset_generated/clientset"
-	informers "k8s.io/kubernetes/pkg/client/informers/informers_generated/externalversions/core/v1"
 	"k8s.io/kubernetes/pkg/controller"
 	"k8s.io/kubernetes/pkg/credentialprovider"
 )
@@ -32,54 +29,70 @@ type DockerRegistryServiceControllerOptions struct {
 	// If zero, re-list will be delayed as long as possible
 	Resync time.Duration
 
-	RegistryNamespace   string
-	RegistryServiceName string
+	// ClusterDNSSuffix is the suffix for in cluster DNS that can be added to service names
+	ClusterDNSSuffix string
 
 	DockercfgController *DockercfgController
+
+	// AdditionalRegistryURLs is a list of URLs that are always included
+	AdditionalRegistryURLs []string
 
 	// DockerURLsInitialized is used to send a signal to the DockercfgController that it has the correct set of docker urls
 	DockerURLsInitialized chan struct{}
 }
 
+type serviceLocation struct {
+	namespace string
+	name      string
+}
+
+var serviceLocations = []serviceLocation{
+	{namespace: "default", name: "docker-registry"},
+	{namespace: "openshift-image-registry", name: "registry"},
+}
+
 // NewDockerRegistryServiceController returns a new *DockerRegistryServiceController.
-func NewDockerRegistryServiceController(secrets informers.SecretInformer, cl kclientset.Interface, options DockerRegistryServiceControllerOptions) *DockerRegistryServiceController {
+func NewDockerRegistryServiceController(secrets informers.SecretInformer, serviceInformer informers.ServiceInformer, cl kclientset.Interface, options DockerRegistryServiceControllerOptions) *DockerRegistryServiceController {
 	e := &DockerRegistryServiceController{
-		client:                cl,
-		dockercfgController:   options.DockercfgController,
-		registryLocationQueue: workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter()),
-		secretsToUpdate:       workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter()),
-		serviceName:           options.RegistryServiceName,
-		serviceNamespace:      options.RegistryNamespace,
-		dockerURLsInitialized: options.DockerURLsInitialized,
+		client:                 cl,
+		additionalRegistryURLs: options.AdditionalRegistryURLs,
+		clusterDNSSuffix:       options.ClusterDNSSuffix,
+		dockercfgController:    options.DockercfgController,
+		registryLocationQueue:  workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter()),
+		secretsToUpdate:        workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter()),
+		dockerURLsInitialized:  options.DockerURLsInitialized,
 	}
 
-	// does not use shared informers because we're only watching one item
-	e.serviceCache, e.serviceController = cache.NewInformer(
-		&cache.ListWatch{
-			ListFunc: func(opts metav1.ListOptions) (runtime.Object, error) {
-				opts.FieldSelector = fields.OneTermEqualSelector("metadata.name", options.RegistryServiceName).String()
-				return e.client.Core().Services(options.RegistryNamespace).List(opts)
+	// we're only watching two of these, but we already watch all services for the service serving cert signer
+	// and this correctly handles namespaces coming and going
+	serviceInformer.Informer().AddEventHandler(
+		cache.FilteringResourceEventHandler{
+			FilterFunc: func(obj interface{}) bool {
+				switch t := obj.(type) {
+				case *v1.Service:
+					for _, location := range serviceLocations {
+						if t.Namespace == location.namespace && t.Name == location.name {
+							return true
+						}
+					}
+				}
+				return false
 			},
-			WatchFunc: func(opts metav1.ListOptions) (watch.Interface, error) {
-				opts.FieldSelector = fields.OneTermEqualSelector("metadata.name", options.RegistryServiceName).String()
-				return e.client.Core().Services(options.RegistryNamespace).Watch(opts)
-			},
-		},
-		&v1.Service{},
-		options.Resync,
-		cache.ResourceEventHandlerFuncs{
-			AddFunc: func(obj interface{}) {
-				e.enqueueRegistryLocationQueue()
-			},
-			UpdateFunc: func(old, cur interface{}) {
-				e.enqueueRegistryLocationQueue()
-			},
-			DeleteFunc: func(obj interface{}) {
-				e.enqueueRegistryLocationQueue()
-			},
-		},
+			Handler: cache.ResourceEventHandlerFuncs{
+				AddFunc: func(obj interface{}) {
+					e.enqueueRegistryLocationQueue()
+				},
+				UpdateFunc: func(old, cur interface{}) {
+					e.enqueueRegistryLocationQueue()
+				},
+				DeleteFunc: func(obj interface{}) {
+					e.enqueueRegistryLocationQueue()
+				},
+			}},
 	)
-	e.servicesSynced = e.serviceController.HasSynced
+	e.servicesSynced = serviceInformer.Informer().HasSynced
+	e.serviceLister = serviceInformer.Lister()
+
 	e.syncRegistryLocationHandler = e.syncRegistryLocationChange
 
 	e.secretCache = secrets.Informer().GetIndexer()
@@ -93,15 +106,17 @@ func NewDockerRegistryServiceController(secrets informers.SecretInformer, cl kcl
 type DockerRegistryServiceController struct {
 	client kclientset.Interface
 
-	serviceName      string
-	serviceNamespace string
+	// clusterDNSSuffix is the suffix for in cluster DNS that can be added to service names
+	clusterDNSSuffix string
+	// additionalRegistryURLs is a list of URLs that are always included
+	additionalRegistryURLs []string
 
 	dockercfgController *DockercfgController
 
-	serviceController           cache.Controller
-	serviceCache                cache.Store
-	servicesSynced              func() bool
-	syncRegistryLocationHandler func(key string) error
+	serviceLister  listers.ServiceLister
+	servicesSynced func() bool
+
+	syncRegistryLocationHandler func() error
 
 	secretCache       cache.Store
 	secretsSynced     func() bool
@@ -113,6 +128,11 @@ type DockerRegistryServiceController struct {
 	secretsToUpdate       workqueue.RateLimitingInterface
 
 	dockerURLsInitialized chan struct{}
+
+	// initialSecretsCheckDone is used to indicate that the controller should perform a full resync of all secrets
+	// regardless of whether the registry location changed or not. This check is usually done on controller start
+	// to verify the content of dockercfg entries in secrets
+	initialSecretsCheckDone bool
 }
 
 // Runs controller loops and returns immediately
@@ -120,7 +140,8 @@ func (e *DockerRegistryServiceController) Run(workers int, stopCh <-chan struct{
 	defer utilruntime.HandleCrash()
 	defer e.registryLocationQueue.ShutDown()
 
-	go e.serviceController.Run(stopCh)
+	glog.Infof("Starting DockerRegistryServiceController controller")
+	defer glog.Infof("Shutting down DockerRegistryServiceController controller")
 
 	// Wait for the store to sync before starting any work in this controller.
 	ready := make(chan struct{})
@@ -130,14 +151,13 @@ func (e *DockerRegistryServiceController) Run(workers int, stopCh <-chan struct{
 	case <-stopCh:
 		return
 	}
+	glog.V(1).Infof("caches synced")
 
-	glog.V(5).Infof("Starting workers")
 	go wait.Until(e.watchForDockerURLChanges, time.Second, stopCh)
 	for i := 0; i < workers; i++ {
 		go wait.Until(e.watchForDockercfgSecretUpdates, time.Second, stopCh)
 	}
 	<-stopCh
-	glog.V(1).Infof("Shutting down")
 }
 
 // enqueue adds to our queue.  We only have one entry, but we never have to check it since we already know the things
@@ -190,7 +210,7 @@ func (e *DockerRegistryServiceController) watchForDockerURLChanges() {
 		}
 		defer e.registryLocationQueue.Done(key)
 
-		if err := e.syncRegistryLocationHandler(key.(string)); err == nil {
+		if err := e.syncRegistryLocationHandler(); err == nil {
 			// this means the request was successfully handled.  We should "forget" the item so that any retry
 			// later on is reset
 			e.registryLocationQueue.Forget(key)
@@ -213,42 +233,51 @@ func (e *DockerRegistryServiceController) watchForDockerURLChanges() {
 
 // getDockerRegistryLocations returns the dns form and the ip form of the secret
 func (e *DockerRegistryServiceController) getDockerRegistryLocations() []string {
-	key, err := controller.KeyFunc(&v1.Service{ObjectMeta: metav1.ObjectMeta{Name: e.serviceName, Namespace: e.serviceNamespace}})
-	if err != nil {
-		return []string{}
+	ret := append([]string{}, e.additionalRegistryURLs...)
+	for _, location := range serviceLocations {
+		ret = append(ret, getDockerRegistryLocations(e.serviceLister, location, e.clusterDNSSuffix)...)
 	}
+	glog.V(4).Infof("found docker registry urls: %v", ret)
+	return ret
+}
 
-	obj, exists, err := e.serviceCache.GetByKey(key)
+func getDockerRegistryLocations(lister listers.ServiceLister, location serviceLocation, clusterDNSSuffix string) []string {
+	service, err := lister.Services(location.namespace).Get(location.name)
 	if err != nil {
 		return []string{}
 	}
-	if !exists {
-		return []string{}
-	}
-	service := obj.(*v1.Service)
 
 	hasClusterIP := (len(service.Spec.ClusterIP) > 0) && (net.ParseIP(service.Spec.ClusterIP) != nil)
 	if hasClusterIP && len(service.Spec.Ports) > 0 {
-		return []string{
+		ret := []string{
 			net.JoinHostPort(service.Spec.ClusterIP, fmt.Sprintf("%d", service.Spec.Ports[0].Port)),
 			net.JoinHostPort(fmt.Sprintf("%s.%s.svc", service.Name, service.Namespace), fmt.Sprintf("%d", service.Spec.Ports[0].Port)),
 		}
+		if len(clusterDNSSuffix) > 0 {
+			ret = append(ret, net.JoinHostPort(fmt.Sprintf("%s.%s.svc."+clusterDNSSuffix, service.Name, service.Namespace), fmt.Sprintf("%d", service.Spec.Ports[0].Port)))
+		}
+
+		return ret
 	}
 
 	return []string{}
 }
 
 // syncRegistryLocationChange goes through all service account dockercfg secrets and updates them to point at a new docker-registry location
-func (e *DockerRegistryServiceController) syncRegistryLocationChange(key string) error {
-	newDockerRegistryLocations := sets.NewString(e.getDockerRegistryLocations()...)
-	if e.getRegistryURLs().Equal(newDockerRegistryLocations) {
-		glog.V(4).Infof("No effective update: %v", newDockerRegistryLocations)
+func (e *DockerRegistryServiceController) syncRegistryLocationChange() error {
+	newLocations := e.getDockerRegistryLocations()
+	newDockerRegistryLocations := sets.NewString(newLocations...)
+	existingURLs := e.getRegistryURLs()
+	if existingURLs.Equal(newDockerRegistryLocations) && e.initialSecretsCheckDone {
+		glog.V(3).Infof("No effective update: %v", newDockerRegistryLocations)
 		return nil
 	}
+	glog.V(1).Infof("Updating registry URLs from %v to %v", existingURLs, newDockerRegistryLocations)
 
 	// make sure that new dockercfg secrets get the correct locations
 	e.dockercfgController.SetDockerURLs(newDockerRegistryLocations.List()...)
 	e.setRegistryURLs(newDockerRegistryLocations.List()...)
+	e.initialSecretsCheckDone = true
 
 	// we've changed the docker registry URL.  Add items to the work queue for all known secrets
 	// new secrets will already get the updated value.
@@ -256,6 +285,13 @@ func (e *DockerRegistryServiceController) syncRegistryLocationChange(key string)
 		switch t := obj.(type) {
 		case *v1.Secret:
 			if t.Type != v1.SecretTypeDockercfg {
+				continue
+			}
+			if t.Annotations == nil {
+				continue
+			}
+			// Do not manage dockercfg secrets we haven't created (eg. secrets created by user for private repositories).
+			if _, hasTokenSecret := t.Annotations[ServiceAccountTokenSecretNameKey]; !hasTokenSecret {
 				continue
 			}
 		default:
@@ -267,6 +303,7 @@ func (e *DockerRegistryServiceController) syncRegistryLocationChange(key string)
 			utilruntime.HandleError(fmt.Errorf("couldn't get key for object %#v: %v", obj, err))
 			continue
 		}
+
 		e.secretsToUpdate.Add(key)
 	}
 
@@ -329,11 +366,7 @@ func (e *DockerRegistryServiceController) syncSecretUpdate(key string) error {
 	}
 
 	// we need to update it, make a copy
-	uncastObj, err := api.Scheme.DeepCopy(obj)
-	if err != nil {
-		return err
-	}
-	dockercfgSecret := uncastObj.(*v1.Secret)
+	dockercfgSecret := obj.(runtime.Object).DeepCopyObject().(*v1.Secret)
 
 	dockerCredentials := dockercfgSecret.Annotations[ServiceAccountTokenValueAnnotation]
 	if len(dockerCredentials) == 0 && len(existingDockercfgSecretLocations) > 0 {

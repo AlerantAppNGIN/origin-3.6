@@ -3,7 +3,6 @@ package buildconfiginstantiate
 import (
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"time"
 
@@ -12,20 +11,20 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/util/httpstream/spdy"
-	knet "k8s.io/apimachinery/pkg/util/net"
-	kubeletremotecommand "k8s.io/apimachinery/pkg/util/remotecommand"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/wait"
 	apirequest "k8s.io/apiserver/pkg/endpoints/request"
 	"k8s.io/apiserver/pkg/registry/rest"
+	restclient "k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/remotecommand"
-	kapi "k8s.io/kubernetes/pkg/api"
+	"k8s.io/kubernetes/pkg/api/legacyscheme"
+	kapi "k8s.io/kubernetes/pkg/apis/core"
 	kcoreclient "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset/typed/core/internalversion"
-	kubeletclient "k8s.io/kubernetes/pkg/kubelet/client"
-	"k8s.io/kubernetes/pkg/registry/core/pod"
 
+	buildapiv1 "github.com/openshift/api/build/v1"
 	buildapi "github.com/openshift/origin/pkg/build/apis/build"
 	buildstrategy "github.com/openshift/origin/pkg/build/controller/strategy"
+	buildtypedclient "github.com/openshift/origin/pkg/build/generated/internalclientset/typed/build/internalversion"
 	"github.com/openshift/origin/pkg/build/generator"
 	"github.com/openshift/origin/pkg/build/registry"
 	buildutil "github.com/openshift/origin/pkg/build/util"
@@ -48,6 +47,7 @@ type InstantiateREST struct {
 }
 
 var _ rest.Creater = &InstantiateREST{}
+var _ rest.StorageMetadata = &InstantiateREST{}
 
 // New creates a new build generation request
 func (s *InstantiateREST) New() runtime.Object {
@@ -55,8 +55,11 @@ func (s *InstantiateREST) New() runtime.Object {
 }
 
 // Create instantiates a new build from a build configuration
-func (s *InstantiateREST) Create(ctx apirequest.Context, obj runtime.Object, _ bool) (runtime.Object, error) {
+func (s *InstantiateREST) Create(ctx apirequest.Context, obj runtime.Object, createValidation rest.ValidateObjectFunc, _ bool) (runtime.Object, error) {
 	if err := rest.BeforeCreate(Strategy, ctx, obj); err != nil {
+		return nil, err
+	}
+	if err := createValidation(obj); err != nil {
 		return nil, err
 	}
 
@@ -72,28 +75,43 @@ func (s *InstantiateREST) Create(ctx apirequest.Context, obj runtime.Object, _ b
 	return s.generator.Instantiate(ctx, request)
 }
 
-func NewBinaryStorage(generator *generator.BuildGenerator, watcher rest.Watcher, podClient kcoreclient.PodsGetter, info kubeletclient.ConnectionInfoGetter) *BinaryInstantiateREST {
+func (s *InstantiateREST) ProducesObject(verb string) interface{} {
+	// for documentation purposes
+	return buildapiv1.Build{}
+}
+
+func (s *InstantiateREST) ProducesMIMETypes(verb string) []string {
+	return nil // no additional mime types
+}
+
+func NewBinaryStorage(generator *generator.BuildGenerator, buildClient buildtypedclient.BuildsGetter, podClient kcoreclient.PodsGetter, inClientConfig *restclient.Config) *BinaryInstantiateREST {
+	clientConfig := restclient.CopyConfig(inClientConfig)
+	clientConfig.APIPath = "/api"
+	clientConfig.GroupVersion = &schema.GroupVersion{Version: "v1"}
+	clientConfig.NegotiatedSerializer = legacyscheme.Codecs
+
 	return &BinaryInstantiateREST{
-		Generator:      generator,
-		Watcher:        watcher,
-		PodGetter:      &podGetter{podClient},
-		ConnectionInfo: info,
-		Timeout:        5 * time.Minute,
+		Generator:    generator,
+		BuildClient:  buildClient,
+		PodClient:    podClient,
+		ClientConfig: clientConfig,
+		Timeout:      5 * time.Minute,
 	}
 }
 
 type BinaryInstantiateREST struct {
-	Generator      *generator.BuildGenerator
-	Watcher        rest.Watcher
-	PodGetter      pod.ResourceGetter
-	ConnectionInfo kubeletclient.ConnectionInfoGetter
-	Timeout        time.Duration
+	Generator    *generator.BuildGenerator
+	BuildClient  buildtypedclient.BuildsGetter
+	PodClient    kcoreclient.PodsGetter
+	ClientConfig *restclient.Config
+	Timeout      time.Duration
 }
 
 var _ rest.Connecter = &BinaryInstantiateREST{}
+var _ rest.StorageMetadata = &InstantiateREST{}
 
 // New creates a new build generation request
-func (s *BinaryInstantiateREST) New() runtime.Object {
+func (r *BinaryInstantiateREST) New() runtime.Object {
 	return &buildapi.BinaryBuildRequestOptions{}
 }
 
@@ -116,6 +134,15 @@ func (r *BinaryInstantiateREST) NewConnectOptions() (runtime.Object, bool, strin
 // ConnectMethods returns POST, the only supported binary method.
 func (r *BinaryInstantiateREST) ConnectMethods() []string {
 	return []string{"POST"}
+}
+
+func (r *BinaryInstantiateREST) ProducesObject(verb string) interface{} {
+	// for documentation purposes
+	return buildapiv1.Build{}
+}
+
+func (r *BinaryInstantiateREST) ProducesMIMETypes(verb string) []string {
+	return nil // no additional mime types
 }
 
 // binaryInstantiateHandler responds to upload requests
@@ -189,7 +216,7 @@ func (h *binaryInstantiateHandler) handle(r io.Reader) (runtime.Object, error) {
 	}); err != nil {
 		return nil, err
 	}
-	remaining := h.r.Timeout - time.Now().Sub(start)
+	remaining := h.r.Timeout - time.Since(start)
 
 	// Attempt to cancel the build if it did not start running
 	// before we gave up.
@@ -201,9 +228,16 @@ func (h *binaryInstantiateHandler) handle(r io.Reader) (runtime.Object, error) {
 		h.cancelBuild(build)
 	}()
 
-	latest, ok, err := registry.WaitForRunningBuild(h.r.Watcher, h.ctx, build, remaining)
+	latest, ok, err := registry.WaitForRunningBuild(h.r.BuildClient, build, remaining)
 
 	switch {
+	// err checks, no ok check, needs to occur before ref to latest
+	case err == registry.ErrBuildDeleted:
+		return nil, errors.NewBadRequest(fmt.Sprintf("build %s was deleted before it started: %s", build.Name, buildutil.NoBuildLogsMessage))
+	case err != nil:
+		return nil, errors.NewBadRequest(fmt.Sprintf("unable to wait for build %s to run: %v", build.Name, err))
+	case !ok:
+		return nil, errors.NewTimeoutError(fmt.Sprintf("timed out waiting for build %s to start after %s", build.Name, h.r.Timeout), 0)
 	case latest.Status.Phase == buildapi.BuildPhaseError:
 		// don't cancel the build if it reached a terminal state on its own
 		cancel = false
@@ -218,48 +252,40 @@ func (h *binaryInstantiateHandler) handle(r io.Reader) (runtime.Object, error) {
 		return nil, errors.NewBadRequest(fmt.Sprintf("build %s was cancelled: %s", build.Name, buildutil.NoBuildLogsMessage))
 	case latest.Status.Phase != buildapi.BuildPhaseRunning:
 		return nil, errors.NewBadRequest(fmt.Sprintf("cannot upload file to build %s with status %s", build.Name, latest.Status.Phase))
-	case err == registry.ErrBuildDeleted:
-		return nil, errors.NewBadRequest(fmt.Sprintf("build %s was deleted before it started: %s", build.Name, buildutil.NoBuildLogsMessage))
-	case err != nil:
-		return nil, errors.NewBadRequest(fmt.Sprintf("unable to wait for build %s to run: %v", build.Name, err))
-	case !ok:
-		return nil, errors.NewTimeoutError(fmt.Sprintf("timed out waiting for build %s to start after %s", build.Name, h.r.Timeout), 0)
 	}
 
 	buildPodName := buildapi.GetBuildPodName(build)
 	opts := &kapi.PodAttachOptions{
-		Stdin: true,
-		// TODO remove Stdout and Stderr once https://github.com/kubernetes/kubernetes/issues/44448 is
-		// fixed
-		Stdout:    true,
-		Stderr:    true,
+		Stdin:     true,
 		Container: buildstrategy.GitCloneContainer,
 	}
-	location, transport, err := pod.AttachLocation(h.r.PodGetter, h.r.ConnectionInfo, h.ctx, buildPodName, opts)
+	// Custom builds don't have a gitclone container, so we inject the source
+	// directly into the main container.
+	if build.Spec.Strategy.CustomStrategy != nil {
+		opts.Container = buildstrategy.CustomBuild
+	}
+
+	restClient, err := restclient.RESTClientFor(h.r.ClientConfig)
 	if err != nil {
-		if errors.IsNotFound(err) {
-			return nil, errors.NewNotFound(kapi.Resource("pod"), buildPodName)
-		}
-		return nil, errors.NewBadRequest(err.Error())
+		return nil, err
 	}
-	tlsClientConfig, err := knet.TLSClientConfig(transport)
+
+	// TODO: consider abstracting into a client invocation or client helper
+	req := restClient.Post().
+		Resource("pods").
+		Name(buildPodName).
+		Namespace(build.Namespace).
+		SubResource("attach")
+	req.VersionedParams(opts, legacyscheme.ParameterCodec)
+
+	exec, err := remotecommand.NewSPDYExecutor(h.r.ClientConfig, "POST", req.URL())
 	if err != nil {
-		return nil, errors.NewInternalError(fmt.Errorf("unable to connect to node, could not retrieve TLS client config: %v", err))
+		return nil, err
 	}
-	upgrader := spdy.NewRoundTripper(tlsClientConfig, false)
-	exec, err := remotecommand.NewStreamExecutor(upgrader, nil, "POST", location)
+	err = exec.Stream(remotecommand.StreamOptions{
+		Stdin: r,
+	})
 	if err != nil {
-		return nil, errors.NewInternalError(fmt.Errorf("unable to connect to server: %v", err))
-	}
-	streamOptions := remotecommand.StreamOptions{
-		SupportedProtocols: kubeletremotecommand.SupportedStreamingProtocols,
-		Stdin:              r,
-		// TODO remove Stdout and Stderr once https://github.com/kubernetes/kubernetes/issues/44448 is
-		// fixed
-		Stdout: ioutil.Discard,
-		Stderr: ioutil.Discard,
-	}
-	if err := exec.Stream(streamOptions); err != nil {
 		return nil, errors.NewInternalError(err)
 	}
 	cancel = false
@@ -282,16 +308,4 @@ func (h *binaryInstantiateHandler) cancelBuild(build *buildapi.Build) {
 			return true, err
 		}
 	})
-}
-
-type podGetter struct {
-	podsNamespacer kcoreclient.PodsGetter
-}
-
-func (g *podGetter) Get(ctx apirequest.Context, name string, options *metav1.GetOptions) (runtime.Object, error) {
-	ns, ok := apirequest.NamespaceFrom(ctx)
-	if !ok {
-		return nil, errors.NewBadRequest("namespace parameter required.")
-	}
-	return g.podsNamespacer.Pods(ns).Get(name, *options)
 }

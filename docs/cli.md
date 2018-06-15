@@ -161,7 +161,7 @@ Other options:
 | Name       |  Description                                                                                             |
 |:-----------|:---------------------------------------------------------------------------------------------------------|
 |`--env`, *(-e)* FOO=bar | Explicitly set or override environment variable for the current build. Does not change the BuildConfig. |
-|`--build-loglevel` | Set or override the build log level output [0-5] during the build. |
+|`--build-loglevel` | Set or override the build log level output [0-10] during the build. |
 |`--commit`  | Specify the source code commit identifier the build should use; requires a build based on a Git repository. |
 |`--follow`  | Start a build and watch its logs until it completes or fails. |
 | `--wait` | Wait for a build to complete and exit with a non-zero return code if the build fails. |
@@ -360,7 +360,7 @@ $ oc tag [--source=<sourcetype>] <source> <dest> [<dest> ...]
 For example:
 
 ```bash
-$ oc tag --source=docker openshift/origin:latest myproject/ruby:tip
+$ oc tag --source=docker openshift/origin-control-plane:latest myproject/ruby:tip
 ```
 
 ## Application Modification Commands
@@ -554,7 +554,7 @@ This forwards one or more local ports to a pod.
 The general form is:
 
 ```bash
-$ oc port-forward -p <pod> <forwarding-spec> [...]
+$ oc port-forward pod/<pod> <forwarding-spec> [...]
 ```
 
 where *forwarding-spec* is either a single port (integer), or a pair of ports separated by a colon `<outside>:<inside>`.
@@ -565,15 +565,15 @@ Some examples are:
 ```bash
 # Listen on ports 5000 and 6000 locally, forwarding data
 # to/from ports 5000 and 6000 in the pod.
-$ oc port-forward -p mypod 5000 6000
+$ oc port-forward pod/mypod 5000 6000
 
 # Listen on 8888 locally, forwarding to 5000 in the pod.
-$ oc port-forward -p mypod 8888:5000
+$ oc port-forward pod/mypod 8888:5000
 
 # Listen on a random port locally, forwarding to 5000 in the pod.
 # (These invocations are equivalent.)
-$ oc port-forward -p mypod :5000
-$ oc port-forward -p mypod 0:5000
+$ oc port-forward pod/mypod :5000
+$ oc port-forward pod/mypod 0:5000
 ```
 
 ### oc proxy
@@ -737,8 +737,8 @@ $ oc config use-context my-context
 
 This displays information about the current session.
 If invoked without arguments, `oc whoami` displays the currently authenticated username.
-Flag `-t` (or `--token`) means to instead display the session token.
-Flag `-c` (or `--context`) means to instead display the user context name.
+Flag `-t` (or `--show-token`) means to instead display the session token.
+Flag `-c` (or `--show-context`) means to instead display the user context name.
 
 ```bash
 $ oc whoami -t

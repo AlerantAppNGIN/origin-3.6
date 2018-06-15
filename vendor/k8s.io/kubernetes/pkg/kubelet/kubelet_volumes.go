@@ -20,10 +20,10 @@ import (
 	"fmt"
 
 	"github.com/golang/glog"
+	"k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/apimachinery/pkg/util/sets"
-	"k8s.io/kubernetes/pkg/api/v1"
 	kubecontainer "k8s.io/kubernetes/pkg/kubelet/container"
 	"k8s.io/kubernetes/pkg/util/removeall"
 	"k8s.io/kubernetes/pkg/volume"
@@ -55,6 +55,18 @@ func (kl *Kubelet) podVolumesExist(podUID types.UID) bool {
 	if mountedVolumes :=
 		kl.volumeManager.GetMountedVolumesForPod(
 			volumetypes.UniquePodName(podUID)); len(mountedVolumes) > 0 {
+		return true
+	}
+	// TODO: This checks pod volume paths and whether they are mounted. If checking returns error, podVolumesExist will return true
+	// which means we consider volumes might exist and requires further checking.
+	// There are some volume plugins such as flexvolume might not have mounts. See issue #61229
+	volumePaths, err := kl.getMountedVolumePathListFromDisk(podUID)
+	if err != nil {
+		glog.Errorf("pod %q found, but error %v occurred during checking mounted volumes from disk", podUID, err)
+		return true
+	}
+	if len(volumePaths) > 0 {
+		glog.V(4).Infof("pod %q found, but volumes are still mounted on disk %v", podUID, volumePaths)
 		return true
 	}
 
@@ -113,7 +125,7 @@ func (kl *Kubelet) cleanupOrphanedPodDirs(pods []*v1.Pod, runningPods []*kubecon
 			continue
 		}
 		if len(volumePaths) > 0 {
-			orphanVolumeErrors = append(orphanVolumeErrors, fmt.Errorf("Orphaned pod %q found, but volume paths are still present on disk.", uid))
+			orphanVolumeErrors = append(orphanVolumeErrors, fmt.Errorf("Orphaned pod %q found, but volume paths are still present on disk", uid))
 			continue
 		}
 		glog.V(3).Infof("Orphaned pod %q found, removing", uid)
@@ -125,7 +137,7 @@ func (kl *Kubelet) cleanupOrphanedPodDirs(pods []*v1.Pod, runningPods []*kubecon
 
 	logSpew := func(errs []error) {
 		if len(errs) > 0 {
-			glog.Errorf("%v : There were a total of %v errors similar to this.  Turn up verbosity to see them.", errs[0], len(errs))
+			glog.Errorf("%v : There were a total of %v errors similar to this. Turn up verbosity to see them.", errs[0], len(errs))
 			for _, err := range errs {
 				glog.V(5).Infof("Orphan pod: %v", err)
 			}

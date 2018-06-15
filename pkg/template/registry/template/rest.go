@@ -5,13 +5,13 @@ import (
 	"time"
 
 	"github.com/golang/glog"
+	"github.com/openshift/origin/pkg/template/templateprocessing"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	apirequest "k8s.io/apiserver/pkg/endpoints/request"
 	"k8s.io/apiserver/pkg/registry/rest"
 
-	"github.com/openshift/origin/pkg/template"
 	templateapi "github.com/openshift/origin/pkg/template/apis/template"
 	templatevalidation "github.com/openshift/origin/pkg/template/apis/template/validation"
 	"github.com/openshift/origin/pkg/template/generator"
@@ -38,7 +38,7 @@ func (s *REST) New() runtime.Object {
 }
 
 // Create processes a Template and creates a new list of objects
-func (s *REST) Create(ctx apirequest.Context, obj runtime.Object, _ bool) (runtime.Object, error) {
+func (s *REST) Create(ctx apirequest.Context, obj runtime.Object, _ rest.ValidateObjectFunc, _ bool) (runtime.Object, error) {
 	tpl, ok := obj.(*templateapi.Template)
 	if !ok {
 		return nil, errors.NewBadRequest("not a template")
@@ -50,7 +50,7 @@ func (s *REST) Create(ctx apirequest.Context, obj runtime.Object, _ bool) (runti
 	generators := map[string]generator.Generator{
 		"expression": generator.NewExpressionValueGenerator(rand.New(rand.NewSource(time.Now().UnixNano()))),
 	}
-	processor := template.NewProcessor(generators)
+	processor := templateprocessing.NewProcessor(generators)
 	if errs := processor.Process(tpl); len(errs) > 0 {
 		glog.V(1).Infof(errs.ToAggregate().Error())
 		return nil, errors.NewInvalid(templateapi.Kind("Template"), tpl.Name, errs)

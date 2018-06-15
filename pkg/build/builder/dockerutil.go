@@ -13,12 +13,9 @@ import (
 	"strings"
 	"time"
 
-	dockertypes "github.com/docker/engine-api/types"
+	enginetypes "github.com/docker/docker/api/types"
 	docker "github.com/fsouza/go-dockerclient"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
-
-	"github.com/openshift/source-to-image/pkg/tar"
-	s2iutil "github.com/openshift/source-to-image/pkg/util"
 
 	"k8s.io/kubernetes/pkg/credentialprovider"
 	"k8s.io/kubernetes/pkg/util/interrupt"
@@ -26,6 +23,11 @@ import (
 	"github.com/openshift/imagebuilder"
 	"github.com/openshift/imagebuilder/dockerclient"
 	"github.com/openshift/imagebuilder/imageprogress"
+
+	"github.com/openshift/source-to-image/pkg/tar"
+	s2iutil "github.com/openshift/source-to-image/pkg/util"
+
+	imageapi "github.com/openshift/origin/pkg/image/apis/image"
 )
 
 var (
@@ -44,6 +46,7 @@ var (
 		"no route to host",
 		"unexpected end of JSON input",
 		"i/o timeout",
+		"TLS handshake timeout",
 	}
 )
 
@@ -103,15 +106,34 @@ func RetryImageAction(client DockerClient, opts interface{}, authConfig docker.A
 		time.Sleep(DefaultPushOrPullRetryDelay)
 	}
 
-	return fmt.Errorf("After retrying %d times, %s image still failed", DefaultPushOrPullRetryCount, actionName)
+	return fmt.Errorf("After retrying %d times, %s image still failed due to error: %v", DefaultPushOrPullRetryCount, actionName, err)
 }
 
 func pullImage(client DockerClient, name string, authConfig docker.AuthConfiguration) error {
 	logProgress := func(s string) {
 		glog.V(0).Infof("%s", s)
 	}
+
+	ref, err := imageapi.ParseDockerImageReference(name)
+	if err != nil {
+		return err
+	}
+	tag := ref.ID
+	if len(ref.ID) == 0 {
+		tag = imageapi.DefaultImageTag
+		if len(ref.Tag) != 0 {
+			tag = ref.Tag
+		}
+	}
+	// clear the ref.Tag and ref.ID so they do not appear in the Repository field we produce
+	// from ref.Exact(), we pass the Tag or ID (if any) explicitly in the Tag field.
+	ref.Tag = ""
+	ref.ID = ""
+
+	glog.V(4).Infof("pulling image %q with ref %#v as repository: %s and tag: %s", name, ref, ref.Exact(), tag)
 	opts := docker.PullImageOptions{
-		Repository:    name,
+		Repository:    ref.Exact(),
+		Tag:           tag,
 		OutputStream:  imageprogress.NewPullWriter(logProgress),
 		RawJSONStream: true,
 	}
@@ -192,13 +214,22 @@ func buildDirectImage(dir string, ignoreFailures bool, opts *docker.BuildImageOp
 	e.IgnoreUnrecognizedInstructions = ignoreFailures
 	e.StrictVolumeOwnership = !ignoreFailures
 	e.HostConfig = &docker.HostConfig{
-		NetworkMode: opts.NetworkMode,
-		CPUShares:   opts.CPUShares,
-		CPUPeriod:   opts.CPUPeriod,
-		CPUSetCPUs:  opts.CPUSetCPUs,
-		CPUQuota:    opts.CPUQuota,
-		Memory:      opts.Memory,
-		MemorySwap:  opts.Memswap,
+		NetworkMode:  opts.NetworkMode,
+		CPUShares:    opts.CPUShares,
+		CPUPeriod:    opts.CPUPeriod,
+		CPUSetCPUs:   opts.CPUSetCPUs,
+		CPUQuota:     opts.CPUQuota,
+		CgroupParent: opts.CgroupParent,
+		Memory:       opts.Memory,
+		MemorySwap:   opts.Memswap,
+	}
+
+	if len(opts.BuildBinds) > 0 {
+		var s []string
+		if err := json.Unmarshal([]byte(opts.BuildBinds), &s); err != nil {
+			return fmt.Errorf("the build bindings were not a valid string array: %q: %v", opts.BuildBinds, err)
+		}
+		e.HostConfig.Binds = append(e.HostConfig.Binds, s...)
 	}
 
 	e.Out, e.ErrOut = opts.OutputStream, opts.OutputStream
@@ -212,13 +243,22 @@ func buildDirectImage(dir string, ignoreFailures bool, opts *docker.BuildImageOp
 			Email:    v.Email,
 		}
 	}
+
 	keyring := credentialprovider.BasicDockerKeyring{}
 	keyring.Add(keys)
-	e.AuthFn = func(name string) ([]dockertypes.AuthConfig, bool) {
+	e.AuthFn = func(name string) ([]enginetypes.AuthConfig, bool) {
 		authConfs, found := keyring.Lookup(name)
-		var out []dockertypes.AuthConfig
+		var out []enginetypes.AuthConfig
 		for _, conf := range authConfs {
-			out = append(out, conf.AuthConfig)
+			c := enginetypes.AuthConfig{
+				Username:      conf.Username,
+				Password:      conf.Password,
+				Email:         conf.Email,
+				ServerAddress: conf.ServerAddress,
+				IdentityToken: conf.IdentityToken,
+				RegistryToken: conf.RegistryToken,
+			}
+			out = append(out, c)
 		}
 		return out, found
 	}
@@ -252,17 +292,19 @@ func buildDirectImage(dir string, ignoreFailures bool, opts *docker.BuildImageOp
 		}
 	}
 	return interrupt.New(nil, releaseFn).Run(func() error {
-		b, node, err := imagebuilder.NewBuilderForFile(filepath.Join(dir, opts.Dockerfile), arguments)
+		b := imagebuilder.NewBuilder(arguments)
+		node, err := imagebuilder.ParseFile(filepath.Join(dir, opts.Dockerfile))
 		if err != nil {
 			return err
 		}
-		if err := e.Prepare(b, node, ""); err != nil {
+		stages := imagebuilder.NewStages(node, b)
+
+		lastExecutor, err := e.Stages(b, stages, "")
+		if err != nil {
 			return err
 		}
-		if err := e.Execute(b, node); err != nil {
-			return err
-		}
-		return e.Commit(b)
+
+		return lastExecutor.Commit(stages[len(stages)-1].Builder)
 	})
 }
 

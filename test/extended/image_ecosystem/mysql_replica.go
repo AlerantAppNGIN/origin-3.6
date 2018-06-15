@@ -12,33 +12,25 @@ import (
 	"github.com/openshift/origin/test/extended/util/db"
 	testutil "github.com/openshift/origin/test/util"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	kcoreclient "k8s.io/kubernetes/pkg/client/clientset_generated/clientset/typed/core/v1"
+	kapiv1 "k8s.io/api/core/v1"
+	//metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	kcoreclient "k8s.io/client-go/kubernetes/typed/core/v1"
 	e2e "k8s.io/kubernetes/test/e2e/framework"
 )
 
 type testCase struct {
 	Version         string
 	TemplatePath    string
+	TemplateName    string
 	SkipReplication bool
 }
 
 var (
 	testCases = []testCase{
 		{
-			"5.5",
-			"https://raw.githubusercontent.com/sclorg/mysql-container/master/5.5/examples/replica/mysql_replica.json",
-			// NOTE: Set to true in case of flakes.
-			false,
-		},
-		{
-			"5.6",
-			"https://raw.githubusercontent.com/sclorg/mysql-container/master/5.6/examples/replica/mysql_replica.json",
-			false,
-		},
-		{
 			"5.7",
-			"https://raw.githubusercontent.com/sclorg/mysql-container/master/5.7/examples/replica/mysql_replica.json",
+			"https://raw.githubusercontent.com/sclorg/mysql-container/master/examples/replica/mysql_replica.json",
+			"mysql-replication-example",
 			false,
 		},
 	}
@@ -49,11 +41,11 @@ var (
 // CreateMySQLReplicationHelpers creates a set of MySQL helpers for master,
 // slave and an extra helper that is used for remote login test.
 func CreateMySQLReplicationHelpers(c kcoreclient.PodInterface, masterDeployment, slaveDeployment, helperDeployment string, slaveCount int) (exutil.Database, []exutil.Database, exutil.Database) {
-	podNames, err := exutil.WaitForPods(c, exutil.ParseLabelsOrDie(fmt.Sprintf("deployment=%s", masterDeployment)), exutil.CheckPodIsRunningFn, 1, 1*time.Minute)
+	podNames, err := exutil.WaitForPods(c, exutil.ParseLabelsOrDie(fmt.Sprintf("deployment=%s", masterDeployment)), exutil.CheckPodIsRunning, 1, 4*time.Minute)
 	o.Expect(err).NotTo(o.HaveOccurred())
 	masterPod := podNames[0]
 
-	slavePods, err := exutil.WaitForPods(c, exutil.ParseLabelsOrDie(fmt.Sprintf("deployment=%s", slaveDeployment)), exutil.CheckPodIsRunningFn, slaveCount, 2*time.Minute)
+	slavePods, err := exutil.WaitForPods(c, exutil.ParseLabelsOrDie(fmt.Sprintf("deployment=%s", slaveDeployment)), exutil.CheckPodIsRunning, slaveCount, 6*time.Minute)
 	o.Expect(err).NotTo(o.HaveOccurred())
 
 	// Create MySQL helper for master
@@ -66,34 +58,28 @@ func CreateMySQLReplicationHelpers(c kcoreclient.PodInterface, masterDeployment,
 		slaves[i] = slave
 	}
 
-	helperNames, err := exutil.WaitForPods(c, exutil.ParseLabelsOrDie(fmt.Sprintf("deployment=%s", helperDeployment)), exutil.CheckPodIsRunningFn, 1, 1*time.Minute)
+	helperNames, err := exutil.WaitForPods(c, exutil.ParseLabelsOrDie(fmt.Sprintf("deployment=%s", helperDeployment)), exutil.CheckPodIsRunning, 1, 4*time.Minute)
 	o.Expect(err).NotTo(o.HaveOccurred())
 	helper := db.NewMysql(helperNames[0], masterPod)
 
 	return master, slaves, helper
 }
 
-func cleanup(oc *exutil.CLI) {
-	exutil.DumpImageStreams(oc)
-	oc.AsAdmin().Run("delete").Args("all", "--all", "-n", oc.Namespace()).Execute()
-	exutil.DumpImageStreams(oc)
-	oc.AsAdmin().Run("delete").Args("pvc", "--all", "-n", oc.Namespace()).Execute()
-	exutil.CleanupHostPathVolumes(oc.AdminKubeClient().CoreV1().PersistentVolumes(), oc.Namespace())
-}
-
-func replicationTestFactory(oc *exutil.CLI, tc testCase) func() {
+func replicationTestFactory(oc *exutil.CLI, tc testCase, cleanup func()) func() {
 	return func() {
-		oc.SetOutputDir(exutil.TestContext.OutputDir)
-		defer cleanup(oc)
+		// per k8s e2e volume_util.go:VolumeTestCleanup, nuke any client pods
+		// before nfs server to assist with umount issues; as such, need to clean
+		// up prior to the AfterEach processing, to guaranteed deletion order
+		defer cleanup()
 
-		_, err := exutil.SetupHostPathVolumes(oc.AdminKubeClient().CoreV1().PersistentVolumes(), oc.Namespace(), "1Gi", 2)
-		o.Expect(err).NotTo(o.HaveOccurred())
-
-		err = testutil.WaitForPolicyUpdate(oc.Client(), oc.Namespace(), "create", templateapi.Resource("templates"), true)
+		err := testutil.WaitForPolicyUpdate(oc.InternalKubeClient().Authorization(), oc.Namespace(), "create", templateapi.Resource("templates"), true)
 		o.Expect(err).NotTo(o.HaveOccurred())
 
 		exutil.CheckOpenShiftNamespaceImageStreams(oc)
-		err = oc.Run("new-app").Args("-f", tc.TemplatePath).Execute()
+		err = oc.Run("create").Args("-f", tc.TemplatePath).Execute()
+		o.Expect(err).NotTo(o.HaveOccurred())
+
+		err = oc.Run("new-app").Args("--template", tc.TemplateName).Execute()
 		o.Expect(err).NotTo(o.HaveOccurred())
 
 		err = oc.Run("new-app").Args("-f", helperTemplate, "-p", fmt.Sprintf("MYSQL_VERSION=%s", tc.Version), "-p", fmt.Sprintf("DATABASE_SERVICE_NAME=%s", helperName)).Execute()
@@ -102,7 +88,7 @@ func replicationTestFactory(oc *exutil.CLI, tc testCase) func() {
 		// oc.KubeFramework().WaitForAnEndpoint currently will wait forever;  for now, prefacing with our WaitForADeploymentToComplete,
 		// which does have a timeout, since in most cases a failure in the service coming up stems from a failed deployment
 		g.By("waiting for the deployment to complete")
-		err = exutil.WaitForDeploymentConfig(oc.KubeClient(), oc.Client(), oc.Namespace(), helperName, 1, oc)
+		err = exutil.WaitForDeploymentConfig(oc.KubeClient(), oc.AppsClient().Apps(), oc.Namespace(), helperName, 1, true, oc)
 		o.Expect(err).NotTo(o.HaveOccurred())
 
 		g.By("waiting for an endpoint")
@@ -158,33 +144,47 @@ func replicationTestFactory(oc *exutil.CLI, tc testCase) func() {
 		g.By("after master is restarted by changing the Deployment Config")
 		err = oc.Run("env").Args("dc", "mysql-master", "MYSQL_ROOT_PASSWORD=newpass").Execute()
 		o.Expect(err).NotTo(o.HaveOccurred())
-		err = exutil.WaitUntilPodIsGone(oc.KubeClient().CoreV1().Pods(oc.Namespace()), master.PodName(), 1*time.Minute)
+		err = exutil.WaitUntilPodIsGone(oc.KubeClient().CoreV1().Pods(oc.Namespace()), master.PodName(), 2*time.Minute)
+		if err != nil {
+			e2e.Logf("Checking if pod %s still exists", master.PodName())
+			oc.Run("get").Args("pod", master.PodName(), "-o", "yaml").Execute()
+		}
 		master, _, _ = assertReplicationIsWorking("mysql-master-2", "mysql-slave-1", 1)
 
 		g.By("after master is restarted by deleting the pod")
 		err = oc.Run("delete").Args("pod", "-l", "deployment=mysql-master-2").Execute()
 		o.Expect(err).NotTo(o.HaveOccurred())
-		err = exutil.WaitUntilPodIsGone(oc.KubeClient().CoreV1().Pods(oc.Namespace()), master.PodName(), 1*time.Minute)
+		err = exutil.WaitUntilPodIsGone(oc.KubeClient().CoreV1().Pods(oc.Namespace()), master.PodName(), 2*time.Minute)
+		if err != nil {
+			e2e.Logf("Checking if pod %s still exists", master.PodName())
+			oc.Run("get").Args("pod", master.PodName(), "-o", "yaml").Execute()
+		}
 		o.Expect(err).NotTo(o.HaveOccurred())
-		_, slaves, _ := assertReplicationIsWorking("mysql-master-2", "mysql-slave-1", 1)
+		assertReplicationIsWorking("mysql-master-2", "mysql-slave-1", 1)
+		/*_, slaves, _ := assertReplicationIsWorking("mysql-master-2", "mysql-slave-1", 1)
 
+		// NOTE: slave restart with PVs does not work since https://github.com/sclorg/mysql-container/pull/215/
 		g.By("after slave is restarted by deleting the pod")
 		err = oc.Run("delete").Args("pod", "-l", "deployment=mysql-slave-1").Execute()
 		o.Expect(err).NotTo(o.HaveOccurred())
-		err = exutil.WaitUntilPodIsGone(oc.KubeClient().CoreV1().Pods(oc.Namespace()), slaves[0].PodName(), 1*time.Minute)
+		err = exutil.WaitUntilPodIsGone(oc.KubeClient().CoreV1().Pods(oc.Namespace()), slaves[0].PodName(), 2*time.Minute)
+		if err != nil {
+			e2e.Logf("Checking if pod %s still exists", slaves[0].PodName())
+			oc.Run("get").Args("pod", slaves[0].PodName(), "-o", "yaml").Execute()
+		}
 		o.Expect(err).NotTo(o.HaveOccurred())
 		assertReplicationIsWorking("mysql-master-2", "mysql-slave-1", 1)
 
 		pods, err := oc.KubeClient().CoreV1().Pods(oc.Namespace()).List(metav1.ListOptions{LabelSelector: exutil.ParseLabelsOrDie("deployment=mysql-slave-1").String()})
 		o.Expect(err).NotTo(o.HaveOccurred())
-		o.Expect(len(pods.Items)).To(o.Equal(1))
+		o.Expect(len(pods.Items)).To(o.Equal(1))*/
 
 		// NOTE: Commented out, current template does not support multiple replicas.
 		/*
 			g.By("after slave is scaled to 0 and then back to 4 replicas")
 			err = oc.Run("scale").Args("dc", "mysql-slave", "--replicas=0").Execute()
 			o.Expect(err).NotTo(o.HaveOccurred())
-			err = exutil.WaitUntilPodIsGone(oc.KubeClient().CoreV1().Pods(oc.Namespace()), pods.Items[0].Name, 1*time.Minute)
+			err = exutil.WaitUntilPodIsGone(oc.KubeClient().CoreV1().Pods(oc.Namespace()), pods.Items[0].Name, 2*time.Minute)
 			o.Expect(err).NotTo(o.HaveOccurred())
 			err = oc.Run("scale").Args("dc", "mysql-slave", "--replicas=4").Execute()
 			o.Expect(err).NotTo(o.HaveOccurred())
@@ -196,9 +196,44 @@ func replicationTestFactory(oc *exutil.CLI, tc testCase) func() {
 var _ = g.Describe("[image_ecosystem][mysql][Slow] openshift mysql replication", func() {
 	defer g.GinkgoRecover()
 
-	ocs := make([]*exutil.CLI, len(testCases))
-	for i, tc := range testCases {
-		ocs[i] = exutil.NewCLI(fmt.Sprintf("mysql-replication-%d", i), exutil.KubeConfigPath())
-		g.It(fmt.Sprintf("MySQL replication template for %s: %s", tc.Version, tc.TemplatePath), replicationTestFactory(ocs[i], tc))
+	var oc = exutil.NewCLI("mysql-replication", exutil.KubeConfigPath())
+	var pvs = []*kapiv1.PersistentVolume{}
+	var nfspod = &kapiv1.Pod{}
+	var cleanup = func() {
+		g.By("start cleanup")
+		if g.CurrentGinkgoTestDescription().Failed {
+			exutil.DumpPodStates(oc)
+			exutil.DumpPodLogsStartingWith("", oc)
+			exutil.DumpPersistentVolumeInfo(oc)
+		}
+
+		client := oc.AsAdmin().KubeFramework().ClientSet
+		g.By("removing mysql")
+		exutil.RemoveDeploymentConfigs(oc, "mysql-master", "mysql-slave")
+
+		g.By("deleting PVC")
+		exutil.DeletePVCsForDeployment(client, oc, "mysql")
+
+		g.By("removing nfs pvs")
+		for _, pv := range pvs {
+			e2e.DeletePersistentVolume(client, pv.Name)
+		}
+
+		g.By("removing nfs pod")
+		e2e.DeletePodWithWait(oc.AsAdmin().KubeFramework(), client, nfspod)
 	}
+
+	g.Context("", func() {
+		g.BeforeEach(func() {
+			exutil.DumpDockerInfo()
+
+			var err error
+			nfspod, pvs, err = exutil.SetupK8SNFSServerAndVolume(oc, 8)
+			o.Expect(err).NotTo(o.HaveOccurred())
+		})
+
+		for _, tc := range testCases {
+			g.It(fmt.Sprintf("MySQL replication template for %s: %s", tc.Version, tc.TemplatePath), replicationTestFactory(oc, tc, cleanup))
+		}
+	})
 })

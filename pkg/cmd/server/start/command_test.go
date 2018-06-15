@@ -14,12 +14,13 @@ import (
 
 	"github.com/spf13/cobra"
 
-	configapi "github.com/openshift/origin/pkg/cmd/server/api"
-	configapilatest "github.com/openshift/origin/pkg/cmd/server/api/latest"
+	configapi "github.com/openshift/origin/pkg/cmd/server/apis/config"
+	configapilatest "github.com/openshift/origin/pkg/cmd/server/apis/config/latest"
 
 	// install all APIs
 	_ "github.com/openshift/origin/pkg/api/install"
-	_ "k8s.io/kubernetes/pkg/api/install"
+	"k8s.io/apimachinery/pkg/util/wait"
+	_ "k8s.io/kubernetes/pkg/apis/core/install"
 )
 
 // this groups of methods force all the unit tests to share the same config directory
@@ -227,7 +228,7 @@ func executeAllInOneCommandWithConfigs(args []string) (*MasterArgs, *configapi.M
 		},
 	}
 
-	openshiftStartCommand, cfg := NewCommandStartAllInOne("openshift start", os.Stdout, os.Stderr)
+	openshiftStartCommand, cfg := NewCommandStartAllInOne("openshift start", os.Stdout, os.Stderr, wait.NeverStop)
 	root.AddCommand(openshiftStartCommand)
 	root.SetArgs(argsToUse)
 	root.Execute()

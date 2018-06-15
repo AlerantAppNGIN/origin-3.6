@@ -10,16 +10,17 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	kapi "k8s.io/kubernetes/pkg/api"
+	kapi "k8s.io/kubernetes/pkg/apis/core"
 	kcmd "k8s.io/kubernetes/pkg/kubectl/cmd"
 	"k8s.io/kubernetes/pkg/kubectl/cmd/templates"
 	kcmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
 
+	appsapi "github.com/openshift/origin/pkg/apps/apis/apps"
 	buildapi "github.com/openshift/origin/pkg/build/apis/build"
+	buildclientinternal "github.com/openshift/origin/pkg/build/generated/internalclientset"
+	buildclient "github.com/openshift/origin/pkg/build/generated/internalclientset/typed/build/internalversion"
 	buildutil "github.com/openshift/origin/pkg/build/util"
-	osclient "github.com/openshift/origin/pkg/client"
-	"github.com/openshift/origin/pkg/cmd/util/clientcmd"
-	deployapi "github.com/openshift/origin/pkg/deploy/apis/apps"
+	"github.com/openshift/origin/pkg/oc/cli/util/clientcmd"
 )
 
 // LogsRecommendedCommandName is the recommended command name
@@ -66,19 +67,19 @@ type OpenShiftLogsOptions struct {
 	KubeLogOptions *kcmd.LogsOptions
 	// Client enables access to the Build object when processing
 	// build logs for Jenkins Pipeline Strategy builds
-	Client osclient.BuildsNamespacer
+	Client buildclient.BuildsGetter
 	// Namespace is a required parameter when accessing the Build object when processing
 	// build logs for Jenkins Pipeline Strategy builds
 	Namespace string
 }
 
 // NewCmdLogs creates a new logs command that supports OpenShift resources.
-func NewCmdLogs(name, baseName string, f *clientcmd.Factory, out io.Writer) *cobra.Command {
+func NewCmdLogs(name, baseName string, f *clientcmd.Factory, out io.Writer, errOut io.Writer) *cobra.Command {
 	o := OpenShiftLogsOptions{
 		KubeLogOptions: &kcmd.LogsOptions{},
 	}
 
-	cmd := kcmd.NewCmdLogs(f, out)
+	cmd := kcmd.NewCmdLogs(f, out, errOut)
 	cmd.Short = "Print the logs for a resource"
 	cmd.Long = logsLong
 	cmd.Example = fmt.Sprintf(logsExample, baseName, name)
@@ -87,7 +88,7 @@ func NewCmdLogs(name, baseName string, f *clientcmd.Factory, out io.Writer) *cob
 		kcmdutil.CheckErr(o.Complete(f, cmd, args, out))
 
 		if err := o.Validate(); err != nil {
-			kcmdutil.CheckErr(kcmdutil.UsageError(cmd, err.Error()))
+			kcmdutil.CheckErr(kcmdutil.UsageErrorf(cmd, err.Error()))
 		}
 
 		kcmdutil.CheckErr(o.RunLog())
@@ -126,7 +127,8 @@ func (o *OpenShiftLogsOptions) Complete(f *clientcmd.Factory, cmd *cobra.Command
 
 	podLogOptions := o.KubeLogOptions.Options.(*kapi.PodLogOptions)
 
-	infos, err := f.NewBuilder(true).
+	infos, err := f.NewBuilder().
+		Internal().
 		NamespaceParam(o.Namespace).DefaultNamespace().
 		ResourceNames("pods", args...).
 		SingleResourceType().RequireObject(false).
@@ -138,11 +140,15 @@ func (o *OpenShiftLogsOptions) Complete(f *clientcmd.Factory, cmd *cobra.Command
 		return errors.New("expected a resource")
 	}
 
-	client, _, err := f.Clients()
+	clientConfig, err := f.ClientConfig()
 	if err != nil {
 		return err
 	}
-	o.Client = client
+	client, err := buildclientinternal.NewForConfig(clientConfig)
+	if err != nil {
+		return err
+	}
+	o.Client = client.Build()
 
 	version := kcmdutil.GetFlagInt64(cmd, "version")
 	_, resource := meta.UnsafeGuessKindToResource(infos[0].Mapping.GroupVersionKind)
@@ -150,7 +156,10 @@ func (o *OpenShiftLogsOptions) Complete(f *clientcmd.Factory, cmd *cobra.Command
 	gr := resource.GroupResource()
 	// TODO: podLogOptions should be included in our own logOptions objects.
 	switch {
-	case buildapi.IsResourceOrLegacy("build", gr), buildapi.IsResourceOrLegacy("buildconfig", gr):
+	case buildapi.Resource("build") == gr,
+		buildapi.Resource("builds") == gr,
+		buildapi.Resource("buildconfig") == gr,
+		buildapi.Resource("buildconfigs") == gr:
 		bopts := &buildapi.BuildLogOptions{
 			Follow:       podLogOptions.Follow,
 			Previous:     podLogOptions.Previous,
@@ -165,8 +174,10 @@ func (o *OpenShiftLogsOptions) Complete(f *clientcmd.Factory, cmd *cobra.Command
 		}
 		o.Options = bopts
 
-	case deployapi.IsResourceOrLegacy("deploymentconfig", gr):
-		dopts := &deployapi.DeploymentLogOptions{
+	case appsapi.Resource("deploymentconfig") == gr,
+		appsapi.Resource("deploymentconfigs") == gr:
+		dopts := &appsapi.DeploymentLogOptions{
+			Container:    podLogOptions.Container,
 			Follow:       podLogOptions.Follow,
 			Previous:     podLogOptions.Previous,
 			SinceSeconds: podLogOptions.SinceSeconds,
@@ -200,7 +211,7 @@ func (o OpenShiftLogsOptions) Validate() error {
 		if t.Previous && t.Version != nil {
 			return errors.New("cannot use both --previous and --version")
 		}
-	case *deployapi.DeploymentLogOptions:
+	case *appsapi.DeploymentLogOptions:
 		if t.Previous && t.Version != nil {
 			return errors.New("cannot use both --previous and --version")
 		}

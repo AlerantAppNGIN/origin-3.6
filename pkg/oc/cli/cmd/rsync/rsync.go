@@ -13,7 +13,7 @@ import (
 	"k8s.io/kubernetes/pkg/kubectl/cmd/templates"
 	kcmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
 
-	"github.com/openshift/origin/pkg/cmd/util/clientcmd"
+	"github.com/openshift/origin/pkg/oc/cli/util/clientcmd"
 	"github.com/openshift/origin/pkg/util/fsnotification"
 )
 
@@ -70,15 +70,17 @@ type podChecker interface {
 
 // RsyncOptions holds the options to execute the sync command
 type RsyncOptions struct {
-	Namespace     string
-	ContainerName string
-	Source        *pathSpec
-	Destination   *pathSpec
-	Strategy      copyStrategy
-	StrategyName  string
-	Quiet         bool
-	Delete        bool
-	Watch         bool
+	Namespace         string
+	ContainerName     string
+	Source            *pathSpec
+	Destination       *pathSpec
+	Strategy          copyStrategy
+	StrategyName      string
+	Quiet             bool
+	Delete            bool
+	Watch             bool
+	Compress          bool
+	SuggestedCmdUsage string
 
 	RsyncInclude  []string
 	RsyncExclude  []string
@@ -121,6 +123,8 @@ func NewCmdRsync(name, parent string, f *clientcmd.Factory, out, errOut io.Write
 	cmd.Flags().BoolVar(&o.RsyncProgress, "progress", false, "If true, show progress during transfer")
 	cmd.Flags().BoolVar(&o.RsyncNoPerms, "no-perms", false, "If true, do not transfer permissions")
 	cmd.Flags().BoolVarP(&o.Watch, "watch", "w", false, "Watch directory for changes and resync automatically")
+	cmd.Flags().BoolVar(&o.Compress, "compress", false, "compress file data during the transfer")
+
 	return cmd
 }
 
@@ -181,27 +185,48 @@ func (o *RsyncOptions) Complete(f *clientcmd.Factory, cmd *cobra.Command, args [
 		cmd.Help()
 		fallthrough
 	case n < 2:
-		return kcmdutil.UsageError(cmd, "SOURCE_DIR and POD:DESTINATION_DIR are required arguments")
+		return kcmdutil.UsageErrorf(cmd, "SOURCE_DIR and POD:DESTINATION_DIR are required arguments")
 	case n > 2:
-		return kcmdutil.UsageError(cmd, "only SOURCE_DIR and POD:DESTINATION_DIR should be specified as arguments")
+		return kcmdutil.UsageErrorf(cmd, "only SOURCE_DIR and POD:DESTINATION_DIR should be specified as arguments")
 	}
 
-	// Set main command arguments
 	var err error
-	o.Source, err = parsePathSpec(args[0])
-	if err != nil {
-		return err
-	}
-	o.Destination, err = parsePathSpec(args[1])
-	if err != nil {
-		return err
-	}
-
 	namespace, _, err := f.DefaultNamespace()
 	if err != nil {
 		return err
 	}
 	o.Namespace = namespace
+
+	// allow and parse resources specified in the <kind>/<name> format
+	parsedSourcePath, err := resolveResourceKindPath(f, args[0], namespace)
+	if err != nil {
+		return err
+	}
+
+	parsedDestPath, err := resolveResourceKindPath(f, args[1], namespace)
+	if err != nil {
+		return err
+	}
+
+	// Set main command arguments
+	o.Source, err = parsePathSpec(parsedSourcePath)
+	if err != nil {
+		return err
+	}
+	o.Destination, err = parsePathSpec(parsedDestPath)
+	if err != nil {
+		return err
+	}
+
+	fullCmdName := ""
+	cmdParent := cmd.Parent()
+	if cmdParent != nil {
+		fullCmdName = cmdParent.CommandPath()
+	}
+
+	if len(fullCmdName) > 0 && kcmdutil.IsSiblingCommandExists(cmd, "describe") {
+		o.SuggestedCmdUsage = fmt.Sprintf("Use '%s describe pod/%s -n %s' to see all of the containers in this pod.", fullCmdName, o.PodName(), o.Namespace)
+	}
 
 	o.Strategy, err = o.determineStrategy(f, cmd, o.StrategyName)
 	if err != nil {

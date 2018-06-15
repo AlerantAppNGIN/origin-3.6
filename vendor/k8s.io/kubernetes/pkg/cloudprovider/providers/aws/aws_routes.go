@@ -17,6 +17,7 @@ limitations under the License.
 package aws
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/aws/aws-sdk-go/aws"
@@ -65,7 +66,7 @@ func (c *Cloud) findRouteTable(clusterName string) (*ec2.RouteTable, error) {
 
 // ListRoutes implements Routes.ListRoutes
 // List all routes that match the filter
-func (c *Cloud) ListRoutes(clusterName string) ([]*cloudprovider.Route, error) {
+func (c *Cloud) ListRoutes(ctx context.Context, clusterName string) ([]*cloudprovider.Route, error) {
 	table, err := c.findRouteTable(clusterName)
 	if err != nil {
 		return nil, err
@@ -75,7 +76,7 @@ func (c *Cloud) ListRoutes(clusterName string) ([]*cloudprovider.Route, error) {
 	var instanceIDs []*string
 
 	for _, r := range table.Routes {
-		instanceID := orEmpty(r.InstanceId)
+		instanceID := aws.StringValue(r.InstanceId)
 
 		if instanceID == "" {
 			continue
@@ -138,7 +139,7 @@ func (c *Cloud) configureInstanceSourceDestCheck(instanceID string, sourceDestCh
 
 // CreateRoute implements Routes.CreateRoute
 // Create the described route
-func (c *Cloud) CreateRoute(clusterName string, nameHint string, route *cloudprovider.Route) error {
+func (c *Cloud) CreateRoute(ctx context.Context, clusterName string, nameHint string, route *cloudprovider.Route) error {
 	instance, err := c.getInstanceByNodeName(route.TargetNode)
 	if err != nil {
 		return err
@@ -146,7 +147,7 @@ func (c *Cloud) CreateRoute(clusterName string, nameHint string, route *cloudpro
 
 	// In addition to configuring the route itself, we also need to configure the instance to accept that traffic
 	// On AWS, this requires turning source-dest checks off
-	err = c.configureInstanceSourceDestCheck(orEmpty(instance.InstanceId), false)
+	err = c.configureInstanceSourceDestCheck(aws.StringValue(instance.InstanceId), false)
 	if err != nil {
 		return err
 	}
@@ -198,7 +199,7 @@ func (c *Cloud) CreateRoute(clusterName string, nameHint string, route *cloudpro
 
 // DeleteRoute implements Routes.DeleteRoute
 // Delete the specified route
-func (c *Cloud) DeleteRoute(clusterName string, route *cloudprovider.Route) error {
+func (c *Cloud) DeleteRoute(ctx context.Context, clusterName string, route *cloudprovider.Route) error {
 	table, err := c.findRouteTable(clusterName)
 	if err != nil {
 		return err

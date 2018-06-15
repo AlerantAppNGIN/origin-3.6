@@ -15,18 +15,21 @@ import (
 
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	kapi "k8s.io/kubernetes/pkg/api"
+	"k8s.io/kubernetes/pkg/api/legacyscheme"
+	kapi "k8s.io/kubernetes/pkg/apis/core"
 	"k8s.io/kubernetes/pkg/kubectl"
 	"k8s.io/kubernetes/pkg/kubectl/cmd/templates"
 	kcmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
 
-	"github.com/openshift/origin/pkg/client"
-	cmdutil "github.com/openshift/origin/pkg/cmd/util"
-	"github.com/openshift/origin/pkg/cmd/util/clientcmd"
-	configcmd "github.com/openshift/origin/pkg/config/cmd"
-	"github.com/openshift/origin/pkg/generate/app"
-	appcmd "github.com/openshift/origin/pkg/generate/app/cmd"
-	"github.com/openshift/origin/pkg/generate/appjson"
+	configcmd "github.com/openshift/origin/pkg/bulk"
+	"github.com/openshift/origin/pkg/cmd/util/print"
+	"github.com/openshift/origin/pkg/oc/cli/util/clientcmd"
+	"github.com/openshift/origin/pkg/oc/generate/app"
+	"github.com/openshift/origin/pkg/oc/generate/appjson"
+	appcmd "github.com/openshift/origin/pkg/oc/generate/cmd"
+	templateinternalclient "github.com/openshift/origin/pkg/template/client/internalversion"
+	templateclientinternal "github.com/openshift/origin/pkg/template/generated/internalclientset"
+	templateclient "github.com/openshift/origin/pkg/template/generated/internalclientset/typed/template/internalversion"
 )
 
 const AppJSONV1GeneratorName = "app-json/v1"
@@ -67,7 +70,7 @@ type AppJSONOptions struct {
 	OutputVersions []schema.GroupVersion
 
 	Namespace string
-	Client    client.TemplateConfigsNamespacer
+	Client    templateclient.TemplateInterface
 }
 
 // NewCmdAppJSON imports an app.json file (schema described here: https://devcenter.heroku.com/articles/app-json-schema)
@@ -91,7 +94,7 @@ func NewCmdAppJSON(fullName string, f *clientcmd.Factory, in io.Reader, out, err
 			kcmdutil.CheckErr(options.Validate())
 			if err := options.Run(); err != nil {
 				// TODO: move me to kcmdutil
-				if err == cmdutil.ErrExit {
+				if err == kcmdutil.ErrExit {
 					os.Exit(1)
 				}
 				kcmdutil.CheckErr(err)
@@ -121,12 +124,11 @@ func (o *AppJSONOptions) Complete(f *clientcmd.Factory, cmd *cobra.Command, args
 		}
 		o.OutputVersions = append(o.OutputVersions, gv)
 	}
-	o.OutputVersions = append(o.OutputVersions, kapi.Registry.EnabledVersions()...)
+	o.OutputVersions = append(o.OutputVersions, legacyscheme.Registry.EnabledVersions()...)
 
 	o.Action.Bulk.Mapper = clientcmd.ResourceMapper(f)
 	o.Action.Bulk.Op = configcmd.Create
-	mapper, _ := f.Object()
-	o.PrintObject = cmdutil.VersionedPrintObject(f.PrintObject, cmd, mapper, o.Action.Out)
+	o.PrintObject = print.VersionedPrintObject(legacyscheme.Scheme, legacyscheme.Registry, kcmdutil.PrintObject, cmd, o.Action.Out)
 
 	o.Generator, _ = cmd.Flags().GetString("generator")
 
@@ -136,8 +138,17 @@ func (o *AppJSONOptions) Complete(f *clientcmd.Factory, cmd *cobra.Command, args
 	}
 	o.Namespace = ns
 
-	o.Client, _, err = f.Clients()
-	return err
+	clientConfig, err := f.ClientConfig()
+	if err != nil {
+		return err
+	}
+	templateClient, err := templateclientinternal.NewForConfig(clientConfig)
+	if err != nil {
+		return err
+	}
+	o.Client = templateClient.Template()
+
+	return nil
 }
 
 func (o *AppJSONOptions) Validate() error {
@@ -182,7 +193,7 @@ func (o *AppJSONOptions) Run() error {
 	template.ObjectLabels = map[string]string{"app.json": template.Name}
 
 	// all the types generated into the template should be known
-	if errs := app.AsVersionedObjects(template.Objects, kapi.Scheme, kapi.Scheme, o.OutputVersions...); len(errs) > 0 {
+	if errs := app.AsVersionedObjects(template.Objects, legacyscheme.Scheme, legacyscheme.Scheme, o.OutputVersions...); len(errs) > 0 {
 		for _, err := range errs {
 			fmt.Fprintf(o.Action.ErrOut, "error: %v\n", err)
 		}
@@ -199,7 +210,8 @@ func (o *AppJSONOptions) Run() error {
 		return o.PrintObject(out)
 	}
 
-	result, err := appcmd.TransformTemplate(template, o.Client, o.Namespace, nil, false)
+	templateProcessor := templateinternalclient.NewTemplateProcessorClient(o.Client.RESTClient(), o.Namespace)
+	result, err := appcmd.TransformTemplate(template, templateProcessor, o.Namespace, nil, false)
 	if err != nil {
 		return err
 	}
@@ -209,7 +221,7 @@ func (o *AppJSONOptions) Run() error {
 	}
 
 	if errs := o.Action.WithMessage("Importing app.json", "creating").Run(&kapi.List{Items: result.Objects}, o.Namespace); len(errs) > 0 {
-		return cmdutil.ErrExit
+		return kcmdutil.ErrExit
 	}
 	return nil
 }

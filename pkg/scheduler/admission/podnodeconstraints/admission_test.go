@@ -9,25 +9,26 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apiserver/pkg/admission"
+	"k8s.io/apiserver/pkg/admission/initializer"
 	"k8s.io/apiserver/pkg/authentication/user"
 	"k8s.io/apiserver/pkg/authorization/authorizer"
-	kapi "k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/apis/batch"
+	kapi "k8s.io/kubernetes/pkg/apis/core"
 	"k8s.io/kubernetes/pkg/apis/extensions"
+	"k8s.io/kubernetes/pkg/auth/nodeidentifier"
 	"k8s.io/kubernetes/pkg/serviceaccount"
 
 	_ "github.com/openshift/origin/pkg/api/install"
+	appsapi "github.com/openshift/origin/pkg/apps/apis/apps"
 	authorizationapi "github.com/openshift/origin/pkg/authorization/apis/authorization"
-	oadmission "github.com/openshift/origin/pkg/cmd/server/admission"
-	deployapi "github.com/openshift/origin/pkg/deploy/apis/apps"
-	"github.com/openshift/origin/pkg/scheduler/admission/podnodeconstraints/api"
+	"github.com/openshift/origin/pkg/scheduler/admission/apis/podnodeconstraints"
 	securityapi "github.com/openshift/origin/pkg/security/apis/security"
 )
 
 func TestPodNodeConstraints(t *testing.T) {
 	ns := metav1.NamespaceDefault
 	tests := []struct {
-		config           *api.PodNodeConstraintsConfig
+		config           *podnodeconstraints.PodNodeConstraintsConfig
 		resource         runtime.Object
 		kind             schema.GroupKind
 		groupresource    schema.GroupResource
@@ -99,13 +100,41 @@ func TestPodNodeConstraints(t *testing.T) {
 			expectedResource: "pods/binding",
 			expectedErrorMsg: "",
 		},
+		// 7: expect nodeName to succeed with node user self targeting mirror pod
+		{
+			config:           testConfig(),
+			resource:         nodeNameMirrorPod(),
+			userinfo:         &user.DefaultInfo{Name: "system:node:frank", Groups: []string{user.NodesGroup}},
+			expectedErrorMsg: "",
+		},
+		// 8: expect nodeName to fail with node user self targeting non-mirror pod
+		{
+			config:           testConfig(),
+			resource:         nodeNamePod(),
+			userinfo:         &user.DefaultInfo{Name: "system:node:frank", Groups: []string{user.NodesGroup}},
+			expectedErrorMsg: "node selection by nodeName is prohibited by policy for your role",
+		},
+		// 9: expect nodeName to fail with node user non-self targeting mirror pod
+		{
+			config:           testConfig(),
+			resource:         nodeNameMirrorPod(),
+			userinfo:         &user.DefaultInfo{Name: "system:node:bob", Groups: []string{user.NodesGroup}},
+			expectedErrorMsg: "node selection by nodeName is prohibited by policy for your role",
+		},
+		// 10: expect nodeName to fail with node user non-self targeting non-mirror pod
+		{
+			config:           testConfig(),
+			resource:         nodeNamePod(),
+			userinfo:         &user.DefaultInfo{Name: "system:node:bob", Groups: []string{user.NodesGroup}},
+			expectedErrorMsg: "node selection by nodeName is prohibited by policy for your role",
+		},
 	}
 	for i, tc := range tests {
 		var expectedError error
 		errPrefix := fmt.Sprintf("%d", i)
-		prc := NewPodNodeConstraints(tc.config)
-		prc.(oadmission.WantsAuthorizer).SetAuthorizer(fakeAuthorizer(t))
-		err := prc.(admission.Validator).Validate()
+		prc := NewPodNodeConstraints(tc.config, nodeidentifier.NewDefaultNodeIdentifier())
+		prc.(initializer.WantsAuthorizer).SetAuthorizer(fakeAuthorizer(t))
+		err := prc.(admission.InitializationValidator).ValidateInitialization()
 		if err != nil {
 			checkAdmitError(t, err, expectedError, errPrefix)
 			continue
@@ -114,7 +143,7 @@ func TestPodNodeConstraints(t *testing.T) {
 		if tc.expectedErrorMsg != "" {
 			expectedError = admission.NewForbidden(attrs, fmt.Errorf(tc.expectedErrorMsg))
 		}
-		err = prc.Admit(attrs)
+		err = prc.(admission.MutationInterface).Admit(attrs)
 		checkAdmitError(t, err, expectedError, errPrefix)
 	}
 }
@@ -123,15 +152,15 @@ func TestPodNodeConstraintsPodUpdate(t *testing.T) {
 	ns := metav1.NamespaceDefault
 	var expectedError error
 	errPrefix := "PodUpdate"
-	prc := NewPodNodeConstraints(testConfig())
-	prc.(oadmission.WantsAuthorizer).SetAuthorizer(fakeAuthorizer(t))
-	err := prc.(admission.Validator).Validate()
+	prc := NewPodNodeConstraints(testConfig(), nodeidentifier.NewDefaultNodeIdentifier())
+	prc.(initializer.WantsAuthorizer).SetAuthorizer(fakeAuthorizer(t))
+	err := prc.(admission.InitializationValidator).ValidateInitialization()
 	if err != nil {
 		checkAdmitError(t, err, expectedError, errPrefix)
 		return
 	}
 	attrs := admission.NewAttributesRecord(nodeNamePod(), nodeNamePod(), kapi.Kind("Pod").WithVersion("version"), ns, "test", kapi.Resource("pods").WithVersion("version"), "", admission.Update, serviceaccount.UserInfo("", "", ""))
-	err = prc.Admit(attrs)
+	err = prc.(admission.MutationInterface).Admit(attrs)
 	checkAdmitError(t, err, expectedError, errPrefix)
 }
 
@@ -139,22 +168,22 @@ func TestPodNodeConstraintsNonHandledResources(t *testing.T) {
 	ns := metav1.NamespaceDefault
 	errPrefix := "ResourceQuotaTest"
 	var expectedError error
-	prc := NewPodNodeConstraints(testConfig())
-	prc.(oadmission.WantsAuthorizer).SetAuthorizer(fakeAuthorizer(t))
-	err := prc.(admission.Validator).Validate()
+	prc := NewPodNodeConstraints(testConfig(), nodeidentifier.NewDefaultNodeIdentifier())
+	prc.(initializer.WantsAuthorizer).SetAuthorizer(fakeAuthorizer(t))
+	err := prc.(admission.InitializationValidator).ValidateInitialization()
 	if err != nil {
 		checkAdmitError(t, err, expectedError, errPrefix)
 		return
 	}
 	attrs := admission.NewAttributesRecord(resourceQuota(), nil, kapi.Kind("ResourceQuota").WithVersion("version"), ns, "test", kapi.Resource("resourcequotas").WithVersion("version"), "", admission.Create, serviceaccount.UserInfo("", "", ""))
-	err = prc.Admit(attrs)
+	err = prc.(admission.MutationInterface).Admit(attrs)
 	checkAdmitError(t, err, expectedError, errPrefix)
 }
 
 func TestPodNodeConstraintsResources(t *testing.T) {
 	ns := metav1.NamespaceDefault
 	testconfigs := []struct {
-		config         *api.PodNodeConstraintsConfig
+		config         *podnodeconstraints.PodNodeConstraintsConfig
 		userinfo       user.Info
 		reviewResponse *authorizationapi.SubjectAccessReviewResponse
 	}{
@@ -196,14 +225,14 @@ func TestPodNodeConstraintsResources(t *testing.T) {
 		},
 		{
 			resource:      deploymentConfig,
-			kind:          deployapi.Kind("DeploymentConfig"),
-			groupresource: deployapi.Resource("deploymentconfigs"),
+			kind:          appsapi.Kind("DeploymentConfig"),
+			groupresource: appsapi.Resource("deploymentconfigs"),
 			prefix:        "DeploymentConfig",
 		},
 		{
 			resource:      podTemplate,
-			kind:          deployapi.LegacyKind("PodTemplate"),
-			groupresource: deployapi.LegacyResource("podtemplates"),
+			kind:          kapi.Kind("PodTemplate"),
+			groupresource: kapi.Resource("podtemplates"),
 			prefix:        "PodTemplate",
 		},
 		{
@@ -257,9 +286,9 @@ func TestPodNodeConstraintsResources(t *testing.T) {
 				for _, top := range testops {
 					var expectedError error
 					errPrefix := fmt.Sprintf("%s; %s; %s", tr.prefix, tp.prefix, top.operation)
-					prc := NewPodNodeConstraints(tc.config)
-					prc.(oadmission.WantsAuthorizer).SetAuthorizer(fakeAuthorizer(t))
-					err := prc.(admission.Validator).Validate()
+					prc := NewPodNodeConstraints(tc.config, nodeidentifier.NewDefaultNodeIdentifier())
+					prc.(initializer.WantsAuthorizer).SetAuthorizer(fakeAuthorizer(t))
+					err := prc.(admission.InitializationValidator).ValidateInitialization()
 					if err != nil {
 						checkAdmitError(t, err, expectedError, errPrefix)
 						continue
@@ -268,7 +297,7 @@ func TestPodNodeConstraintsResources(t *testing.T) {
 					if tp.expectedErrorMsg != "" {
 						expectedError = admission.NewForbidden(attrs, fmt.Errorf(tp.expectedErrorMsg))
 					}
-					err = prc.Admit(attrs)
+					err = prc.(admission.MutationInterface).Admit(attrs)
 					checkAdmitError(t, err, expectedError, errPrefix)
 				}
 			}
@@ -276,12 +305,12 @@ func TestPodNodeConstraintsResources(t *testing.T) {
 	}
 }
 
-func emptyConfig() *api.PodNodeConstraintsConfig {
-	return &api.PodNodeConstraintsConfig{}
+func emptyConfig() *podnodeconstraints.PodNodeConstraintsConfig {
+	return &podnodeconstraints.PodNodeConstraintsConfig{}
 }
 
-func testConfig() *api.PodNodeConstraintsConfig {
-	return &api.PodNodeConstraintsConfig{
+func testConfig() *podnodeconstraints.PodNodeConstraintsConfig {
+	return &podnodeconstraints.PodNodeConstraintsConfig{
 		NodeSelectorLabelBlacklist: []string{"bogus"},
 	}
 }
@@ -308,6 +337,13 @@ func nodeNameNodeSelectorPod() *kapi.Pod {
 
 func nodeNamePod() *kapi.Pod {
 	pod := &kapi.Pod{}
+	pod.Spec.NodeName = "frank"
+	return pod
+}
+
+func nodeNameMirrorPod() *kapi.Pod {
+	pod := &kapi.Pod{}
+	pod.Annotations = map[string]string{kapi.MirrorPodAnnotationKey: "true"}
 	pod.Spec.NodeName = "frank"
 	return pod
 }
@@ -376,7 +412,7 @@ func resourceQuota() runtime.Object {
 }
 
 func deploymentConfig(setNodeSelector bool) runtime.Object {
-	dc := &deployapi.DeploymentConfig{}
+	dc := &appsapi.DeploymentConfig{}
 	dc.Spec.Template = podTemplateSpec(setNodeSelector)
 	return dc
 }
@@ -422,17 +458,17 @@ func fakeAuthorizer(t *testing.T) authorizer.Authorizer {
 	}
 }
 
-func (a *fakeTestAuthorizer) Authorize(attributes authorizer.Attributes) (bool, string, error) {
+func (a *fakeTestAuthorizer) Authorize(attributes authorizer.Attributes) (authorizer.Decision, string, error) {
 	ui := attributes.GetUser()
 	if ui == nil {
-		return false, "", fmt.Errorf("No valid UserInfo for Context")
+		return authorizer.DecisionNoOpinion, "", fmt.Errorf("No valid UserInfo for Context")
 	}
 	// User with pods/bindings. permission:
 	if ui.GetName() == "system:serviceaccount:openshift-infra:daemonset-controller" {
-		return true, "", nil
+		return authorizer.DecisionAllow, "", nil
 	}
 	// User without pods/bindings. permission:
-	return false, "", nil
+	return authorizer.DecisionNoOpinion, "", nil
 }
 
 func reviewResponse(allowed bool, msg string) *authorizationapi.SubjectAccessReviewResponse {

@@ -3,9 +3,9 @@ package strategy
 import (
 	"fmt"
 
+	"k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/kubernetes/pkg/api/v1"
 
 	buildapi "github.com/openshift/origin/pkg/build/apis/build"
 	buildutil "github.com/openshift/origin/pkg/build/util"
@@ -36,10 +36,14 @@ func (bs *DockerBuildStrategy) CreateBuildPod(build *buildapi.Build) (*v1.Pod, e
 	}
 
 	addSourceEnvVars(build.Spec.Source, &containerEnv)
-	addOriginVersionVar(&containerEnv)
 
 	if len(strategy.Env) > 0 {
 		buildutil.MergeTrustedEnvWithoutDuplicates(buildutil.CopyApiEnvVarToV1EnvVar(strategy.Env), &containerEnv, true)
+	}
+
+	serviceAccount := build.Spec.ServiceAccount
+	if len(serviceAccount) == 0 {
+		serviceAccount = buildutil.BuilderServiceAccountName
 	}
 
 	pod := &v1.Pod{
@@ -49,13 +53,13 @@ func (bs *DockerBuildStrategy) CreateBuildPod(build *buildapi.Build) (*v1.Pod, e
 			Labels:    getPodLabels(build),
 		},
 		Spec: v1.PodSpec{
-			ServiceAccountName: build.Spec.ServiceAccount,
+			ServiceAccountName: serviceAccount,
 			Containers: []v1.Container{
 				{
-					Name:    "docker-build",
+					Name:    DockerBuild,
 					Image:   bs.Image,
 					Command: []string{"openshift-docker-build"},
-					Env:     containerEnv,
+					Env:     copyEnvVarSlice(containerEnv),
 					// TODO: run unprivileged https://github.com/openshift/origin/issues/662
 					SecurityContext: &v1.SecurityContext{
 						Privileged: &privileged,
@@ -92,7 +96,7 @@ func (bs *DockerBuildStrategy) CreateBuildPod(build *buildapi.Build) (*v1.Pod, e
 			Name:    GitCloneContainer,
 			Image:   bs.Image,
 			Command: []string{"openshift-git-clone"},
-			Env:     containerEnv,
+			Env:     copyEnvVarSlice(containerEnv),
 			TerminationMessagePolicy: v1.TerminationMessageFallbackToLogsOnError,
 			VolumeMounts: []v1.VolumeMount{
 				{
@@ -115,7 +119,7 @@ func (bs *DockerBuildStrategy) CreateBuildPod(build *buildapi.Build) (*v1.Pod, e
 			Name:    ExtractImageContentContainer,
 			Image:   bs.Image,
 			Command: []string{"openshift-extract-image-content"},
-			Env:     containerEnv,
+			Env:     copyEnvVarSlice(containerEnv),
 			// TODO: run unprivileged https://github.com/openshift/origin/issues/662
 			SecurityContext: &v1.SecurityContext{
 				Privileged: &privileged,
@@ -130,6 +134,7 @@ func (bs *DockerBuildStrategy) CreateBuildPod(build *buildapi.Build) (*v1.Pod, e
 			ImagePullPolicy: v1.PullIfNotPresent,
 			Resources:       buildutil.CopyApiResourcesToV1Resources(&build.Spec.Resources),
 		}
+		setupDockerSecrets(pod, &extractImageContentContainer, build.Spec.Output.PushSecret, strategy.PullSecret, build.Spec.Source.Images)
 		pod.Spec.InitContainers = append(pod.Spec.InitContainers, extractImageContentContainer)
 	}
 	pod.Spec.InitContainers = append(pod.Spec.InitContainers,
@@ -137,7 +142,7 @@ func (bs *DockerBuildStrategy) CreateBuildPod(build *buildapi.Build) (*v1.Pod, e
 			Name:    "manage-dockerfile",
 			Image:   bs.Image,
 			Command: []string{"openshift-manage-dockerfile"},
-			Env:     containerEnv,
+			Env:     copyEnvVarSlice(containerEnv),
 			TerminationMessagePolicy: v1.TerminationMessageFallbackToLogsOnError,
 			VolumeMounts: []v1.VolumeMount{
 				{
@@ -156,8 +161,12 @@ func (bs *DockerBuildStrategy) CreateBuildPod(build *buildapi.Build) (*v1.Pod, e
 
 	setOwnerReference(pod, build)
 	setupDockerSocket(pod)
+	setupCrioSocket(pod)
 	setupDockerSecrets(pod, &pod.Spec.Containers[0], build.Spec.Output.PushSecret, strategy.PullSecret, build.Spec.Source.Images)
-	setupSecrets(pod, &pod.Spec.Containers[0], build.Spec.Source.Secrets)
-
+	// For any secrets the user wants to reference from their Assemble script or Dockerfile, mount those
+	// secrets into the main container.  The main container includes logic to copy them from the mounted
+	// location into the working directory.
+	// TODO: consider moving this into the git-clone container and doing the secret copying there instead.
+	setupInputSecrets(pod, &pod.Spec.Containers[0], build.Spec.Source.Secrets)
 	return pod, nil
 }

@@ -1,5 +1,4 @@
 reviewers:
-  - kargakis
   - stevekuznetsov
   - smarterclayton
   - miminar
@@ -10,14 +9,21 @@ reviewers:
   - sosiouxme
   - bparees
   - knobunc
+  - ironcladlou
+  - squeed
   - dcbw
   - danwinship
+  - dmage
 approvers:
-  - kargakis
   - stevekuznetsov
   - smarterclayton
   - soltysh
   - liggitt
   - knobunc
+  - ironcladlou
+  - squeed
   - dcbw
   - danwinship
+  - legionus
+  - miminar
+  - dmage

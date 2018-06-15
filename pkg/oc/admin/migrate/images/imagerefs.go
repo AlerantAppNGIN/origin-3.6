@@ -9,19 +9,21 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	kapi "k8s.io/kubernetes/pkg/api"
+	kapi "k8s.io/kubernetes/pkg/apis/core"
 	"k8s.io/kubernetes/pkg/credentialprovider"
 	"k8s.io/kubernetes/pkg/kubectl/cmd/templates"
 	kcmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
 	"k8s.io/kubernetes/pkg/kubectl/resource"
 
 	buildapi "github.com/openshift/origin/pkg/build/apis/build"
-	"github.com/openshift/origin/pkg/client"
 	"github.com/openshift/origin/pkg/oc/admin/migrate"
 
-	"github.com/openshift/origin/pkg/cmd/util/clientcmd"
 	imageapi "github.com/openshift/origin/pkg/image/apis/image"
+	imageclientinternal "github.com/openshift/origin/pkg/image/generated/internalclientset"
+	imagetypedclient "github.com/openshift/origin/pkg/image/generated/internalclientset/typed/image/internalversion"
+	"github.com/openshift/origin/pkg/oc/cli/util/clientcmd"
 )
 
 var (
@@ -73,16 +75,15 @@ var (
 type MigrateImageReferenceOptions struct {
 	migrate.ResourceOptions
 
-	Client          client.Interface
+	Client          imagetypedclient.ImageStreamsGetter
 	Mappings        ImageReferenceMappings
-	UpdatePodSpecFn func(obj runtime.Object, fn func(*kapi.PodSpec) error) (bool, error)
+	UpdatePodSpecFn func(obj runtime.Object, fn func(*v1.PodSpec) error) (bool, error)
 }
 
 // NewCmdMigrateImageReferences implements a MigrateImages command
 func NewCmdMigrateImageReferences(name, fullName string, f *clientcmd.Factory, in io.Reader, out, errout io.Writer) *cobra.Command {
 	options := &MigrateImageReferenceOptions{
 		ResourceOptions: migrate.ResourceOptions{
-			In:      in,
 			Out:     out,
 			ErrOut:  errout,
 			Include: []string{"imagestream", "image", "secrets"},
@@ -99,6 +100,7 @@ func NewCmdMigrateImageReferences(name, fullName string, f *clientcmd.Factory, i
 			kcmdutil.CheckErr(options.Run())
 		},
 	}
+
 	options.ResourceOptions.Bind(cmd)
 
 	return cmd
@@ -129,11 +131,15 @@ func (o *MigrateImageReferenceOptions) Complete(f *clientcmd.Factory, c *cobra.C
 		return err
 	}
 
-	osclient, _, err := f.Clients()
+	clientConfig, err := f.ClientConfig()
 	if err != nil {
 		return err
 	}
-	o.Client = osclient
+	imageClient, err := imageclientinternal.NewForConfig(clientConfig)
+	if err != nil {
+		return err
+	}
+	o.Client = imageClient.Image()
 
 	return nil
 }
@@ -258,7 +264,7 @@ func (o *MigrateImageReferenceOptions) transform(obj runtime.Object) (migrate.Re
 		if c := t.Spec.Strategy.CustomStrategy; c != nil && c.From.Kind == "DockerImage" {
 			changed = updateString(&c.From.Name, fn) || changed
 		}
-		if c := t.Spec.Strategy.DockerStrategy; c != nil && c.From.Kind == "DockerImage" {
+		if c := t.Spec.Strategy.DockerStrategy; c != nil && c.From != nil && c.From.Kind == "DockerImage" {
 			changed = updateString(&c.From.Name, fn) || changed
 		}
 		if c := t.Spec.Strategy.SourceStrategy; c != nil && c.From.Kind == "DockerImage" {
@@ -268,10 +274,10 @@ func (o *MigrateImageReferenceOptions) transform(obj runtime.Object) (migrate.Re
 	default:
 		if o.UpdatePodSpecFn != nil {
 			var changed bool
-			supports, err := o.UpdatePodSpecFn(obj, func(spec *kapi.PodSpec) error {
+			supports, err := o.UpdatePodSpecFn(obj, clientcmd.ConvertInteralPodSpecToExternal(func(spec *kapi.PodSpec) error {
 				changed = updatePodSpec(spec, fn)
 				return nil
-			})
+			}))
 			if !supports {
 				return nil, nil
 			}

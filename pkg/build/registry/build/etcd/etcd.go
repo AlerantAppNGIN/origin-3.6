@@ -6,10 +6,13 @@ import (
 	"k8s.io/apiserver/pkg/registry/generic"
 	"k8s.io/apiserver/pkg/registry/generic/registry"
 	"k8s.io/apiserver/pkg/registry/rest"
-	kapi "k8s.io/kubernetes/pkg/api"
+	"k8s.io/apiserver/pkg/storage"
+	"k8s.io/kubernetes/pkg/printers"
+	printerstorage "k8s.io/kubernetes/pkg/printers/storage"
 
 	buildapi "github.com/openshift/origin/pkg/build/apis/build"
 	"github.com/openshift/origin/pkg/build/registry/build"
+	printersinternal "github.com/openshift/origin/pkg/printers/internalversion"
 	"github.com/openshift/origin/pkg/util/restoptions"
 )
 
@@ -18,22 +21,31 @@ type REST struct {
 }
 
 var _ rest.StandardStorage = &REST{}
+var _ rest.CategoriesProvider = &REST{}
+
+// Categories implements the CategoriesProvider interface. Returns a list of categories a resource is part of.
+func (r *REST) Categories() []string {
+	return []string{"all"}
+}
 
 // NewREST returns a RESTStorage object that will work against Build objects.
 func NewREST(optsGetter restoptions.Getter) (*REST, *DetailsREST, error) {
 	store := &registry.Store{
-		Copier:                   kapi.Scheme,
 		NewFunc:                  func() runtime.Object { return &buildapi.Build{} },
 		NewListFunc:              func() runtime.Object { return &buildapi.BuildList{} },
-		PredicateFunc:            build.Matcher,
 		DefaultQualifiedResource: buildapi.Resource("builds"),
+
+		TableConvertor: printerstorage.TableConvertor{TablePrinter: printers.NewTablePrinter().With(printersinternal.AddHandlers)},
 
 		CreateStrategy: build.Strategy,
 		UpdateStrategy: build.Strategy,
 		DeleteStrategy: build.Strategy,
 	}
 
-	options := &generic.StoreOptions{RESTOptions: optsGetter, AttrFunc: build.GetAttrs}
+	options := &generic.StoreOptions{
+		RESTOptions: optsGetter,
+		AttrFunc:    storage.AttrFunc(storage.DefaultNamespaceScopedAttr).WithFieldMutation(buildapi.BuildFieldSelector),
+	}
 	if err := store.CompleteWithOptions(options); err != nil {
 		return nil, nil, err
 	}
@@ -56,6 +68,15 @@ func (r *DetailsREST) New() runtime.Object {
 }
 
 // Update finds a resource in the storage and updates it.
-func (r *DetailsREST) Update(ctx apirequest.Context, name string, objInfo rest.UpdatedObjectInfo) (runtime.Object, bool, error) {
-	return r.store.Update(ctx, name, objInfo)
+func (r *DetailsREST) Update(ctx apirequest.Context, name string, objInfo rest.UpdatedObjectInfo, createValidation rest.ValidateObjectFunc, updateValidation rest.ValidateObjectUpdateFunc) (runtime.Object, bool, error) {
+	return r.store.Update(ctx, name, objInfo, createValidation, updateValidation)
+}
+
+// LegacyREST allows us to wrap and alter some behavior
+type LegacyREST struct {
+	*REST
+}
+
+func (r *LegacyREST) Categories() []string {
+	return []string{}
 }

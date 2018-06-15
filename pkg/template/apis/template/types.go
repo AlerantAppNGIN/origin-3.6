@@ -3,10 +3,11 @@ package template
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	kapi "k8s.io/kubernetes/pkg/api"
+	kapi "k8s.io/kubernetes/pkg/apis/core"
 )
 
 // +genclient
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 
 // Template contains the inputs needed to produce a Config.
 type Template struct {
@@ -37,6 +38,8 @@ type Template struct {
 	// object during the Template to Config transformation.
 	ObjectLabels map[string]string
 }
+
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 
 // TemplateList is a list of Template objects.
 type TemplateList struct {
@@ -77,6 +80,7 @@ type Parameter struct {
 }
 
 // +genclient
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 
 // TemplateInstance requests and records the instantiation of a Template.
 // TemplateInstance is part of an experimental API.
@@ -108,9 +112,23 @@ type TemplateInstanceSpec struct {
 // TemplateInstanceRequester holds the identity of an agent requesting a
 // template instantiation.
 type TemplateInstanceRequester struct {
-	// Username is the username of the agent requesting a template instantiation.
+	// username uniquely identifies this user among all active users.
 	Username string
+
+	// uid is a unique value that identifies this user across time; if this user is
+	// deleted and another user by the same name is added, they will have
+	// different UIDs.
+	UID string
+
+	// groups represent the groups this user is a part of.
+	Groups []string
+
+	// extra holds additional information provided by the authenticator.
+	Extra map[string]ExtraValue
 }
+
+// ExtraValue masks the value so protobuf can generate
+type ExtraValue []string
 
 // TemplateInstanceStatus describes the current state of a TemplateInstance.
 type TemplateInstanceStatus struct {
@@ -159,6 +177,8 @@ type TemplateInstanceObject struct {
 	Ref kapi.ObjectReference
 }
 
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+
 // TemplateInstanceList is a list of TemplateInstance objects.
 type TemplateInstanceList struct {
 	metav1.TypeMeta
@@ -170,6 +190,7 @@ type TemplateInstanceList struct {
 
 // +genclient
 // +genclient:nonNamespaced
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 
 // BrokerTemplateInstance holds the service broker-related state associated with
 // a TemplateInstance.  BrokerTemplateInstance is part of an experimental API.
@@ -195,6 +216,8 @@ type BrokerTemplateInstanceSpec struct {
 	// calls to the template service broker.
 	BindingIDs []string
 }
+
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 
 // BrokerTemplateInstanceList is a list of BrokerTemplateInstance objects.
 type BrokerTemplateInstanceList struct {

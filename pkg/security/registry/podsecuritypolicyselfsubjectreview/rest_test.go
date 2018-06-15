@@ -6,9 +6,11 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apiserver/pkg/authentication/user"
+	"k8s.io/apiserver/pkg/authorization/authorizer"
 	apirequest "k8s.io/apiserver/pkg/endpoints/request"
+	"k8s.io/apiserver/pkg/registry/rest"
 	"k8s.io/client-go/tools/cache"
-	kapi "k8s.io/kubernetes/pkg/api"
+	kapi "k8s.io/kubernetes/pkg/apis/core"
 	clientsetfake "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset/fake"
 
 	admissionttesting "github.com/openshift/origin/pkg/security/admission/testing"
@@ -18,34 +20,6 @@ import (
 
 	_ "github.com/openshift/origin/pkg/api/install"
 )
-
-func validPodTemplateSpec() kapi.PodTemplateSpec {
-	activeDeadlineSeconds := int64(1)
-	return kapi.PodTemplateSpec{
-		Spec: kapi.PodSpec{
-			Volumes: []kapi.Volume{
-				{Name: "vol", VolumeSource: kapi.VolumeSource{EmptyDir: &kapi.EmptyDirVolumeSource{}}},
-			},
-			Containers: []kapi.Container{
-				{
-					Name:                     "ctr",
-					Image:                    "image",
-					ImagePullPolicy:          "IfNotPresent",
-					TerminationMessagePolicy: kapi.TerminationMessageReadFile,
-				},
-			},
-			RestartPolicy: kapi.RestartPolicyAlways,
-			NodeSelector: map[string]string{
-				"key": "value",
-			},
-			NodeName:              "foobar",
-			DNSPolicy:             kapi.DNSClusterFirst,
-			ActiveDeadlineSeconds: &activeDeadlineSeconds,
-			ServiceAccountName:    "acct",
-			SchedulerName:         kapi.DefaultSchedulerName,
-		},
-	}
-}
 
 func TestPodSecurityPolicySelfSubjectReview(t *testing.T) {
 	testcases := map[string]struct {
@@ -106,9 +80,9 @@ func TestPodSecurityPolicySelfSubjectReview(t *testing.T) {
 		}
 
 		csf := clientsetfake.NewSimpleClientset(namespace, serviceAccount)
-		storage := REST{oscc.NewDefaultSCCMatcher(sccCache), csf}
+		storage := REST{oscc.NewDefaultSCCMatcher(sccCache, &noopTestAuthorizer{}), csf}
 		ctx := apirequest.WithUser(apirequest.WithNamespace(apirequest.NewContext(), metav1.NamespaceAll), &user.DefaultInfo{Name: "foo", Groups: []string{"bar", "baz"}})
-		obj, err := storage.Create(ctx, reviewRequest, false)
+		obj, err := storage.Create(ctx, reviewRequest, rest.ValidateAllObjectFunc, false)
 		if err != nil {
 			t.Errorf("%s - Unexpected error", testName)
 		}
@@ -121,4 +95,10 @@ func TestPodSecurityPolicySelfSubjectReview(t *testing.T) {
 			t.Errorf("%s - %s", testName, message)
 		}
 	}
+}
+
+type noopTestAuthorizer struct{}
+
+func (s *noopTestAuthorizer) Authorize(a authorizer.Attributes) (authorizer.Decision, string, error) {
+	return authorizer.DecisionNoOpinion, "", nil
 }

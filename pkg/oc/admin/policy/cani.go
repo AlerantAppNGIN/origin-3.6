@@ -18,8 +18,9 @@ import (
 	"k8s.io/kubernetes/pkg/printers"
 
 	authorizationapi "github.com/openshift/origin/pkg/authorization/apis/authorization"
-	"github.com/openshift/origin/pkg/client"
-	"github.com/openshift/origin/pkg/cmd/util/clientcmd"
+	authorizationclientinternal "github.com/openshift/origin/pkg/authorization/generated/internalclientset"
+	oauthorizationtypedclient "github.com/openshift/origin/pkg/authorization/generated/internalclientset/typed/authorization/internalversion"
+	"github.com/openshift/origin/pkg/oc/cli/util/clientcmd"
 )
 
 const CanIRecommendedName = "can-i"
@@ -33,9 +34,9 @@ type canIOptions struct {
 	Groups                []string
 	Scopes                []string
 	Namespace             string
-	SelfRulesReviewClient client.SelfSubjectRulesReviewsNamespacer
-	RulesReviewClient     client.SubjectRulesReviewsNamespacer
-	SARClient             client.SubjectAccessReviews
+	SelfRulesReviewClient oauthorizationtypedclient.SelfSubjectRulesReviewsGetter
+	RulesReviewClient     oauthorizationtypedclient.SubjectRulesReviewsGetter
+	SARClient             oauthorizationtypedclient.SubjectAccessReviewsGetter
 
 	Printer printers.ResourcePrinter
 
@@ -62,7 +63,7 @@ func NewCmdCanI(name, fullName string, f *clientcmd.Factory, out io.Writer) *cob
 			}
 
 			if err := o.Complete(cmd, f, args); err != nil {
-				kcmdutil.CheckErr(kcmdutil.UsageError(cmd, err.Error()))
+				kcmdutil.CheckErr(kcmdutil.UsageErrorf(cmd, err.Error()))
 			}
 
 			allowed, err := o.Run()
@@ -71,6 +72,7 @@ func NewCmdCanI(name, fullName string, f *clientcmd.Factory, out io.Writer) *cob
 				os.Exit(2)
 			}
 		},
+		Deprecated: "use 'oc auth can-i'",
 	}
 
 	cmd.Flags().BoolVar(&o.AllNamespaces, "all-namespaces", o.AllNamespaces, "If true, check the specified action in all namespaces.")
@@ -119,16 +121,19 @@ func (o *canIOptions) Complete(cmd *cobra.Command, f *clientcmd.Factory, args []
 		}
 	}
 
-	var err error
-	oclient, _, err := f.Clients()
+	clientConfig, err := f.ClientConfig()
 	if err != nil {
 		return err
 	}
-	o.SelfRulesReviewClient = oclient
-	o.RulesReviewClient = oclient
-	o.SARClient = oclient
+	authorizationClient, err := authorizationclientinternal.NewForConfig(clientConfig)
+	if err != nil {
+		return err
+	}
+	o.SelfRulesReviewClient = authorizationClient.Authorization()
+	o.RulesReviewClient = authorizationClient.Authorization()
+	o.SARClient = authorizationClient.Authorization()
 
-	printer, err := f.PrinterForCommand(cmd, false, nil, printers.PrintOptions{})
+	printer, err := kcmdutil.PrinterForOptions(kcmdutil.ExtractCmdPrintOptions(cmd, false))
 	if err != nil {
 		return err
 	}

@@ -20,19 +20,21 @@ import (
 	"fmt"
 	"io"
 
+	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/kubernetes/pkg/apis/certificates"
 	"k8s.io/kubernetes/pkg/kubectl/cmd/templates"
 	cmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
 	"k8s.io/kubernetes/pkg/kubectl/resource"
-	"k8s.io/kubernetes/pkg/util/i18n"
+	"k8s.io/kubernetes/pkg/kubectl/util/i18n"
 
 	"github.com/spf13/cobra"
 )
 
 func NewCmdCertificate(f cmdutil.Factory, out io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "certificate SUBCOMMAND",
+		Use: "certificate SUBCOMMAND",
+		DisableFlagsInUseLine: true,
 		Short: i18n.T("Modify certificate resources."),
 		Long:  "Modify certificate resources.",
 		Run: func(cmd *cobra.Command, args []string) {
@@ -59,7 +61,7 @@ func (options *CertificateOptions) Complete(cmd *cobra.Command, args []string) e
 }
 
 func (options *CertificateOptions) Validate() error {
-	if len(options.csrNames) < 1 && cmdutil.IsFilenameEmpty(options.Filenames) {
+	if len(options.csrNames) < 1 && cmdutil.IsFilenameSliceEmpty(options.Filenames) {
 		return fmt.Errorf("one or more CSRs must be specified as <name> or -f <filename>")
 	}
 	return nil
@@ -68,7 +70,8 @@ func (options *CertificateOptions) Validate() error {
 func NewCmdCertificateApprove(f cmdutil.Factory, out io.Writer) *cobra.Command {
 	options := CertificateOptions{}
 	cmd := &cobra.Command{
-		Use:   "approve (-f FILENAME | NAME)",
+		Use: "approve (-f FILENAME | NAME)",
+		DisableFlagsInUseLine: true,
 		Short: i18n.T("Approve a certificate signing request"),
 		Long: templates.LongDesc(`
 		Approve a certificate signing request.
@@ -118,7 +121,8 @@ func (options *CertificateOptions) RunCertificateApprove(f cmdutil.Factory, out 
 func NewCmdCertificateDeny(f cmdutil.Factory, out io.Writer) *cobra.Command {
 	options := CertificateOptions{}
 	cmd := &cobra.Command{
-		Use:   "deny (-f FILENAME | NAME)",
+		Use: "deny (-f FILENAME | NAME)",
+		DisableFlagsInUseLine: true,
 		Short: i18n.T("Deny a certificate signing request"),
 		Long: templates.LongDesc(`
 		Deny a certificate signing request.
@@ -162,12 +166,12 @@ func (options *CertificateOptions) RunCertificateDeny(f cmdutil.Factory, out io.
 
 func (options *CertificateOptions) modifyCertificateCondition(f cmdutil.Factory, out io.Writer, modify func(csr *certificates.CertificateSigningRequest) (*certificates.CertificateSigningRequest, string)) error {
 	var found int
-	mapper, _ := f.Object()
 	c, err := f.ClientSet()
 	if err != nil {
 		return err
 	}
-	r := f.NewBuilder(true).
+	r := f.NewBuilder().
+		Internal().
 		ContinueOnError().
 		FilenameParam(false, &options.FilenameOptions).
 		ResourceNames("certificatesigningrequest", options.csrNames...).
@@ -179,16 +183,26 @@ func (options *CertificateOptions) modifyCertificateCondition(f cmdutil.Factory,
 		if err != nil {
 			return err
 		}
-		csr := info.Object.(*certificates.CertificateSigningRequest)
-		csr, verb := modify(csr)
-		csr, err = c.Certificates().
-			CertificateSigningRequests().
-			UpdateApproval(csr)
-		if err != nil {
-			return err
+		verb := ""
+		for i := 0; ; i++ {
+			csr := info.Object.(*certificates.CertificateSigningRequest)
+			csr, verb = modify(csr)
+			csr, err = c.Certificates().
+				CertificateSigningRequests().
+				UpdateApproval(csr)
+			if errors.IsConflict(err) && i < 10 {
+				if err := info.Get(); err != nil {
+					return err
+				}
+				continue
+			}
+			if err != nil {
+				return err
+			}
+			break
 		}
 		found++
-		cmdutil.PrintSuccess(mapper, options.outputStyle == "name", out, info.Mapping.Resource, info.Name, false, verb)
+		cmdutil.PrintSuccess(options.outputStyle == "name", out, info.Object, false, verb)
 		return nil
 	})
 	if found == 0 {

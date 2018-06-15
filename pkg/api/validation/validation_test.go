@@ -11,10 +11,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	ktypes "k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation/field"
-	kapi "k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/api/validation"
-
-	authorizationapi "github.com/openshift/origin/pkg/authorization/apis/authorization"
+	kapi "k8s.io/kubernetes/pkg/apis/core"
+	"k8s.io/kubernetes/pkg/apis/core/validation"
 )
 
 // Ensures that `nil` can be passed to validation functions validating top-level objects
@@ -172,10 +170,6 @@ func getValidName(apiType reflect.Type) string {
 	obj := apiValue.Interface().(runtime.Object)
 
 	switch obj.(type) {
-	case *authorizationapi.ClusterPolicyBinding, *authorizationapi.PolicyBinding:
-		return ":default"
-	case *authorizationapi.ClusterPolicy, *authorizationapi.Policy:
-		return "default"
 	default:
 		return "any-string"
 	}

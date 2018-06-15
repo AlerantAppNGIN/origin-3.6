@@ -19,22 +19,22 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/validation"
-	kapi "k8s.io/kubernetes/pkg/api"
-	kclientset "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset"
+	"k8s.io/kubernetes/pkg/api/legacyscheme"
+	kapi "k8s.io/kubernetes/pkg/apis/core"
 	"k8s.io/kubernetes/pkg/kubectl/cmd/templates"
 	kcmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
 	"k8s.io/kubernetes/pkg/serviceaccount"
 
+	appsapi "github.com/openshift/origin/pkg/apps/apis/apps"
 	authapi "github.com/openshift/origin/pkg/authorization/apis/authorization"
+	configcmd "github.com/openshift/origin/pkg/bulk"
 	"github.com/openshift/origin/pkg/cmd/server/bootstrappolicy"
 	cmdutil "github.com/openshift/origin/pkg/cmd/util"
-	"github.com/openshift/origin/pkg/cmd/util/clientcmd"
-
+	"github.com/openshift/origin/pkg/cmd/util/print"
 	"github.com/openshift/origin/pkg/cmd/util/variable"
-	configcmd "github.com/openshift/origin/pkg/config/cmd"
-	deployapi "github.com/openshift/origin/pkg/deploy/apis/apps"
-	"github.com/openshift/origin/pkg/generate/app"
-	"github.com/openshift/origin/pkg/security/legacyclient"
+	"github.com/openshift/origin/pkg/oc/cli/util/clientcmd"
+	"github.com/openshift/origin/pkg/oc/generate/app"
+	securityclientinternal "github.com/openshift/origin/pkg/security/generated/internalclientset"
 	oscc "github.com/openshift/origin/pkg/security/securitycontextconstraints"
 	fileutil "github.com/openshift/origin/pkg/util/file"
 )
@@ -221,19 +221,14 @@ type RouterConfig struct {
 	// connections.
 	MaxConnections string
 
-	// ExposeMetrics is a hint on whether to expose metrics.
-	ExposeMetrics bool
-
-	// MetricsImage is the image to run a sidecar container with in the router
-	// pod.
-	MetricsImage string
-
 	// Ciphers is the set of ciphers to use with bind
 	// modern | intermediate | old | set of cihers
 	Ciphers string
 
 	// Strict SNI (do not use default cert)
 	StrictSNI bool
+
+	Local bool
 }
 
 const (
@@ -242,9 +237,8 @@ const (
 	// Default port numbers to expose and bind/listen on.
 	defaultPorts = "80:80,443:443"
 
-	// Default stats and healthz port.
-	defaultStatsPort   = 1936
-	defaultHealthzPort = defaultStatsPort
+	// Default stats port.
+	defaultStatsPort = 1936
 )
 
 // NewCmdRouter implements the OpenShift CLI router command.
@@ -272,7 +266,7 @@ func NewCmdRouter(f *clientcmd.Factory, parentName, name string, out, errout io.
 		Example: fmt.Sprintf(routerExample, parentName, name),
 		Run: func(cmd *cobra.Command, args []string) {
 			err := RunCmdRouter(f, cmd, out, errout, cfg, args)
-			if err != cmdutil.ErrExit {
+			if err != kcmdutil.ErrExit {
 				kcmdutil.CheckErr(err)
 			} else {
 				os.Exit(1)
@@ -297,8 +291,6 @@ func NewCmdRouter(f *clientcmd.Factory, parentName, name string, out, errout io.
 	cmd.Flags().IntVar(&cfg.StatsPort, "stats-port", cfg.StatsPort, "If the underlying router implementation can provide statistics this is a hint to expose it on this port. Specify 0 if you want to turn off exposing the statistics.")
 	cmd.Flags().StringVar(&cfg.StatsPassword, "stats-password", cfg.StatsPassword, "If the underlying router implementation can provide statistics this is the requested password for auth.  If not set a password will be generated. Not available for external appliance based routers (e.g. F5)")
 	cmd.Flags().StringVar(&cfg.StatsUsername, "stats-user", cfg.StatsUsername, "If the underlying router implementation can provide statistics this is the requested username for auth. Not available for external appliance based routers (e.g. F5)")
-	cmd.Flags().BoolVar(&cfg.ExposeMetrics, "expose-metrics", cfg.ExposeMetrics, "If true, attempts to run an extra container in the pod to expose metrics - the image will either be set depending on the router implementation or provided with --metrics-image. Not useful where comprehensive metrics are available through the stats-port (e.g. haproxy router)")
-	cmd.Flags().StringVar(&cfg.MetricsImage, "metrics-image", cfg.MetricsImage, "If --expose-metrics is specified this is the image to use to run a sidecar container in the pod exposing metrics. If not set and --expose-metrics is true the image will depend on router implementation. Not useful where comprehensive metrics are available through the stats-port (e.g. haproxy router)")
 	cmd.Flags().BoolVar(&cfg.HostNetwork, "host-network", cfg.HostNetwork, "If true (the default), then use host networking rather than using a separate container network stack. Not required for external appliance based routers (e.g. F5)")
 	cmd.Flags().BoolVar(&cfg.HostPorts, "host-ports", cfg.HostPorts, "If true (the default), when not using host networking host ports will be exposed. Not required for external appliance based routers (e.g. F5)")
 	cmd.Flags().StringVar(&cfg.ExternalHost, "external-host", cfg.ExternalHost, "If the underlying router implementation connects with an external host, this is the external host's hostname.")
@@ -315,6 +307,7 @@ func NewCmdRouter(f *clientcmd.Factory, parentName, name string, out, errout io.
 	cmd.Flags().StringVar(&cfg.MaxConnections, "max-connections", cfg.MaxConnections, "Specifies the maximum number of concurrent connections. Not supported for F5.")
 	cmd.Flags().StringVar(&cfg.Ciphers, "ciphers", cfg.Ciphers, "Specifies the cipher suites to use. You can choose a predefined cipher set ('modern', 'intermediate', or 'old') or specify exact cipher suites by passing a : separated list. Not supported for F5.")
 	cmd.Flags().BoolVar(&cfg.StrictSNI, "strict-sni", cfg.StrictSNI, "Use strict-sni bind processing (do not use default cert). Not supported for F5.")
+	cmd.Flags().BoolVar(&cfg.Local, "local", cfg.Local, "If true, do not contact the apiserver")
 
 	cfg.Action.BindForOutput(cmd.Flags())
 	cmd.Flags().String("output-version", "", "The preferred API versions of the output objects")
@@ -389,6 +382,27 @@ func generateSecretsConfig(cfg *RouterConfig, namespace string, defaultCert []by
 		secrets = append(secrets, secret)
 	}
 
+	if cfg.Type == "haproxy-router" && cfg.StatsPort != 0 {
+		metricsCertName := "router-metrics-tls"
+		if len(defaultCert) == 0 {
+			// when we are generating a serving cert, we need to reuse the existing cert
+			metricsCertName = certName
+		}
+		volumes = append(volumes, kapi.Volume{
+			Name: "metrics-server-certificate",
+			VolumeSource: kapi.VolumeSource{
+				Secret: &kapi.SecretVolumeSource{
+					SecretName: metricsCertName,
+				},
+			},
+		})
+		mounts = append(mounts, kapi.VolumeMount{
+			Name:      "metrics-server-certificate",
+			ReadOnly:  true,
+			MountPath: "/etc/pki/tls/metrics/",
+		})
+	}
+
 	// The secret in this volume is either the one created for the
 	// user supplied default cert (pem format) or the secret generated
 	// by the service anotation (cert only format).
@@ -413,21 +427,21 @@ func generateSecretsConfig(cfg *RouterConfig, namespace string, defaultCert []by
 	return secrets, volumes, mounts, nil
 }
 
-func generateProbeConfigForRouter(cfg *RouterConfig, ports []kapi.ContainerPort) *kapi.Probe {
+func generateProbeConfigForRouter(path string, cfg *RouterConfig, ports []kapi.ContainerPort) *kapi.Probe {
 	var probe *kapi.Probe
 
 	if cfg.Type == "haproxy-router" {
 		probe = &kapi.Probe{}
-		healthzPort := defaultHealthzPort
+		probePort := defaultStatsPort
 		if cfg.StatsPort > 0 {
-			healthzPort = cfg.StatsPort
+			probePort = cfg.StatsPort
 		}
 
 		probe.Handler.HTTPGet = &kapi.HTTPGetAction{
-			Path: "/healthz",
+			Path: path,
 			Port: intstr.IntOrString{
 				Type:   intstr.Int,
-				IntVal: int32(healthzPort),
+				IntVal: int32(probePort),
 			},
 		}
 
@@ -443,7 +457,7 @@ func generateProbeConfigForRouter(cfg *RouterConfig, ports []kapi.ContainerPort)
 }
 
 func generateLivenessProbeConfig(cfg *RouterConfig, ports []kapi.ContainerPort) *kapi.Probe {
-	probe := generateProbeConfigForRouter(cfg, ports)
+	probe := generateProbeConfigForRouter("/healthz", cfg, ports)
 	if probe != nil {
 		probe.InitialDelaySeconds = 10
 	}
@@ -451,41 +465,11 @@ func generateLivenessProbeConfig(cfg *RouterConfig, ports []kapi.ContainerPort) 
 }
 
 func generateReadinessProbeConfig(cfg *RouterConfig, ports []kapi.ContainerPort) *kapi.Probe {
-	probe := generateProbeConfigForRouter(cfg, ports)
+	probe := generateProbeConfigForRouter("healthz/ready", cfg, ports)
 	if probe != nil {
 		probe.InitialDelaySeconds = 10
 	}
 	return probe
-}
-
-func generateMetricsExporterContainer(cfg *RouterConfig, env app.Environment) *kapi.Container {
-	containerName := "metrics-exporter"
-	if len(cfg.MetricsImage) > 0 {
-		return &kapi.Container{
-			Name:  containerName,
-			Image: cfg.MetricsImage,
-			Env:   env.List(),
-		}
-	}
-	switch cfg.Type {
-	case "haproxy-router":
-		return &kapi.Container{
-			Name:  containerName,
-			Image: "prom/haproxy-exporter:latest",
-			Env:   env.List(),
-			Args: []string{
-				fmt.Sprintf("-haproxy.scrape-uri=http://$(STATS_USERNAME):$(STATS_PASSWORD)@localhost:$(STATS_PORT)/haproxy?stats;csv"),
-			},
-			Ports: []kapi.ContainerPort{
-				{
-					Name:          "http",
-					ContainerPort: 9101,
-				},
-			},
-		}
-	default:
-		return nil
-	}
 }
 
 // RunCmdRouter contains all the necessary functionality for the
@@ -497,20 +481,24 @@ func RunCmdRouter(f *clientcmd.Factory, cmd *cobra.Command, out, errout io.Write
 	case 1:
 		cfg.Name = args[0]
 	default:
-		return kcmdutil.UsageError(cmd, "You may pass zero or one arguments to provide a name for the router")
+		return kcmdutil.UsageErrorf(cmd, "You may pass zero or one arguments to provide a name for the router")
 	}
+	if cfg.Local && !cfg.Action.DryRun {
+		return fmt.Errorf("--local cannot be specified without --dry-run")
+	}
+
 	name := cfg.Name
 
 	var defaultOutputErr error
 
 	if len(cfg.StatsUsername) > 0 {
 		if strings.Contains(cfg.StatsUsername, ":") {
-			return kcmdutil.UsageError(cmd, "username %s must not contain ':'", cfg.StatsUsername)
+			return kcmdutil.UsageErrorf(cmd, "username %s must not contain ':'", cfg.StatsUsername)
 		}
 	}
 
 	if len(cfg.Subdomain) > 0 && len(cfg.ForceSubdomain) > 0 {
-		return kcmdutil.UsageError(cmd, "only one of --subdomain, --force-subdomain can be specified")
+		return kcmdutil.UsageErrorf(cmd, "only one of --subdomain, --force-subdomain can be specified")
 	}
 
 	ports, err := app.ContainerPortsFromString(cfg.Ports)
@@ -551,7 +539,7 @@ func RunCmdRouter(f *clientcmd.Factory, cmd *cobra.Command, out, errout io.Write
 			glog.Fatal(err)
 		}
 		if len(remove) > 0 {
-			return kcmdutil.UsageError(cmd, "You may not pass negative labels in %q", cfg.Labels)
+			return kcmdutil.UsageErrorf(cmd, "You may not pass negative labels in %q", cfg.Labels)
 		}
 		label = valid
 	}
@@ -563,7 +551,7 @@ func RunCmdRouter(f *clientcmd.Factory, cmd *cobra.Command, out, errout io.Write
 			glog.Fatal(err)
 		}
 		if len(remove) > 0 {
-			return kcmdutil.UsageError(cmd, "You may not pass negative labels in selector %q", cfg.Selector)
+			return kcmdutil.UsageErrorf(cmd, "You may not pass negative labels in selector %q", cfg.Selector)
 		}
 		nodeSelector = valid
 	}
@@ -571,10 +559,6 @@ func RunCmdRouter(f *clientcmd.Factory, cmd *cobra.Command, out, errout io.Write
 	image := cfg.ImageTemplate.ExpandOrDie(cfg.Type)
 
 	namespace, _, err := f.DefaultNamespace()
-	if err != nil {
-		return fmt.Errorf("error getting client: %v", err)
-	}
-	_, kClient, err := f.Clients()
 	if err != nil {
 		return fmt.Errorf("error getting client: %v", err)
 	}
@@ -587,19 +571,25 @@ func RunCmdRouter(f *clientcmd.Factory, cmd *cobra.Command, out, errout io.Write
 
 	output := cfg.Action.ShouldPrint()
 	generate := output
-	service, err := kClient.Core().Services(namespace).Get(name, metav1.GetOptions{})
-	if err != nil {
-		if !generate {
-			if !errors.IsNotFound(err) {
-				return fmt.Errorf("can't check for existing router %q: %v", name, err)
-			}
-			if !output && cfg.Action.DryRun {
-				return fmt.Errorf("Router %q service does not exist", name)
-			}
-			generate = true
+	if !cfg.Local {
+		kClient, err := f.ClientSet()
+		if err != nil {
+			return fmt.Errorf("error getting client: %v", err)
 		}
-	} else {
-		clusterIP = service.Spec.ClusterIP
+		service, err := kClient.Core().Services(namespace).Get(name, metav1.GetOptions{})
+		if err != nil {
+			if !generate {
+				if !errors.IsNotFound(err) {
+					return fmt.Errorf("can't check for existing router %q: %v", name, err)
+				}
+				if !output && cfg.Action.DryRun {
+					return fmt.Errorf("Router %q service does not exist", name)
+				}
+				generate = true
+			}
+		} else {
+			clusterIP = service.Spec.ClusterIP
+		}
 	}
 
 	if !generate {
@@ -611,20 +601,27 @@ func RunCmdRouter(f *clientcmd.Factory, cmd *cobra.Command, out, errout io.Write
 		return fmt.Errorf("you must specify a service account for the router with --service-account")
 	}
 
-	if err := validateServiceAccount(kClient, namespace, cfg.ServiceAccount, cfg.HostNetwork, cfg.HostPorts); err != nil {
-		err = fmt.Errorf("router could not be created; %v", err)
-		if !cfg.Action.ShouldPrint() {
+	if !cfg.Local {
+		clientConfig, err := f.ClientConfig()
+		if err != nil {
 			return err
 		}
-		fmt.Fprintf(errout, "error: %v\n", err)
-		defaultOutputErr = cmdutil.ErrExit
+		securityClient, err := securityclientinternal.NewForConfig(clientConfig)
+		if err != nil {
+			return err
+		}
+		if err := validateServiceAccount(securityClient, namespace, cfg.ServiceAccount, cfg.HostNetwork, cfg.HostPorts); err != nil {
+			err = fmt.Errorf("router could not be created; %v", err)
+			if !cfg.Action.ShouldPrint() {
+				return err
+			}
+			fmt.Fprintf(errout, "error: %v\n", err)
+			defaultOutputErr = kcmdutil.ErrExit
+		}
 	}
 
 	// create new router
 	secretEnv := app.Environment{}
-	if len(cfg.ServiceAccount) == 0 {
-		return fmt.Errorf("router could not be created; you must specify a service account with --service-account")
-	}
 
 	defaultCert, err := fileutil.LoadData(cfg.DefaultCertificate)
 	if err != nil {
@@ -682,9 +679,11 @@ func RunCmdRouter(f *clientcmd.Factory, cmd *cobra.Command, out, errout io.Write
 		env["ROUTER_CANONICAL_HOSTNAME"] = cfg.RouterCanonicalHostname
 	}
 	// automatically start the internal metrics agent if we are handling a known type
-	if cfg.Type == "haproxy-router" {
+	if cfg.Type == "haproxy-router" && cfg.StatsPort != 0 {
 		env["ROUTER_LISTEN_ADDR"] = fmt.Sprintf("0.0.0.0:%d", cfg.StatsPort)
 		env["ROUTER_METRICS_TYPE"] = "haproxy"
+		env["ROUTER_METRICS_TLS_CERT_FILE"] = "/etc/pki/tls/metrics/tls.crt"
+		env["ROUTER_METRICS_TLS_KEY_FILE"] = "/etc/pki/tls/metrics/tls.key"
 	}
 	env.Add(secretEnv)
 	if len(defaultCert) > 0 {
@@ -730,13 +729,6 @@ func RunCmdRouter(f *clientcmd.Factory, cmd *cobra.Command, out, errout io.Write
 		},
 	}
 
-	if cfg.StatsPort > 0 && cfg.ExposeMetrics {
-		pc := generateMetricsExporterContainer(cfg, env)
-		if pc != nil {
-			containers = append(containers, *pc)
-		}
-	}
-
 	objects := []runtime.Object{}
 	for _, s := range secrets {
 		objects = append(objects, s)
@@ -760,20 +752,20 @@ func RunCmdRouter(f *clientcmd.Factory, cmd *cobra.Command, out, errout io.Write
 		},
 	)
 
-	objects = append(objects, &deployapi.DeploymentConfig{
+	objects = append(objects, &appsapi.DeploymentConfig{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:   name,
 			Labels: label,
 		},
-		Spec: deployapi.DeploymentConfigSpec{
-			Strategy: deployapi.DeploymentStrategy{
-				Type:          deployapi.DeploymentStrategyTypeRolling,
-				RollingParams: &deployapi.RollingDeploymentStrategyParams{MaxUnavailable: intstr.FromString("25%")},
+		Spec: appsapi.DeploymentConfigSpec{
+			Strategy: appsapi.DeploymentStrategy{
+				Type:          appsapi.DeploymentStrategyTypeRolling,
+				RollingParams: &appsapi.RollingDeploymentStrategyParams{MaxUnavailable: intstr.FromString("25%")},
 			},
 			Replicas: cfg.Replicas,
 			Selector: label,
-			Triggers: []deployapi.DeploymentTriggerPolicy{
-				{Type: deployapi.DeploymentTriggerOnConfigChange},
+			Triggers: []appsapi.DeploymentTriggerPolicy{
+				{Type: appsapi.DeploymentTriggerOnConfigChange},
 			},
 			Template: &kapi.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{Labels: label},
@@ -798,8 +790,6 @@ func RunCmdRouter(f *clientcmd.Factory, cmd *cobra.Command, out, errout io.Write
 			if t.Annotations == nil {
 				t.Annotations = make(map[string]string)
 			}
-			t.Annotations["prometheus.io/scrape"] = "true"
-			t.Annotations["prometheus.io/port"] = "1936"
 			t.Annotations["prometheus.openshift.io/username"] = cfg.StatsUsername
 			t.Annotations["prometheus.openshift.io/password"] = cfg.StatsPassword
 			t.Spec.ClusterIP = clusterIP
@@ -814,7 +804,10 @@ func RunCmdRouter(f *clientcmd.Factory, cmd *cobra.Command, out, errout io.Write
 				// When a user does not provide the default cert (pem), create one via a Service annotation
 				// The secret generated by the service annotaion contains a tls.crt and tls.key
 				// which ultimately need to be combined into a pem
-				t.Annotations = map[string]string{"service.alpha.openshift.io/serving-cert-secret-name": certName}
+				t.Annotations["service.alpha.openshift.io/serving-cert-secret-name"] = certName
+			} else if cfg.Type == "haproxy-router" && cfg.StatsPort != 0 {
+				// Generate a serving cert for metrics only
+				t.Annotations["service.alpha.openshift.io/serving-cert-secret-name"] = "router-metrics-tls"
 			}
 		}
 	}
@@ -822,8 +815,7 @@ func RunCmdRouter(f *clientcmd.Factory, cmd *cobra.Command, out, errout io.Write
 	list := &kapi.List{Items: objects}
 
 	if cfg.Action.ShouldPrint() {
-		mapper, _ := f.Object()
-		fn := cmdutil.VersionedPrintObject(f.PrintObject, cmd, mapper, out)
+		fn := print.VersionedPrintObject(legacyscheme.Scheme, legacyscheme.Registry, kcmdutil.PrintObject, cmd, out)
 		if err := fn(list); err != nil {
 			return fmt.Errorf("unable to print object: %v", err)
 		}
@@ -831,7 +823,7 @@ func RunCmdRouter(f *clientcmd.Factory, cmd *cobra.Command, out, errout io.Write
 	}
 
 	levelPrefixFilter := func(e error) string {
-		// ignore SA/RB errors if we were creating the service account
+		// Avoid failing when service accounts or role bindings already exist.
 		if ignoreError(e, cfg.ServiceAccount, generateRoleBindingName(cfg.Name)) {
 			return "warning"
 		}
@@ -843,14 +835,14 @@ func RunCmdRouter(f *clientcmd.Factory, cmd *cobra.Command, out, errout io.Write
 	}
 
 	if errs := cfg.Action.WithMessageAndPrefix(fmt.Sprintf("Creating router %s", cfg.Name), "created", levelPrefixFilter).Run(list, namespace); len(errs) > 0 {
-		return cmdutil.ErrExit
+		return kcmdutil.ErrExit
 	}
 	return nil
 }
 
 // ignoreError will return true if the error is an already exists status error and
-// 1. it is for a cluster role binding named roleBindingName
-// 2. it is for a serivce account name saName
+// 1. it is for a cluster role binding named roleBindingName, or
+// 2. it is for a service account name saName
 func ignoreError(e error, saName string, roleBindingName string) bool {
 	if !errors.IsAlreadyExists(e) {
 		return false
@@ -864,8 +856,8 @@ func ignoreError(e error, saName string, roleBindingName string) bool {
 		return false
 	}
 	return (details.Kind == "serviceaccounts" && details.Name == saName) ||
-		(details.Kind == "clusterrolebinding" && details.Name == roleBindingName) ||
-		(details.Kind == "clusterrolebindings" && details.Name == roleBindingName) // TODO we should not need to do this
+		(details.Kind == "clusterrolebinding" /*pre-3.7*/ && details.Name == roleBindingName) ||
+		(details.Kind == "clusterrolebindings" /*3.7+*/ && details.Name == roleBindingName)
 }
 
 // generateRoleBindingName generates a name for the rolebinding object if it is
@@ -887,12 +879,12 @@ func generateStatsPassword() string {
 	return strings.Join(password, "")
 }
 
-func validateServiceAccount(client kclientset.Interface, ns string, serviceAccount string, hostNetwork, hostPorts bool) error {
+func validateServiceAccount(client securityclientinternal.Interface, ns string, serviceAccount string, hostNetwork, hostPorts bool) error {
 	if !hostNetwork && !hostPorts {
 		return nil
 	}
 	// get cluster sccs
-	sccList, err := legacyclient.NewFromClient(client.Core().RESTClient()).List(metav1.ListOptions{})
+	sccList, err := client.Security().SecurityContextConstraints().List(metav1.ListOptions{})
 	if err != nil {
 		if !errors.IsUnauthorized(err) {
 			return fmt.Errorf("could not retrieve list of security constraints to verify service account %q: %v", serviceAccount, err)
@@ -903,7 +895,7 @@ func validateServiceAccount(client kclientset.Interface, ns string, serviceAccou
 	// get set of sccs applicable to the service account
 	userInfo := serviceaccount.UserInfo(ns, serviceAccount, "")
 	for _, scc := range sccList.Items {
-		if oscc.ConstraintAppliesTo(&scc, userInfo) {
+		if oscc.ConstraintAppliesTo(&scc, userInfo, "", nil) {
 			switch {
 			case hostPorts && scc.AllowHostPorts:
 				return nil

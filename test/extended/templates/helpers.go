@@ -2,42 +2,34 @@ package templates
 
 import (
 	"crypto/tls"
-	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"net/http"
-	"os/exec"
-	"time"
+	"strings"
 
 	g "github.com/onsi/ginkgo"
 	o "github.com/onsi/gomega"
 
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/wait"
-	"k8s.io/client-go/pkg/apis/extensions"
-	kapi "k8s.io/kubernetes/pkg/api"
-	kapiv1 "k8s.io/kubernetes/pkg/api/v1"
-	kexternalclientset "k8s.io/kubernetes/pkg/client/clientset_generated/clientset"
-	e2e "k8s.io/kubernetes/test/e2e/framework"
-	intframework "k8s.io/kubernetes/test/integration/framework"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	kapi "k8s.io/kubernetes/pkg/apis/core"
 
 	authorizationapi "github.com/openshift/origin/pkg/authorization/apis/authorization"
-	osbclient "github.com/openshift/origin/pkg/openservicebroker/client"
+	"github.com/openshift/origin/pkg/bulk"
+	configapi "github.com/openshift/origin/pkg/cmd/server/apis/config"
 	templateapi "github.com/openshift/origin/pkg/template/apis/template"
+	"github.com/openshift/origin/pkg/template/controller"
+	osbclient "github.com/openshift/origin/pkg/templateservicebroker/openservicebroker/client"
 	userapi "github.com/openshift/origin/pkg/user/apis/user"
+	restutil "github.com/openshift/origin/pkg/util/rest"
 	exutil "github.com/openshift/origin/test/extended/util"
-)
-
-const (
-	tsbNS   = "openshift-template-service-broker"
-	tsbHost = "apiserver." + tsbNS + ".svc"
 )
 
 func createUser(cli *exutil.CLI, name, role string) *userapi.User {
 	name = cli.Namespace() + "-" + name
 
-	user, err := cli.AdminClient().Users().Create(&userapi.User{
+	user, err := cli.AdminUserClient().User().Users().Create(&userapi.User{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: name,
 		},
@@ -45,7 +37,7 @@ func createUser(cli *exutil.CLI, name, role string) *userapi.User {
 	o.Expect(err).NotTo(o.HaveOccurred())
 
 	if role != "" {
-		_, err = cli.AdminClient().RoleBindings(cli.Namespace()).Create(&authorizationapi.RoleBinding{
+		_, err = cli.AdminAuthorizationClient().Authorization().RoleBindings(cli.Namespace()).Create(&authorizationapi.RoleBinding{
 			ObjectMeta: metav1.ObjectMeta{
 				Name: fmt.Sprintf("%s-%s-binding", name, role),
 			},
@@ -65,8 +57,55 @@ func createUser(cli *exutil.CLI, name, role string) *userapi.User {
 	return user
 }
 
+func createGroup(cli *exutil.CLI, name, role string) *userapi.Group {
+	name = cli.Namespace() + "-" + name
+
+	group, err := cli.AdminUserClient().User().Groups().Create(&userapi.Group{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: name,
+		},
+	})
+	o.Expect(err).NotTo(o.HaveOccurred())
+
+	if role != "" {
+		_, err = cli.AdminAuthorizationClient().Authorization().RoleBindings(cli.Namespace()).Create(&authorizationapi.RoleBinding{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: fmt.Sprintf("%s-%s-binding", name, role),
+			},
+			RoleRef: kapi.ObjectReference{
+				Name: role,
+			},
+			Subjects: []kapi.ObjectReference{
+				{
+					Kind: authorizationapi.GroupKind,
+					Name: name,
+				},
+			},
+		})
+		o.Expect(err).NotTo(o.HaveOccurred())
+	}
+
+	return group
+}
+
+func addUserToGroup(cli *exutil.CLI, username, groupname string) {
+	group, err := cli.AdminUserClient().User().Groups().Get(groupname, metav1.GetOptions{})
+	o.Expect(err).NotTo(o.HaveOccurred())
+
+	if group != nil {
+		group.Users = append(group.Users, username)
+		_, err = cli.AdminUserClient().User().Groups().Update(group)
+		o.Expect(err).NotTo(o.HaveOccurred())
+	}
+}
+
+func deleteGroup(cli *exutil.CLI, group *userapi.Group) {
+	err := cli.AdminUserClient().User().Groups().Delete(group.Name, nil)
+	o.Expect(err).NotTo(o.HaveOccurred())
+}
+
 func deleteUser(cli *exutil.CLI, user *userapi.User) {
-	err := cli.AdminClient().Users().Delete(user.Name)
+	err := cli.AdminUserClient().User().Users().Delete(user.Name, nil)
 	o.Expect(err).NotTo(o.HaveOccurred())
 }
 
@@ -80,104 +119,74 @@ func setUser(cli *exutil.CLI, user *userapi.User) {
 	}
 }
 
-// EnsureTSB makes sure the TSB is present where expected and returns a client to speak to it and
-// and exec command which provides the proxy.  The caller must close the cmd, usually done in AfterEach
-func EnsureTSB(tsbOC *exutil.CLI) (osbclient.Client, *exec.Cmd) {
-	exists := true
-	if _, err := tsbOC.AdminKubeClient().Extensions().DaemonSets(tsbNS).Get("apiserver", metav1.GetOptions{}); err != nil {
-		if !kerrors.IsNotFound(err) {
-			o.Expect(err).NotTo(o.HaveOccurred())
-		}
-		exists = false
-	}
-
-	if !exists {
-		e2e.Logf("Installing TSB onto the cluster for testing")
-		_, _, err := tsbOC.AsAdmin().WithoutNamespace().Run("create", "namespace").Args(tsbNS).Outputs()
-		// If template tests run in parallel this could be created twice, we don't really care.
-		if err != nil {
-			e2e.Logf("Error creating TSB namespace %s: %v \n", tsbNS, err)
-		}
-		configPath := exutil.FixturePath("..", "..", "examples", "templateservicebroker", "templateservicebroker-template.yaml")
-		stdout, _, err := tsbOC.WithoutNamespace().Run("process").Args("-f", configPath).Outputs()
-		if err != nil {
-			e2e.Logf("Error processing TSB template at %s: %v \n", configPath, err)
-		}
-		err = tsbOC.WithoutNamespace().AsAdmin().Run("create").Args("-f", "-").InputString(stdout).Execute()
-		if err != nil {
-			// If template tests run in parallel this could be created twice, we don't really care.
-			e2e.Logf("Error creating TSB resources: %v \n", err)
-		}
-	}
-	err := WaitForDaemonSetStatus(tsbOC.AdminKubeClient(), &extensions.DaemonSet{ObjectMeta: metav1.ObjectMeta{Name: "apiserver", Namespace: tsbNS}})
-	o.Expect(err).NotTo(o.HaveOccurred())
-
-	// we're trying to test the TSB, not the service.  We're outside all the normal networks.  Run a portforward to a particular
-	// pod and test that
-	pods, err := tsbOC.AdminKubeClient().Core().Pods(tsbNS).List(metav1.ListOptions{})
-	o.Expect(err).NotTo(o.HaveOccurred())
-	var pod *kapiv1.Pod
-	for i := range pods.Items {
-		currPod := pods.Items[i]
-		for _, cond := range currPod.Status.Conditions {
-			if cond.Type == kapiv1.PodReady && cond.Status == kapiv1.ConditionTrue {
-				pod = &currPod
-				break
-			} else {
-				out, _ := json.Marshal(currPod.Status)
-				e2e.Logf("%v %v", currPod.Name, string(out))
-			}
-		}
-	}
-	if pod == nil {
-		e2e.Failf("no ready pod found")
-	}
-	port, err := intframework.FindFreeLocalPort()
-	o.Expect(err).NotTo(o.HaveOccurred())
-	portForwardCmd, _, _, err := tsbOC.AsAdmin().WithoutNamespace().Run("port-forward").Args("-n="+tsbNS, pod.Name, fmt.Sprintf("%d:8443", port)).Background()
-	o.Expect(err).NotTo(o.HaveOccurred())
-
-	svc, err := tsbOC.AdminKubeClient().Core().Services(tsbNS).Get("apiserver", metav1.GetOptions{})
-	o.Expect(err).NotTo(o.HaveOccurred())
-	tsbclient := osbclient.NewClient(&http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}}, fmt.Sprintf("https://localhost:%d%s", port, templateapi.ServiceBrokerRoot))
-
-	// wait to get back healthy from the tsb
-	healthResponse := ""
-	err = wait.Poll(e2e.Poll, 2*time.Minute, func() (bool, error) {
-		resp, err := tsbclient.Client().Get("https://" + svc.Spec.ClusterIP + "/healthz")
-		if err != nil {
-			return false, err
-		}
-		defer resp.Body.Close()
-		content, _ := ioutil.ReadAll(resp.Body)
-		healthResponse = string(content)
-		if resp.StatusCode == http.StatusOK {
-			return true, nil
-		}
-		return false, nil
-	})
+// TSBClient returns a client to the running template service broker
+func TSBClient(oc *exutil.CLI) (osbclient.Client, error) {
+	svc, err := oc.AdminKubeClient().Core().Services("openshift-template-service-broker").Get("apiserver", metav1.GetOptions{})
 	if err != nil {
-		o.Expect(fmt.Errorf("error waiting for the TSB to be healthy: %v: %v", healthResponse, err)).NotTo(o.HaveOccurred())
+		return nil, err
 	}
 
-	return tsbclient, portForwardCmd
+	return osbclient.NewClient(&http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{
+				InsecureSkipVerify: true,
+			},
+		},
+	}, "https://"+svc.Spec.ClusterIP+templateapi.ServiceBrokerRoot), nil
 }
 
-// Waits for the daemonset to have at least one ready pod
-func WaitForDaemonSetStatus(c kexternalclientset.Interface, d *extensions.DaemonSet) error {
-	err := wait.Poll(e2e.Poll, 5*time.Minute, func() (bool, error) {
-		var err error
-		ds, err := c.Extensions().DaemonSets(d.Namespace).Get(d.Name, metav1.GetOptions{})
-		if err != nil {
-			return false, err
-		}
-		if ds.Status.NumberReady > 0 {
-			return true, nil
-		}
-		return false, nil
-	})
+func dumpObjectReadiness(oc *exutil.CLI, templateInstance *templateapi.TemplateInstance) error {
+	restmapper := restutil.DefaultMultiRESTMapper()
+	config, err := configapi.GetClientConfig(exutil.KubeConfigPath(), nil)
 	if err != nil {
-		return fmt.Errorf("error waiting for ds %q status to match expectation: %v", d.Name, err)
+		return err
 	}
+
+	fmt.Fprintf(g.GinkgoWriter, "dumping object readiness for %s/%s\n", templateInstance.Namespace, templateInstance.Name)
+
+	for _, object := range templateInstance.Status.Objects {
+		if !controller.CanCheckReadiness(object.Ref) {
+			continue
+		}
+
+		mapping, err := restmapper.RESTMapping(object.Ref.GroupVersionKind().GroupKind())
+		if err != nil {
+			return err
+		}
+
+		cli, err := bulk.ClientMapperFromConfig(config).ClientForMapping(mapping)
+		if err != nil {
+			return err
+		}
+
+		obj, err := cli.Get().Resource(mapping.Resource).NamespaceIfScoped(object.Ref.Namespace, mapping.Scope.Name() == meta.RESTScopeNameNamespace).Name(object.Ref.Name).Do().Get()
+		if err != nil {
+			return err
+		}
+
+		meta, err := meta.Accessor(obj)
+		if err != nil {
+			return err
+		}
+
+		if meta.GetUID() != object.Ref.UID {
+			return kerrors.NewNotFound(schema.GroupResource{Group: mapping.GroupVersionKind.Group, Resource: mapping.Resource}, object.Ref.Name)
+		}
+
+		if strings.ToLower(meta.GetAnnotations()[templateapi.WaitForReadyAnnotation]) != "true" {
+			continue
+		}
+
+		ready, failed, err := controller.CheckReadiness(oc.BuildClient(), object.Ref, obj)
+		if err != nil {
+			return err
+		}
+
+		fmt.Fprintf(g.GinkgoWriter, "%s %s/%s: ready %v, failed %v\n", object.Ref.Kind, object.Ref.Namespace, object.Ref.Name, ready, failed)
+		if !ready || failed {
+			fmt.Fprintf(g.GinkgoWriter, "object: %#v\n", obj)
+		}
+	}
+
 	return nil
 }

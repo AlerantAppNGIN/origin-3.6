@@ -4,23 +4,29 @@ import (
 	kapierrors "k8s.io/apimachinery/pkg/api/errors"
 	metainternal "k8s.io/apimachinery/pkg/apis/meta/internalversion"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/fields"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/sets"
 	apirequest "k8s.io/apiserver/pkg/endpoints/request"
 	"k8s.io/apiserver/pkg/registry/rest"
+	"k8s.io/apiserver/pkg/storage"
 	kcorelisters "k8s.io/kubernetes/pkg/client/listers/core/internalversion"
+	"k8s.io/kubernetes/pkg/printers"
+	printerstorage "k8s.io/kubernetes/pkg/printers/storage"
 
 	oapi "github.com/openshift/origin/pkg/api"
+	printersinternal "github.com/openshift/origin/pkg/printers/internalversion"
 	quotaapi "github.com/openshift/origin/pkg/quota/apis/quota"
 	"github.com/openshift/origin/pkg/quota/controller/clusterquotamapping"
 	quotalister "github.com/openshift/origin/pkg/quota/generated/listers/quota/internalversion"
-	clusterresourcequotaregistry "github.com/openshift/origin/pkg/quota/registry/clusterresourcequota"
 )
 
 type AppliedClusterResourceQuotaREST struct {
 	quotaMapper     clusterquotamapping.ClusterQuotaMapper
 	quotaLister     quotalister.ClusterResourceQuotaLister
 	namespaceLister kcorelisters.NamespaceLister
+	rest.TableConvertor
 }
 
 func NewREST(quotaMapper clusterquotamapping.ClusterQuotaMapper, quotaLister quotalister.ClusterResourceQuotaLister, namespaceLister kcorelisters.NamespaceLister) *AppliedClusterResourceQuotaREST {
@@ -28,6 +34,7 @@ func NewREST(quotaMapper clusterquotamapping.ClusterQuotaMapper, quotaLister quo
 		quotaMapper:     quotaMapper,
 		quotaLister:     quotaLister,
 		namespaceLister: namespaceLister,
+		TableConvertor:  printerstorage.TableConvertor{TablePrinter: printers.NewTablePrinter().With(printersinternal.AddHandlers)},
 	}
 }
 
@@ -70,7 +77,7 @@ func (r *AppliedClusterResourceQuotaREST) List(ctx apirequest.Context, options *
 
 	// TODO max resource version?  watch?
 	list := &quotaapi.AppliedClusterResourceQuotaList{}
-	matcher := clusterresourcequotaregistry.Matcher(oapi.InternalListOptionsToSelectors(options))
+	matcher := matcher(oapi.InternalListOptionsToSelectors(options))
 	quotaNames, _ := r.quotaMapper.GetClusterQuotasFor(namespace)
 
 	for _, name := range quotaNames {
@@ -85,4 +92,13 @@ func (r *AppliedClusterResourceQuotaREST) List(ctx apirequest.Context, options *
 	}
 
 	return list, nil
+}
+
+// Matcher returns a generic matcher for a given label and field selector.
+func matcher(label labels.Selector, field fields.Selector) storage.SelectionPredicate {
+	return storage.SelectionPredicate{
+		Label:    label,
+		Field:    field,
+		GetAttrs: storage.DefaultClusterScopedAttr,
+	}
 }

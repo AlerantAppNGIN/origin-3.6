@@ -5,14 +5,14 @@ import (
 	"io"
 
 	"github.com/spf13/cobra"
-	kapi "k8s.io/kubernetes/pkg/api"
+	kapi "k8s.io/kubernetes/pkg/apis/core"
 	kcmd "k8s.io/kubernetes/pkg/kubectl/cmd"
 	"k8s.io/kubernetes/pkg/kubectl/cmd/templates"
 	kcmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
 	"k8s.io/kubernetes/pkg/kubectl/resource"
 
-	cmdutil "github.com/openshift/origin/pkg/cmd/util"
-	"github.com/openshift/origin/pkg/cmd/util/clientcmd"
+	"github.com/openshift/origin/pkg/cmd/util/route"
+	"github.com/openshift/origin/pkg/oc/cli/util/clientcmd"
 )
 
 var (
@@ -88,12 +88,13 @@ func validate(cmd *cobra.Command, f *clientcmd.Factory, args []string) error {
 		return err
 	}
 
-	_, kc, err := f.Clients()
+	kc, err := f.ClientSet()
 	if err != nil {
 		return err
 	}
 
-	r := f.NewBuilder(true).
+	r := f.NewBuilder().
+		Internal().
 		ContinueOnError().
 		NamespaceParam(namespace).DefaultNamespace().
 		FilenameParam(enforceNamespace, &resource.FilenameOptions{Recursive: false, Filenames: kcmdutil.GetFlagStringSlice(cmd, "filename")}).
@@ -102,7 +103,7 @@ func validate(cmd *cobra.Command, f *clientcmd.Factory, args []string) error {
 		Do()
 	infos, err := r.Infos()
 	if err != nil {
-		return kcmdutil.UsageError(cmd, err.Error())
+		return kcmdutil.UsageErrorf(cmd, err.Error())
 	}
 
 	wildcardpolicy := kcmdutil.GetFlagString(cmd, "wildcard-policy")
@@ -134,7 +135,7 @@ func validate(cmd *cobra.Command, f *clientcmd.Factory, args []string) error {
 			// The upstream generator will incorrectly chose service.Port instead of service.TargetPort
 			// for the route TargetPort when no port is present.  Passing forcePort=true
 			// causes UnsecuredRoute to always set a Port so the upstream default is not used.
-			route, err := cmdutil.UnsecuredRoute(kc, namespace, info.Name, info.Name, kcmdutil.GetFlagString(cmd, "port"), true)
+			route, err := route.UnsecuredRoute(kc, namespace, info.Name, info.Name, kcmdutil.GetFlagString(cmd, "port"), true)
 			if err != nil {
 				return err
 			}

@@ -23,17 +23,16 @@ import (
 
 	"github.com/golang/glog"
 
+	apps "k8s.io/api/apps/v1"
+	"k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	intstrutil "k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/json"
-	"k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/api/v1"
+	"k8s.io/apimachinery/pkg/util/rand"
 	podutil "k8s.io/kubernetes/pkg/api/v1/pod"
-	apps "k8s.io/kubernetes/pkg/apis/apps/v1beta1"
-	extensions "k8s.io/kubernetes/pkg/apis/extensions/v1beta1"
 	"k8s.io/kubernetes/pkg/controller"
 	"k8s.io/kubernetes/pkg/controller/daemon/util"
 	labelsutil "k8s.io/kubernetes/pkg/util/labels"
@@ -41,7 +40,7 @@ import (
 
 // rollingUpdate deletes old daemon set pods making sure that no more than
 // ds.Spec.UpdateStrategy.RollingUpdate.MaxUnavailable pods are unavailable
-func (dsc *DaemonSetsController) rollingUpdate(ds *extensions.DaemonSet, hash string) error {
+func (dsc *DaemonSetsController) rollingUpdate(ds *apps.DaemonSet, hash string) error {
 	nodeToDaemonPods, err := dsc.getNodesToDaemonPods(ds)
 	if err != nil {
 		return fmt.Errorf("couldn't get node to daemon pod mapping for daemon set %q: %v", ds.Name, err)
@@ -82,7 +81,7 @@ func (dsc *DaemonSetsController) rollingUpdate(ds *extensions.DaemonSet, hash st
 // constructHistory finds all histories controlled by the given DaemonSet, and
 // update current history revision number, or create current history if need to.
 // It also deduplicates current history, and adds missing unique labels to existing histories.
-func (dsc *DaemonSetsController) constructHistory(ds *extensions.DaemonSet) (cur *apps.ControllerRevision, old []*apps.ControllerRevision, err error) {
+func (dsc *DaemonSetsController) constructHistory(ds *apps.DaemonSet) (cur *apps.ControllerRevision, old []*apps.ControllerRevision, err error) {
 	var histories []*apps.ControllerRevision
 	var currentHistories []*apps.ControllerRevision
 	histories, err = dsc.controlledHistories(ds)
@@ -92,15 +91,10 @@ func (dsc *DaemonSetsController) constructHistory(ds *extensions.DaemonSet) (cur
 	for _, history := range histories {
 		// Add the unique label if it's not already added to the history
 		// We use history name instead of computing hash, so that we don't need to worry about hash collision
-		if _, ok := history.Labels[extensions.DefaultDaemonSetUniqueLabelKey]; !ok {
-			var clone interface{}
-			clone, err = api.Scheme.DeepCopy(history)
-			if err != nil {
-				return nil, nil, err
-			}
-			toUpdate := clone.(*apps.ControllerRevision)
-			toUpdate.Labels[extensions.DefaultDaemonSetUniqueLabelKey] = toUpdate.Name
-			history, err = dsc.kubeClient.AppsV1beta1().ControllerRevisions(ds.Namespace).Update(toUpdate)
+		if _, ok := history.Labels[apps.DefaultDaemonSetUniqueLabelKey]; !ok {
+			toUpdate := history.DeepCopy()
+			toUpdate.Labels[apps.DefaultDaemonSetUniqueLabelKey] = toUpdate.Name
+			history, err = dsc.kubeClient.AppsV1().ControllerRevisions(ds.Namespace).Update(toUpdate)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -133,14 +127,9 @@ func (dsc *DaemonSetsController) constructHistory(ds *extensions.DaemonSet) (cur
 		}
 		// Update revision number if necessary
 		if cur.Revision < currRevision {
-			var clone interface{}
-			clone, err = api.Scheme.DeepCopy(cur)
-			if err != nil {
-				return nil, nil, err
-			}
-			toUpdate := clone.(*apps.ControllerRevision)
+			toUpdate := cur.DeepCopy()
 			toUpdate.Revision = currRevision
-			_, err = dsc.kubeClient.AppsV1beta1().ControllerRevisions(ds.Namespace).Update(toUpdate)
+			_, err = dsc.kubeClient.AppsV1().ControllerRevisions(ds.Namespace).Update(toUpdate)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -149,7 +138,7 @@ func (dsc *DaemonSetsController) constructHistory(ds *extensions.DaemonSet) (cur
 	return cur, old, err
 }
 
-func (dsc *DaemonSetsController) cleanupHistory(ds *extensions.DaemonSet, old []*apps.ControllerRevision) error {
+func (dsc *DaemonSetsController) cleanupHistory(ds *apps.DaemonSet, old []*apps.ControllerRevision) error {
 	nodesToDaemonPods, err := dsc.getNodesToDaemonPods(ds)
 	if err != nil {
 		return fmt.Errorf("couldn't get node to daemon pod mapping for daemon set %q: %v", ds.Name, err)
@@ -165,7 +154,7 @@ func (dsc *DaemonSetsController) cleanupHistory(ds *extensions.DaemonSet, old []
 	liveHashes := make(map[string]bool)
 	for _, pods := range nodesToDaemonPods {
 		for _, pod := range pods {
-			if hash := pod.Labels[extensions.DefaultDaemonSetUniqueLabelKey]; len(hash) > 0 {
+			if hash := pod.Labels[apps.DefaultDaemonSetUniqueLabelKey]; len(hash) > 0 {
 				liveHashes[hash] = true
 			}
 		}
@@ -174,7 +163,7 @@ func (dsc *DaemonSetsController) cleanupHistory(ds *extensions.DaemonSet, old []
 	// Find all live history with the above hashes
 	liveHistory := make(map[string]bool)
 	for _, history := range old {
-		if hash := history.Labels[extensions.DefaultDaemonSetUniqueLabelKey]; liveHashes[hash] {
+		if hash := history.Labels[apps.DefaultDaemonSetUniqueLabelKey]; liveHashes[hash] {
 			liveHistory[history.Name] = true
 		}
 	}
@@ -209,7 +198,7 @@ func maxRevision(histories []*apps.ControllerRevision) int64 {
 	return max
 }
 
-func (dsc *DaemonSetsController) dedupCurHistories(ds *extensions.DaemonSet, curHistories []*apps.ControllerRevision) (*apps.ControllerRevision, error) {
+func (dsc *DaemonSetsController) dedupCurHistories(ds *apps.DaemonSet, curHistories []*apps.ControllerRevision) (*apps.ControllerRevision, error) {
 	if len(curHistories) == 1 {
 		return curHistories[0], nil
 	}
@@ -232,17 +221,13 @@ func (dsc *DaemonSetsController) dedupCurHistories(ds *extensions.DaemonSet, cur
 			return nil, err
 		}
 		for _, pod := range pods {
-			if pod.Labels[extensions.DefaultDaemonSetUniqueLabelKey] != keepCur.Labels[extensions.DefaultDaemonSetUniqueLabelKey] {
-				clone, err := api.Scheme.DeepCopy(pod)
-				if err != nil {
-					return nil, err
-				}
-				toUpdate := clone.(*v1.Pod)
+			if pod.Labels[apps.DefaultDaemonSetUniqueLabelKey] != keepCur.Labels[apps.DefaultDaemonSetUniqueLabelKey] {
+				toUpdate := pod.DeepCopy()
 				if toUpdate.Labels == nil {
 					toUpdate.Labels = make(map[string]string)
 				}
-				toUpdate.Labels[extensions.DefaultDaemonSetUniqueLabelKey] = keepCur.Labels[extensions.DefaultDaemonSetUniqueLabelKey]
-				_, err = dsc.kubeClient.Core().Pods(ds.Namespace).Update(toUpdate)
+				toUpdate.Labels[apps.DefaultDaemonSetUniqueLabelKey] = keepCur.Labels[apps.DefaultDaemonSetUniqueLabelKey]
+				_, err = dsc.kubeClient.CoreV1().Pods(ds.Namespace).Update(toUpdate)
 				if err != nil {
 					return nil, err
 				}
@@ -261,7 +246,7 @@ func (dsc *DaemonSetsController) dedupCurHistories(ds *extensions.DaemonSet, cur
 // This also reconciles ControllerRef by adopting/orphaning.
 // Note that returned histories are pointers to objects in the cache.
 // If you want to modify one, you need to deep-copy it first.
-func (dsc *DaemonSetsController) controlledHistories(ds *extensions.DaemonSet) ([]*apps.ControllerRevision, error) {
+func (dsc *DaemonSetsController) controlledHistories(ds *apps.DaemonSet) ([]*apps.ControllerRevision, error) {
 	selector, err := metav1.LabelSelectorAsSelector(ds.Spec.Selector)
 	if err != nil {
 		return nil, err
@@ -291,7 +276,7 @@ func (dsc *DaemonSetsController) controlledHistories(ds *extensions.DaemonSet) (
 }
 
 // Match check if the given DaemonSet's template matches the template stored in the given history.
-func Match(ds *extensions.DaemonSet, history *apps.ControllerRevision) (bool, error) {
+func Match(ds *apps.DaemonSet, history *apps.ControllerRevision) (bool, error) {
 	patch, err := getPatch(ds)
 	if err != nil {
 		return false, err
@@ -303,7 +288,7 @@ func Match(ds *extensions.DaemonSet, history *apps.ControllerRevision) (bool, er
 // previous version. If the returned error is nil the patch is valid. The current state that we save is just the
 // PodSpecTemplate. We can modify this later to encompass more state (or less) and remain compatible with previously
 // recorded patches.
-func getPatch(ds *extensions.DaemonSet) ([]byte, error) {
+func getPatch(ds *apps.DaemonSet) ([]byte, error) {
 	dsBytes, err := json.Marshal(ds)
 	if err != nil {
 		return nil, err
@@ -326,29 +311,29 @@ func getPatch(ds *extensions.DaemonSet) ([]byte, error) {
 	return patch, err
 }
 
-func (dsc *DaemonSetsController) snapshot(ds *extensions.DaemonSet, revision int64) (*apps.ControllerRevision, error) {
+func (dsc *DaemonSetsController) snapshot(ds *apps.DaemonSet, revision int64) (*apps.ControllerRevision, error) {
 	patch, err := getPatch(ds)
 	if err != nil {
 		return nil, err
 	}
 	hash := fmt.Sprint(controller.ComputeHash(&ds.Spec.Template, ds.Status.CollisionCount))
-	name := ds.Name + "-" + hash
+	name := ds.Name + "-" + rand.SafeEncodeString(hash)
 	history := &apps.ControllerRevision{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:            name,
 			Namespace:       ds.Namespace,
-			Labels:          labelsutil.CloneAndAddLabel(ds.Spec.Template.Labels, extensions.DefaultDaemonSetUniqueLabelKey, hash),
+			Labels:          labelsutil.CloneAndAddLabel(ds.Spec.Template.Labels, apps.DefaultDaemonSetUniqueLabelKey, hash),
 			Annotations:     ds.Annotations,
-			OwnerReferences: []metav1.OwnerReference{*newControllerRef(ds)},
+			OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(ds, controllerKind)},
 		},
 		Data:     runtime.RawExtension{Raw: patch},
 		Revision: revision,
 	}
 
-	history, err = dsc.kubeClient.AppsV1beta1().ControllerRevisions(ds.Namespace).Create(history)
+	history, err = dsc.kubeClient.AppsV1().ControllerRevisions(ds.Namespace).Create(history)
 	if errors.IsAlreadyExists(err) {
 		// TODO: Is it okay to get from historyLister?
-		existedHistory, getErr := dsc.kubeClient.AppsV1beta1().ControllerRevisions(ds.Namespace).Get(name, metav1.GetOptions{})
+		existedHistory, getErr := dsc.kubeClient.AppsV1().ControllerRevisions(ds.Namespace).Get(name, metav1.GetOptions{})
 		if getErr != nil {
 			return nil, getErr
 		}
@@ -368,7 +353,7 @@ func (dsc *DaemonSetsController) snapshot(ds *extensions.DaemonSet, revision int
 			return nil, getErr
 		}
 		if currDS.Status.CollisionCount == nil {
-			currDS.Status.CollisionCount = new(int64)
+			currDS.Status.CollisionCount = new(int32)
 		}
 		*currDS.Status.CollisionCount++
 		_, updateErr := dsc.kubeClient.ExtensionsV1beta1().DaemonSets(ds.Namespace).UpdateStatus(currDS)
@@ -381,13 +366,19 @@ func (dsc *DaemonSetsController) snapshot(ds *extensions.DaemonSet, revision int
 	return history, err
 }
 
-func (dsc *DaemonSetsController) getAllDaemonSetPods(ds *extensions.DaemonSet, nodeToDaemonPods map[string][]*v1.Pod, hash string) ([]*v1.Pod, []*v1.Pod) {
+func (dsc *DaemonSetsController) getAllDaemonSetPods(ds *apps.DaemonSet, nodeToDaemonPods map[string][]*v1.Pod, hash string) ([]*v1.Pod, []*v1.Pod) {
 	var newPods []*v1.Pod
 	var oldPods []*v1.Pod
 
 	for _, pods := range nodeToDaemonPods {
 		for _, pod := range pods {
-			if util.IsPodUpdated(ds.Spec.TemplateGeneration, pod, hash) {
+			// If the returned error is not nil we have a parse error.
+			// The controller handles this via the hash.
+			generation, err := util.GetTemplateGeneration(ds)
+			if err != nil {
+				generation = nil
+			}
+			if util.IsPodUpdated(pod, hash, generation) {
 				newPods = append(newPods, pod)
 			} else {
 				oldPods = append(oldPods, pod)
@@ -397,7 +388,7 @@ func (dsc *DaemonSetsController) getAllDaemonSetPods(ds *extensions.DaemonSet, n
 	return newPods, oldPods
 }
 
-func (dsc *DaemonSetsController) getUnavailableNumbers(ds *extensions.DaemonSet, nodeToDaemonPods map[string][]*v1.Pod) (int, int, error) {
+func (dsc *DaemonSetsController) getUnavailableNumbers(ds *apps.DaemonSet, nodeToDaemonPods map[string][]*v1.Pod) (int, int, error) {
 	glog.V(4).Infof("Getting unavailable numbers")
 	// TODO: get nodeList once in syncDaemonSet and pass it to other functions
 	nodeList, err := dsc.nodeLister.List(labels.Everything())
@@ -423,7 +414,8 @@ func (dsc *DaemonSetsController) getUnavailableNumbers(ds *extensions.DaemonSet,
 		}
 		available := false
 		for _, pod := range daemonPods {
-			if podutil.IsPodAvailable(pod, ds.Spec.MinReadySeconds, metav1.Now()) {
+			//for the purposes of update we ensure that the Pod is both available and not terminating
+			if podutil.IsPodAvailable(pod, ds.Spec.MinReadySeconds, metav1.Now()) && pod.DeletionTimestamp == nil {
 				available = true
 				break
 			}

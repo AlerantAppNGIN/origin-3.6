@@ -7,9 +7,10 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/tools/cache"
-	"k8s.io/kubernetes/pkg/api"
+	api "k8s.io/kubernetes/pkg/apis/core"
 	kcoreclient "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset/typed/core/internalversion"
 )
 
@@ -18,17 +19,17 @@ type ServiceLookup interface {
 	LookupService(*api.Endpoints) (*api.Service, error)
 }
 
-func NewListWatchServiceLookup(svcGetter kcoreclient.ServicesGetter, resync time.Duration) ServiceLookup {
+func NewListWatchServiceLookup(svcGetter kcoreclient.ServicesGetter, resync time.Duration, namespace string) ServiceLookup {
 	svcStore := cache.NewStore(cache.MetaNamespaceKeyFunc)
 	lw := &cache.ListWatch{
 		ListFunc: func(options metav1.ListOptions) (runtime.Object, error) {
-			return svcGetter.Services(api.NamespaceAll).List(options)
+			return svcGetter.Services(namespace).List(options)
 		},
 		WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
-			return svcGetter.Services(api.NamespaceAll).Watch(options)
+			return svcGetter.Services(namespace).Watch(options)
 		},
 	}
-	cache.NewReflector(lw, &api.Service{}, svcStore, resync).Run()
+	go cache.NewReflector(lw, &api.Service{}, svcStore, resync).Run(wait.NeverStop)
 
 	return &serviceLWLookup{
 		store: svcStore,

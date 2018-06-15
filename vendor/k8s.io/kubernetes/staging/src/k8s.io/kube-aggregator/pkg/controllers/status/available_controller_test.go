@@ -19,9 +19,9 @@ package apiserver
 import (
 	"testing"
 
+	"k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	v1listers "k8s.io/client-go/listers/core/v1"
-	"k8s.io/client-go/pkg/api/v1"
 	clienttesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/kube-aggregator/pkg/apis/apiregistration"
@@ -55,6 +55,9 @@ func newService(namespace, name string) *v1.Service {
 		ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name},
 		Spec: v1.ServiceSpec{
 			Type: v1.ServiceTypeClusterIP,
+			Ports: []v1.ServicePort{
+				{Port: 443},
+			},
 		},
 	}
 }
@@ -108,6 +111,27 @@ func TestSync(t *testing.T) {
 				Status:  apiregistration.ConditionFalse,
 				Reason:  "ServiceNotFound",
 				Message: `service/bar in "foo" is not present`,
+			},
+		},
+		{
+			name:           "service on bad port",
+			apiServiceName: "remote.group",
+			apiServices:    []*apiregistration.APIService{newRemoteAPIService("remote.group")},
+			services: []*v1.Service{{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "foo", Name: "bar"},
+				Spec: v1.ServiceSpec{
+					Type: v1.ServiceTypeClusterIP,
+					Ports: []v1.ServicePort{
+						{Port: 6443},
+					},
+				},
+			}},
+			endpoints: []*v1.Endpoints{newEndpointsWithAddress("foo", "bar")},
+			expectedAvailability: apiregistration.APIServiceCondition{
+				Type:    apiregistration.Available,
+				Status:  apiregistration.ConditionFalse,
+				Reason:  "ServicePortError",
+				Message: `service/bar in "foo" is not listening on port 443`,
 			},
 		},
 		{

@@ -8,7 +8,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	apirequest "k8s.io/apiserver/pkg/endpoints/request"
 	"k8s.io/apiserver/pkg/registry/rest"
-	kapi "k8s.io/kubernetes/pkg/api"
+	kapi "k8s.io/kubernetes/pkg/apis/core"
 	clientset "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset"
 	"k8s.io/kubernetes/pkg/serviceaccount"
 
@@ -38,7 +38,7 @@ func (r *REST) New() runtime.Object {
 }
 
 // Create registers a given new pspssr instance to r.registry.
-func (r *REST) Create(ctx apirequest.Context, obj runtime.Object, _ bool) (runtime.Object, error) {
+func (r *REST) Create(ctx apirequest.Context, obj runtime.Object, _ rest.ValidateObjectFunc, _ bool) (runtime.Object, error) {
 	pspssr, ok := obj.(*securityapi.PodSecurityPolicySelfSubjectReview)
 	if !ok {
 		return nil, kapierrors.NewBadRequest(fmt.Sprintf("not a PodSecurityPolicySelfSubjectReview: %#v", obj))
@@ -55,14 +55,14 @@ func (r *REST) Create(ctx apirequest.Context, obj runtime.Object, _ bool) (runti
 		return nil, kapierrors.NewBadRequest("namespace parameter required.")
 	}
 
-	matchedConstraints, err := r.sccMatcher.FindApplicableSCCs(userInfo)
+	matchedConstraints, err := r.sccMatcher.FindApplicableSCCs(userInfo, ns)
 	if err != nil {
 		return nil, kapierrors.NewBadRequest(fmt.Sprintf("unable to find SecurityContextConstraints: %v", err))
 	}
 	saName := pspssr.Spec.Template.Spec.ServiceAccountName
 	if len(saName) > 0 {
 		saUserInfo := serviceaccount.UserInfo(ns, saName, "")
-		saConstraints, err := r.sccMatcher.FindApplicableSCCs(saUserInfo)
+		saConstraints, err := r.sccMatcher.FindApplicableSCCs(saUserInfo, ns)
 		if err != nil {
 			return nil, kapierrors.NewBadRequest(fmt.Sprintf("unable to find SecurityContextConstraints: %v", err))
 		}

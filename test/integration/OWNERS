@@ -6,8 +6,9 @@ reviewers:
   - csrwng
   - soltysh
   - bparees
-  - kargakis
   - knobunc
+  - ironcladlou
+  - squeed
   - dcbw
   - danwinship
 approvers:
@@ -16,7 +17,8 @@ approvers:
   - liggitt
   - mfojtik
   - csrwng
-  - kargakis
   - knobunc
+  - ironcladlou
+  - squeed
   - dcbw
   - danwinship

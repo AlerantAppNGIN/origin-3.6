@@ -8,16 +8,13 @@ import (
 	"io"
 	"io/ioutil"
 	"os"
-	"path"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
 
+	dockertypes "github.com/docker/docker/api/types"
 	"github.com/docker/docker/builder/dockerfile/parser"
-	"github.com/docker/docker/pkg/archive"
-	"github.com/docker/docker/pkg/fileutils"
-	dockertypes "github.com/docker/engine-api/types"
 	docker "github.com/fsouza/go-dockerclient"
 	"github.com/golang/glog"
 
@@ -38,11 +35,24 @@ type Mount struct {
 
 // ClientExecutor can run Docker builds from a Docker client.
 type ClientExecutor struct {
+	// Name is an optional name for this executor.
+	Name string
+	// Named is a map of other named executors.
+	Named map[string]*ClientExecutor
+
+	// TempDir is the temporary directory to use for storing file
+	// contents. If unset, the default temporary directory for the
+	// system will be used.
+	TempDir string
 	// Client is a client to a Docker daemon.
 	Client *docker.Client
 	// Directory is the context directory to build from, will use
-	// the current working directory if not set.
+	// the current working directory if not set. Ignored if
+	// ContextArchive is set.
 	Directory string
+	// A compressed or uncompressed tar archive that should be used
+	// as the build context.
+	ContextArchive string
 	// Excludes are a list of file patterns that should be excluded
 	// from the context. Will be set to the contents of the
 	// .dockerignore file if nil.
@@ -103,6 +113,11 @@ type ClientExecutor struct {
 	Volumes *ContainerVolumeTracker
 }
 
+// NotAuthFn can be used for AuthFn when no authentication is required in Docker.
+func NoAuthFn(string) ([]dockertypes.AuthConfig, bool) {
+	return nil, false
+}
+
 // NewClientExecutor creates a client executor.
 func NewClientExecutor(client *docker.Client) *ClientExecutor {
 	return &ClientExecutor{
@@ -120,6 +135,74 @@ func (e *ClientExecutor) DefaultExcludes() error {
 	}
 	e.Excludes = append(excludes, ".dockerignore")
 	return nil
+}
+
+// WithName creates a new child executor that will be used whenever a COPY statement
+// uses --from=NAME.
+func (e *ClientExecutor) WithName(name string) *ClientExecutor {
+	if e.Named == nil {
+		e.Named = make(map[string]*ClientExecutor)
+		e.Deferred = append([]func() error{func() error {
+			var errs []error
+			for _, named := range e.Named {
+				errs = append(errs, named.Release()...)
+			}
+			if len(errs) > 0 {
+				return fmt.Errorf("%v", errs)
+			}
+			return nil
+		}}, e.Deferred...)
+	}
+
+	copied := *e
+	copied.Name = name
+	copied.Container = nil
+	copied.Deferred = nil
+	copied.Image = nil
+	copied.Volumes = nil
+
+	child := &copied
+	e.Named[name] = child
+	return child
+}
+
+// Stages executes all of the provided stages, starting from the base image. It returns the executor of the last stage
+// or an error if a stage fails.
+func (e *ClientExecutor) Stages(b *imagebuilder.Builder, stages imagebuilder.Stages, from string) (*ClientExecutor, error) {
+	var stageExecutor *ClientExecutor
+	for i, stage := range stages {
+		stageExecutor = e.WithName(stage.Name)
+
+		var stageFrom string
+		if i == 0 {
+			stageFrom = from
+		} else {
+			from, err := b.From(stage.Node)
+			if err != nil {
+				return nil, err
+			}
+			if prereq := e.Named[from]; prereq != nil {
+				b, ok := stages.ByName(from)
+				if !ok {
+					return nil, fmt.Errorf("error: Unable to find stage %s builder", from)
+				}
+				stageExecutor.Image = &docker.Image{
+					Config: b.Builder.Config(),
+				}
+				stageExecutor.Container = prereq.Container
+				glog.V(4).Infof("Using previous stage %s as image: %#v", from, stageExecutor.Image.Config)
+			}
+			stageFrom = from
+		}
+
+		if err := stageExecutor.Prepare(stage.Builder, stage.Node, stageFrom); err != nil {
+			return nil, err
+		}
+		if err := stageExecutor.Execute(stage.Builder, stage.Node); err != nil {
+			return nil, err
+		}
+	}
+	return stageExecutor, nil
 }
 
 // Build is a helper method to perform a Docker build against the
@@ -149,6 +232,7 @@ func (e *ClientExecutor) Prepare(b *imagebuilder.Builder, node *parser.Node, fro
 			return err
 		}
 	}
+
 	// load the image
 	if e.Image == nil {
 		if from == imagebuilder.NoBaseImageSpecifier {
@@ -175,12 +259,21 @@ func (e *ClientExecutor) Prepare(b *imagebuilder.Builder, node *parser.Node, fro
 	}
 
 	b.RunConfig.Image = from
-	e.LogFn("FROM %s", from)
-	glog.V(4).Infof("step: FROM %s", from)
+	if len(e.Name) > 0 {
+		e.LogFn("FROM %s as %s", from, e.Name)
+	} else {
+		e.LogFn("FROM %s", from)
+	}
+	glog.V(4).Infof("step: FROM %s as %s", from, e.Name)
 
 	b.Excludes = e.Excludes
 
 	var sharedMount string
+
+	defaultShell := b.RunConfig.Shell
+	if len(defaultShell) == 0 {
+		defaultShell = []string{"/bin/sh", "-c"}
+	}
 
 	// create a container to execute in, if necessary
 	mustStart := b.RequiresStart(node)
@@ -209,9 +302,7 @@ func (e *ClientExecutor) Prepare(b *imagebuilder.Builder, node *parser.Node, fro
 				}
 				e.Deferred = append(e.Deferred, func() error { return e.Client.RemoveVolume(volumeName) })
 				sharedMount = v.Mountpoint
-				opts.HostConfig = &docker.HostConfig{
-					Binds: []string{volumeName + ":" + e.ContainerTransientMount},
-				}
+				opts.HostConfig.Binds = append(opts.HostConfig.Binds, volumeName+":"+e.ContainerTransientMount)
 			}
 
 			// TODO: windows support
@@ -221,12 +312,12 @@ func (e *ClientExecutor) Prepare(b *imagebuilder.Builder, node *parser.Node, fro
 			} else {
 				// TODO; replace me with a better default command
 				opts.Config.Cmd = []string{"sleep 86400"}
-				opts.Config.Entrypoint = []string{"/bin/sh", "-c"}
+				opts.Config.Entrypoint = append([]string{}, defaultShell...)
 			}
 		}
 
 		if len(opts.Config.Cmd) == 0 {
-			opts.Config.Entrypoint = []string{"/bin/sh", "-c", "# NOP"}
+			opts.Config.Entrypoint = append(append([]string{}, defaultShell...), "# NOP")
 		}
 
 		// copy any source content into the temporary mount path
@@ -241,6 +332,7 @@ func (e *ClientExecutor) Prepare(b *imagebuilder.Builder, node *parser.Node, fro
 			opts.HostConfig.Binds = append(originalBinds, binds...)
 		}
 
+		glog.V(4).Infof("Creating container with %#v %#v", opts.Config, opts.HostConfig)
 		container, err := e.Client.CreateContainer(opts)
 		if err != nil {
 			return fmt.Errorf("unable to create build container: %v", err)
@@ -365,8 +457,9 @@ func (e *ClientExecutor) PopulateTransientMounts(opts docker.CreateContainerOpti
 	for i, mount := range transientMounts {
 		source := mount.SourcePath
 		copies = append(copies, imagebuilder.Copy{
-			Src:  []string{source},
-			Dest: filepath.Join(e.ContainerTransientMount, strconv.Itoa(i)),
+			FromFS: true,
+			Src:    []string{source},
+			Dest:   filepath.Join(e.ContainerTransientMount, strconv.Itoa(i)),
 		})
 	}
 	if err := e.CopyContainer(container, nil, copies...); err != nil {
@@ -537,31 +630,59 @@ func (e *ClientExecutor) Run(run imagebuilder.Run, config docker.Config) error {
 	args := make([]string, len(run.Args))
 	copy(args, run.Args)
 
+	defaultShell := config.Shell
+	if len(defaultShell) == 0 {
+		if runtime.GOOS == "windows" {
+			defaultShell = []string{"cmd", "/S", "/C"}
+		} else {
+			defaultShell = []string{"/bin/sh", "-c"}
+		}
+	}
 	if runtime.GOOS == "windows" {
 		if len(config.WorkingDir) > 0 {
 			args[0] = fmt.Sprintf("cd %s && %s", imagebuilder.BashQuote(config.WorkingDir), args[0])
 		}
 		// TODO: implement windows ENV
-		args = append([]string{"cmd", "/S", "/C"}, args...)
+		args = append(defaultShell, args...)
 	} else {
-		if len(config.WorkingDir) > 0 {
-			args[0] = fmt.Sprintf("cd %s && %s", imagebuilder.BashQuote(config.WorkingDir), args[0])
+		if run.Shell {
+			if len(config.WorkingDir) > 0 {
+				args[0] = fmt.Sprintf("cd %s && %s", imagebuilder.BashQuote(config.WorkingDir), args[0])
+			}
+			if len(config.Env) > 0 {
+				args[0] = imagebuilder.ExportEnv(config.Env) + args[0]
+			}
+			args = append(defaultShell, args...)
+		} else {
+			switch {
+			case len(config.WorkingDir) == 0 && len(config.Env) == 0:
+				// no change necessary
+			case len(args) > 0:
+				setup := "exec \"$@\""
+				if len(config.WorkingDir) > 0 {
+					setup = fmt.Sprintf("cd %s && %s", imagebuilder.BashQuote(config.WorkingDir), setup)
+				}
+				if len(config.Env) > 0 {
+					setup = imagebuilder.ExportEnv(config.Env) + setup
+				}
+				newArgs := make([]string, 0, len(args)+4)
+				newArgs = append(newArgs, defaultShell...)
+				newArgs = append(newArgs, setup, "")
+				newArgs = append(newArgs, args...)
+				args = newArgs
+			}
 		}
-		if len(config.Env) > 0 {
-			args[0] = imagebuilder.ExportEnv(config.Env) + args[0]
-		}
-		args = append([]string{"/bin/sh", "-c"}, args...)
 	}
 
 	if e.StrictVolumeOwnership && !e.Volumes.Empty() {
 		return fmt.Errorf("a RUN command was executed after a VOLUME command, which may result in ownership information being lost")
 	}
-	if err := e.Volumes.Save(e.Container.ID, e.Client); err != nil {
+	if err := e.Volumes.Save(e.Container.ID, e.TempDir, e.Client); err != nil {
 		return err
 	}
 
 	config.Cmd = args
-	glog.V(4).Infof("Running %v inside of %s as user %s", config.Cmd, e.Container.ID, config.User)
+	glog.V(4).Infof("Running %#v inside of %s as user %s", config.Cmd, e.Container.ID, config.User)
 	exec, err := e.Client.CreateExec(docker.CreateExecOptions{
 		Cmd:          config.Cmd,
 		Container:    e.Container.ID,
@@ -583,7 +704,8 @@ func (e *ClientExecutor) Run(run imagebuilder.Run, config docker.Config) error {
 		return err
 	}
 	if status.ExitCode != 0 {
-		return fmt.Errorf("running '%s' failed with exit code %d", strings.Join(args, " "), status.ExitCode)
+		glog.V(4).Infof("Failed command (code %d): %v", status.ExitCode, args)
+		return fmt.Errorf("running '%s' failed with exit code %d", strings.Join(run.Args, " "), status.ExitCode)
 	}
 
 	if err := e.Volumes.Restore(e.Container.ID, e.Client); err != nil {
@@ -609,7 +731,14 @@ func (e *ClientExecutor) CopyContainer(container *docker.Container, excludes []s
 		// TODO: reuse source
 		for _, src := range c.Src {
 			glog.V(4).Infof("Archiving %s %t", src, c.Download)
-			r, closer, err := e.Archive(src, c.Dest, c.Download, c.Download, excludes)
+			var r io.Reader
+			var closer io.Closer
+			var err error
+			if len(c.From) > 0 {
+				r, closer, err = e.archiveFromContainer(c.From, src, c.Dest)
+			} else {
+				r, closer, err = e.Archive(c.FromFS, src, c.Dest, c.Download, excludes)
+			}
 			if err != nil {
 				return err
 			}
@@ -642,71 +771,65 @@ func (c closers) Close() error {
 	return lastErr
 }
 
-func (e *ClientExecutor) Archive(src, dst string, allowDecompression, allowDownload bool, excludes []string) (io.Reader, io.Closer, error) {
-	var closer closers
-	var base string
-	var infos []CopyInfo
-	var err error
+func (e *ClientExecutor) archiveFromContainer(from string, src, dst string) (io.Reader, io.Closer, error) {
+	var containerID string
+	if other, ok := e.Named[from]; ok {
+		if other.Container == nil {
+			return nil, nil, fmt.Errorf("the stage %q has not been built yet", from)
+		}
+		containerID = other.Container.ID
+	} else {
+		glog.V(5).Infof("Creating a container temporarily for image input from %q in %s", from, src)
+		_, err := e.LoadImage(from)
+		if err != nil {
+			return nil, nil, err
+		}
+		c, err := e.Client.CreateContainer(docker.CreateContainerOptions{
+			Config: &docker.Config{
+				Image: from,
+			},
+		})
+		if err != nil {
+			return nil, nil, err
+		}
+		containerID = c.ID
+		e.Deferred = append([]func() error{func() error { return e.removeContainer(containerID) }}, e.Deferred...)
+	}
+
+	pr, pw := io.Pipe()
+	ar, arclose, err := archiveFromContainer(pr, src, dst, nil)
+	if err != nil {
+		pr.Close()
+		return nil, nil, err
+	}
+	go func() {
+		err := e.Client.DownloadFromContainer(containerID, docker.DownloadFromContainerOptions{
+			OutputStream: pw,
+			Path:         src,
+		})
+		pw.CloseWithError(err)
+	}()
+	return ar, closers{pr.Close, arclose.Close}, nil
+}
+
+// TODO: this does not support decompressing nested archives for ADD (when the source is a compressed file)
+func (e *ClientExecutor) Archive(fromFS bool, src, dst string, allowDownload bool, excludes []string) (io.Reader, io.Closer, error) {
 	if isURL(src) {
 		if !allowDownload {
 			return nil, nil, fmt.Errorf("source can't be a URL")
 		}
-		infos, base, err = DownloadURL(src, dst)
-		if len(base) > 0 {
-			closer = append(closer, func() error { return os.RemoveAll(base) })
-		}
-	} else {
-		if filepath.IsAbs(src) {
-			base = filepath.Dir(src)
-			src, err = filepath.Rel(base, src)
-			if err != nil {
-				return nil, nil, err
-			}
-		} else {
-			base = e.Directory
-		}
-		infos, err = CalcCopyInfo(src, base, allowDecompression, true)
+		return archiveFromURL(src, dst, e.TempDir)
 	}
-	if err != nil {
-		closer.Close()
-		return nil, nil, err
+	// the input is from the filesystem, use the source as the input
+	if fromFS {
+		return archiveFromDisk(src, ".", dst, allowDownload, excludes)
 	}
-
-	options := archiveOptionsFor(infos, dst, excludes)
-
-	glog.V(4).Infof("Tar of directory %s %#v", base, options)
-	rc, err := archive.TarWithOptions(base, options)
-	closer = append(closer, rc.Close)
-	return rc, closer, err
-}
-
-func archiveOptionsFor(infos []CopyInfo, dst string, excludes []string) *archive.TarOptions {
-	dst = trimLeadingPath(dst)
-	patterns, patDirs, _, _ := fileutils.CleanPatterns(excludes)
-	options := &archive.TarOptions{}
-	for _, info := range infos {
-		if ok, _ := fileutils.OptimizedMatches(info.Path, patterns, patDirs); ok {
-			continue
-		}
-		options.IncludeFiles = append(options.IncludeFiles, info.Path)
-		if len(dst) == 0 {
-			continue
-		}
-		if options.RebaseNames == nil {
-			options.RebaseNames = make(map[string]string)
-		}
-		if info.FromDir || strings.HasSuffix(dst, "/") || strings.HasSuffix(dst, "/.") || dst == "." {
-			if strings.HasSuffix(info.Path, "/") {
-				options.RebaseNames[info.Path] = dst
-			} else {
-				options.RebaseNames[info.Path] = path.Join(dst, path.Base(info.Path))
-			}
-		} else {
-			options.RebaseNames[info.Path] = dst
-		}
+	// if the context is in archive form, read from it without decompressing
+	if len(e.ContextArchive) > 0 {
+		return archiveFromFile(e.ContextArchive, src, dst, excludes)
 	}
-	options.ExcludePatterns = excludes
-	return options
+	// if the context is a directory, we only allow relative includes
+	return archiveFromDisk(e.Directory, src, dst, allowDownload, excludes)
 }
 
 // ContainerVolumeTracker manages tracking archives of specific paths inside a container.
@@ -773,7 +896,7 @@ func (t *ContainerVolumeTracker) Invalidate(path string) {
 
 // Save ensures that all paths tracked underneath this container are archived or
 // returns an error.
-func (t *ContainerVolumeTracker) Save(containerID string, client *docker.Client) error {
+func (t *ContainerVolumeTracker) Save(containerID, tempDir string, client *docker.Client) error {
 	if t == nil {
 		return nil
 	}
@@ -792,7 +915,7 @@ func (t *ContainerVolumeTracker) Save(containerID string, client *docker.Client)
 		if len(archivePath) > 0 {
 			continue
 		}
-		archivePath, err := snapshotPath(dest, containerID, client)
+		archivePath, err := snapshotPath(dest, containerID, tempDir, client)
 		if err != nil {
 			return err
 		}
@@ -826,8 +949,8 @@ func filterTarPipe(w *tar.Writer, r *tar.Reader, fn func(*tar.Header) bool) erro
 
 // snapshotPath preserves the contents of path in container containerID as a temporary
 // archive, returning either an error or the path of the archived file.
-func snapshotPath(path, containerID string, client *docker.Client) (string, error) {
-	f, err := ioutil.TempFile("", "archived-path")
+func snapshotPath(path, containerID, tempDir string, client *docker.Client) (string, error) {
+	f, err := ioutil.TempFile(tempDir, "archived-path")
 	if err != nil {
 		return "", err
 	}

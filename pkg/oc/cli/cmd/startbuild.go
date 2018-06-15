@@ -29,18 +29,21 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/third_party/forked/golang/netutil"
 	restclient "k8s.io/client-go/rest"
-	kclientcmd "k8s.io/client-go/tools/clientcmd"
-	kapi "k8s.io/kubernetes/pkg/api"
+	"k8s.io/kubernetes/pkg/api/legacyscheme"
+	kapi "k8s.io/kubernetes/pkg/apis/core"
 	"k8s.io/kubernetes/pkg/kubectl/cmd/templates"
 	kcmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
 
+	buildapiv1 "github.com/openshift/api/build/v1"
 	buildapi "github.com/openshift/origin/pkg/build/apis/build"
-	buildapiv1 "github.com/openshift/origin/pkg/build/apis/build/v1"
-	osclient "github.com/openshift/origin/pkg/client"
+	buildclientinternalmanual "github.com/openshift/origin/pkg/build/client/internalversion"
+	buildclientinternal "github.com/openshift/origin/pkg/build/generated/internalclientset"
+	buildclient "github.com/openshift/origin/pkg/build/generated/internalclientset/typed/build/internalversion"
 	cmdutil "github.com/openshift/origin/pkg/cmd/util"
-	"github.com/openshift/origin/pkg/cmd/util/clientcmd"
-	"github.com/openshift/origin/pkg/generate/git"
-	oerrors "github.com/openshift/origin/pkg/util/errors"
+	"github.com/openshift/origin/pkg/git"
+	"github.com/openshift/origin/pkg/oc/cli/util/clientcmd"
+	ocerrors "github.com/openshift/origin/pkg/oc/errors"
+	utilenv "github.com/openshift/origin/pkg/oc/util/env"
 )
 
 var (
@@ -85,7 +88,11 @@ var (
 
 // NewCmdStartBuild implements the OpenShift cli start-build command
 func NewCmdStartBuild(fullName string, f *clientcmd.Factory, in io.Reader, out, errout io.Writer) *cobra.Command {
-	o := &StartBuildOptions{}
+	o := &StartBuildOptions{
+		In:     in,
+		Out:    out,
+		ErrOut: errout,
+	}
 
 	cmd := &cobra.Command{
 		Use:        "start-build (BUILDCONFIG | --from-build=BUILD)",
@@ -94,7 +101,8 @@ func NewCmdStartBuild(fullName string, f *clientcmd.Factory, in io.Reader, out, 
 		Example:    fmt.Sprintf(startBuildExample, fullName),
 		SuggestFor: []string{"build", "builds"},
 		Run: func(cmd *cobra.Command, args []string) {
-			kcmdutil.CheckErr(o.Complete(f, in, out, errout, cmd, fullName, args))
+			kcmdutil.CheckErr(o.Complete(f, cmd, fullName, args))
+			kcmdutil.CheckErr(o.Validate())
 			kcmdutil.CheckErr(o.Run())
 		},
 	}
@@ -105,6 +113,8 @@ func NewCmdStartBuild(fullName string, f *clientcmd.Factory, in io.Reader, out, 
 
 	cmd.Flags().BoolVarP(&o.Follow, "follow", "F", o.Follow, "Start a build and watch its logs until it completes or fails")
 	cmd.Flags().BoolVarP(&o.WaitForComplete, "wait", "w", o.WaitForComplete, "Wait for a build to complete and exit with a non-zero return code if the build fails")
+	cmd.Flags().BoolVar(&o.Incremental, "incremental", o.Incremental, "Overrides the incremental setting in a source-strategy build, ignored if not specified")
+	cmd.Flags().BoolVar(&o.NoCache, "no-cache", o.NoCache, "Overrides the noCache setting in a docker-strategy build, ignored if not specified")
 
 	cmd.Flags().StringVar(&o.FromFile, "from-file", o.FromFile, "A file to use as the binary input for the build; example a pom.xml or Dockerfile. Will be the only file in the build source.")
 	cmd.Flags().StringVar(&o.FromDir, "from-dir", o.FromDir, "A directory to archive and use as the binary input for a build.")
@@ -140,16 +150,21 @@ type StartBuildOptions struct {
 	Env  []string
 	Args []string
 
-	Follow          bool
-	WaitForComplete bool
-	LogLevel        string
+	Follow              bool
+	WaitForComplete     bool
+	IncrementalOverride bool
+	Incremental         bool
+	NoCacheOverride     bool
+	NoCache             bool
+	LogLevel            string
 
 	GitRepository  string
 	GitPostReceive string
 
-	Mapper       meta.RESTMapper
-	Client       osclient.Interface
-	ClientConfig kclientcmd.ClientConfig
+	Mapper         meta.RESTMapper
+	BuildClient    buildclient.BuildInterface
+	BuildLogClient buildclientinternalmanual.BuildLogInterface
+	ClientConfig   *restclient.Config
 
 	AsBinary    bool
 	ShortOutput bool
@@ -159,13 +174,17 @@ type StartBuildOptions struct {
 	Namespace   string
 }
 
-func (o *StartBuildOptions) Complete(f *clientcmd.Factory, in io.Reader, out, errout io.Writer, cmd *cobra.Command, cmdFullName string, args []string) error {
-	o.In = in
-	o.Out = out
-	o.ErrOut = errout
+func (o *StartBuildOptions) Complete(f *clientcmd.Factory, cmd *cobra.Command, cmdFullName string, args []string) error {
+	var err error
 	o.Git = git.NewRepository()
-	o.ClientConfig = f.OpenShiftClientConfig()
+	o.ClientConfig, err = f.ClientConfig()
+	if err != nil {
+		return err
+	}
 	o.Mapper, _ = f.Object()
+
+	o.IncrementalOverride = cmd.Flags().Lookup("incremental").Changed
+	o.NoCacheOverride = cmd.Flags().Lookup("no-cache").Changed
 
 	fromCount := 0
 	if len(o.FromDir) > 0 {
@@ -194,28 +213,22 @@ func (o *StartBuildOptions) Complete(f *clientcmd.Factory, in io.Reader, out, er
 
 	outputFormat := kcmdutil.GetFlagString(cmd, "output")
 	if outputFormat != "name" && outputFormat != "" {
-		return kcmdutil.UsageError(cmd, "Unsupported output format: %s", outputFormat)
+		return kcmdutil.UsageErrorf(cmd, "Unsupported output format: %s", outputFormat)
 	}
 	o.ShortOutput = outputFormat == "name"
 
 	switch {
 	case len(webhook) > 0:
 		if len(args) > 0 || len(buildName) > 0 || o.AsBinary {
-			return kcmdutil.UsageError(cmd, "The '--from-webhook' flag is incompatible with arguments and all '--from-*' flags")
+			return kcmdutil.UsageErrorf(cmd, "The '--from-webhook' flag is incompatible with arguments and all '--from-*' flags")
 		}
 		if !strings.HasSuffix(webhook, "/generic") {
-			fmt.Fprintf(errout, "warning: the '--from-webhook' flag should be called with a generic webhook URL.\n")
+			fmt.Fprintf(o.ErrOut, "warning: the '--from-webhook' flag should be called with a generic webhook URL.\n")
 		}
 		return nil
 
 	case len(args) != 1 && len(buildName) == 0:
-		return kcmdutil.UsageError(cmd, "Must pass a name of a build config or specify build name with '--from-build' flag.\nUse \"%s get bc\" to list all available build configs.", cmdFullName)
-	}
-
-	if len(buildName) != 0 && o.AsBinary {
-		// TODO: we should support this, it should be possible to clone a build to run again with new uploaded artifacts.
-		// Doing so requires introducing a new clonebinary endpoint.
-		return kcmdutil.UsageError(cmd, "Cannot use '--from-build' flag with binary builds")
+		return kcmdutil.UsageErrorf(cmd, "Must pass a name of a build config or specify build name with '--from-build' flag.\nUse \"%s get bc\" to list all available build configs.", cmdFullName)
 	}
 
 	namespace, _, err := f.DefaultNamespace()
@@ -223,11 +236,15 @@ func (o *StartBuildOptions) Complete(f *clientcmd.Factory, in io.Reader, out, er
 		return err
 	}
 
-	client, _, err := f.Clients()
+	clientConfig, err := f.ClientConfig()
 	if err != nil {
 		return err
 	}
-	o.Client = client
+	c, err := buildclientinternal.NewForConfig(clientConfig)
+	if err != nil {
+		return err
+	}
+	o.BuildClient = c.Build()
 
 	var (
 		name     = buildName
@@ -240,10 +257,10 @@ func (o *StartBuildOptions) Complete(f *clientcmd.Factory, in io.Reader, out, er
 		if err != nil {
 			return err
 		}
-		switch {
-		case buildapi.IsResourceOrLegacy("buildconfigs", resource):
+		switch resource {
+		case buildapi.Resource("buildconfigs"):
 			// no special handling required
-		case buildapi.IsResourceOrLegacy("builds", resource):
+		case buildapi.Resource("builds"):
 			if len(o.ListWebhooks) == 0 {
 				return fmt.Errorf("use --from-build to rerun your builds")
 			}
@@ -253,8 +270,8 @@ func (o *StartBuildOptions) Complete(f *clientcmd.Factory, in io.Reader, out, er
 	}
 
 	// when listing webhooks, allow --from-build to lookup a build config
-	if buildapi.IsResourceOrLegacy("builds", resource) && len(o.ListWebhooks) > 0 {
-		build, err := client.Builds(namespace).Get(name, metav1.GetOptions{})
+	if buildapi.Resource("builds") == resource && len(o.ListWebhooks) > 0 {
+		build, err := o.BuildClient.Builds(namespace).Get(name, metav1.GetOptions{})
 		if err != nil {
 			return err
 		}
@@ -268,16 +285,14 @@ func (o *StartBuildOptions) Complete(f *clientcmd.Factory, in io.Reader, out, er
 		name = ref.Name
 	}
 
-	if len(name) == 0 {
-		return fmt.Errorf("a resource name is required either as an argument or by using --from-build")
-	}
-
 	o.Namespace = namespace
 	o.Name = name
 
+	o.BuildLogClient = buildclientinternalmanual.NewBuildLogClient(o.BuildClient.RESTClient(), o.Namespace)
+
 	// Handle environment variables
 	cmdutil.WarnAboutCommaSeparation(o.ErrOut, o.Env, "--env")
-	env, _, err := cmdutil.ParseEnv(o.Env, in)
+	env, _, err := utilenv.ParseEnv(o.Env, o.In)
 	if err != nil {
 		return err
 	}
@@ -288,11 +303,38 @@ func (o *StartBuildOptions) Complete(f *clientcmd.Factory, in io.Reader, out, er
 
 	// Handle Docker build arguments. In order to leverage existing logic, we
 	// first create an EnvVar array, then convert it to []docker.BuildArg
-	buildArgs, err := cmdutil.ParseBuildArg(o.Args, in)
+	buildArgs, err := utilenv.ParseBuildArg(o.Args, o.In)
 	if err != nil {
 		return err
 	}
 	o.BuildArgs = buildArgs
+
+	return nil
+}
+
+// Validate returns validation errors regarding start-build
+func (o *StartBuildOptions) Validate() error {
+	if o.AsBinary {
+		if len(o.LogLevel) > 0 {
+			fmt.Fprintf(o.ErrOut, "WARNING: Specifying --build-loglevel with binary builds is not supported.\n")
+		}
+		if len(o.EnvVar) > 1 || (len(o.LogLevel) == 0 && len(o.EnvVar) > 0) {
+			fmt.Fprintf(o.ErrOut, "WARNING: Specifying environment variables with binary builds is not supported.\n")
+		}
+		if len(o.BuildArgs) > 0 {
+			fmt.Fprintf(o.ErrOut, "WARNING: Specifying build arguments with binary builds is not supported.\n")
+		}
+	}
+
+	if len(o.FromBuild) != 0 && o.AsBinary {
+		// TODO: we should support this, it should be possible to clone a build to run again with new uploaded artifacts.
+		// Doing so requires introducing a new clonebinary endpoint.
+		return fmt.Errorf("Cannot use '--from-build' flag with binary builds")
+	}
+
+	if len(o.Name) == 0 && len(o.FromWebhook) == 0 && len(o.FromBuild) == 0 {
+		return fmt.Errorf("a resource name is required either as an argument or by using --from-build")
+	}
 
 	return nil
 }
@@ -316,14 +358,22 @@ func (o *StartBuildOptions) Run() error {
 		ObjectMeta: metav1.ObjectMeta{Name: o.Name},
 	}
 
+	request.SourceStrategyOptions = &buildapi.SourceStrategyOptions{}
+	if o.IncrementalOverride {
+		request.SourceStrategyOptions.Incremental = &o.Incremental
+	}
+
 	if len(o.EnvVar) > 0 {
 		request.Env = o.EnvVar
 	}
 
+	request.DockerStrategyOptions = &buildapi.DockerStrategyOptions{}
 	if len(o.BuildArgs) > 0 {
-		request.DockerStrategyOptions = &buildapi.DockerStrategyOptions{
-			BuildArgs: o.BuildArgs,
-		}
+		request.DockerStrategyOptions.BuildArgs = o.BuildArgs
+	}
+
+	if o.NoCacheOverride {
+		request.DockerStrategyOptions.NoCache = &o.NoCache
 	}
 
 	if len(o.Commit) > 0 {
@@ -351,14 +401,15 @@ func (o *StartBuildOptions) Run() error {
 		if len(o.BuildArgs) > 0 {
 			fmt.Fprintf(o.ErrOut, "WARNING: Specifying build arguments with binary builds is not supported.\n")
 		}
-		if newBuild, err = streamPathToBuild(o.Git, o.In, o.ErrOut, o.Client.BuildConfigs(o.Namespace), o.FromDir, o.FromFile, o.FromRepo, request); err != nil {
+		instantiateClient := buildclientinternalmanual.NewBuildInstantiateBinaryClient(o.BuildClient.RESTClient(), o.Namespace)
+		if newBuild, err = streamPathToBuild(o.Git, o.In, o.ErrOut, instantiateClient, o.FromDir, o.FromFile, o.FromRepo, request); err != nil {
 			if kerrors.IsAlreadyExists(err) {
 				return transformIsAlreadyExistsError(err, o.Name)
 			}
 			return err
 		}
 	case len(o.FromBuild) > 0:
-		if newBuild, err = o.Client.Builds(o.Namespace).Clone(request); err != nil {
+		if newBuild, err = o.BuildClient.Builds(o.Namespace).Clone(request.Name, request); err != nil {
 			if isInvalidSourceInputsError(err) {
 				return fmt.Errorf("Build %s/%s has no valid source inputs and '--from-build' cannot be used for binary builds", o.Namespace, o.Name)
 			}
@@ -368,7 +419,7 @@ func (o *StartBuildOptions) Run() error {
 			return err
 		}
 	default:
-		if newBuild, err = o.Client.BuildConfigs(o.Namespace).Instantiate(request); err != nil {
+		if newBuild, err = o.BuildClient.BuildConfigs(o.Namespace).Instantiate(request.Name, request); err != nil {
 			if isInvalidSourceInputsError(err) {
 				return fmt.Errorf("Build configuration %s/%s has no valid source inputs, if this is a binary build you must specify one of '--from-dir', '--from-repo', or '--from-file'", o.Namespace, o.Name)
 			}
@@ -379,38 +430,47 @@ func (o *StartBuildOptions) Run() error {
 		}
 	}
 
-	kcmdutil.PrintSuccess(o.Mapper, o.ShortOutput, o.Out, "build", newBuild.Name, false, "started")
+	kcmdutil.PrintSuccess(o.ShortOutput, o.Out, newBuild, false, "started")
 
 	// Stream the logs from the build
 	if o.Follow {
-		opts := buildapi.BuildLogOptions{
-			Follow: true,
-			NoWait: false,
-		}
-		for {
-			rd, err := o.Client.BuildLogs(o.Namespace).Get(newBuild.Name, opts).Stream()
-			if err != nil {
-				// retry the connection to build logs when we hit the timeout.
-				if oerrors.IsTimeoutErr(err) {
-					fmt.Fprintf(o.ErrOut, "timed out getting logs, retrying\n")
-					continue
-				}
-				fmt.Fprintf(o.ErrOut, "error getting logs (%v), waiting for build to complete\n", err)
-				break
-			}
-			defer rd.Close()
-			if _, err = io.Copy(o.Out, rd); err != nil {
-				fmt.Fprintf(o.ErrOut, "error streaming logs (%v), waiting for build to complete\n", err)
-			}
-			break
+		err = o.streamBuildLogs(newBuild)
+		if err != nil {
+			fmt.Fprintf(o.ErrOut, "Failed to stream the build logs - to view the logs, run oc logs build/%s\nError: %v\n", newBuild.Name, err)
 		}
 	}
 
-	if o.Follow || o.WaitForComplete {
-		return WaitForBuildComplete(o.Client.Builds(o.Namespace), newBuild.Name)
+	if o.WaitForComplete {
+		return WaitForBuildComplete(o.BuildClient.Builds(o.Namespace), newBuild.Name)
 	}
 
 	return nil
+}
+
+func (o *StartBuildOptions) streamBuildLogs(build *buildapi.Build) error {
+	opts := buildapi.BuildLogOptions{
+		Follow: true,
+		NoWait: false,
+	}
+	var err error
+	for {
+		rd, logErr := o.BuildLogClient.Logs(build.Name, opts).Stream()
+		if logErr != nil {
+			err = ocerrors.NewError("unable to stream the build logs").WithCause(logErr)
+			glog.V(4).Infof("Error: %v", err)
+			if o.WaitForComplete {
+				continue
+			}
+			break
+		}
+		defer rd.Close()
+		if _, streamErr := io.Copy(o.Out, rd); streamErr != nil {
+			err = ocerrors.NewError("unable to stream the build logs").WithCause(streamErr)
+			glog.V(4).Infof("Error: %v", err)
+		}
+		break
+	}
+	return err
 }
 
 // RunListBuildWebHooks prints the webhooks for the provided build config.
@@ -428,13 +488,13 @@ func (o *StartBuildOptions) RunListBuildWebHooks() error {
 	default:
 		return fmt.Errorf("--list-webhooks must be 'all', 'generic', or 'github'")
 	}
-	client := o.Client
 
-	config, err := client.BuildConfigs(o.Namespace).Get(o.Name, metav1.GetOptions{})
+	config, err := o.BuildClient.BuildConfigs(o.Namespace).Get(o.Name, metav1.GetOptions{})
 	if err != nil {
 		return err
 	}
 
+	webhookClient := buildclientinternalmanual.NewWebhookURLClient(o.BuildClient.RESTClient(), o.Namespace)
 	for _, t := range config.Spec.Triggers {
 		hookType := ""
 		switch {
@@ -449,19 +509,20 @@ func (o *StartBuildOptions) RunListBuildWebHooks() error {
 		default:
 			continue
 		}
-		url, err := client.BuildConfigs(o.Namespace).WebHookURL(o.Name, &t)
+		u, err := webhookClient.WebHookURL(o.Name, &t)
 		if err != nil {
-			if err != osclient.ErrTriggerIsNotAWebHook {
+			if err != buildclientinternalmanual.ErrTriggerIsNotAWebHook {
 				fmt.Fprintf(o.ErrOut, "error: unable to get webhook for %s: %v", o.Name, err)
 			}
 			continue
 		}
-		fmt.Fprintf(o.Out, "%s%s\n", hookType, url.String())
+		urlStr, _ := url.PathUnescape(u.String())
+		fmt.Fprintf(o.Out, "%s%s\n", hookType, urlStr)
 	}
 	return nil
 }
 
-func streamPathToBuild(repo git.Repository, in io.Reader, out io.Writer, client osclient.BuildConfigInterface, fromDir, fromFile, fromRepo string, options *buildapi.BinaryBuildRequestOptions) (*buildapi.Build, error) {
+func streamPathToBuild(repo git.Repository, in io.Reader, out io.Writer, client buildclientinternalmanual.BuildInstantiateBinaryInterface, fromDir, fromFile, fromRepo string, options *buildapi.BinaryBuildRequestOptions) (*buildapi.Build, error) {
 	asDir, asFile, asRepo := len(fromDir) > 0, len(fromFile) > 0, len(fromRepo) > 0
 
 	if asRepo && !git.IsGitInstalled() {
@@ -544,11 +605,11 @@ func streamPathToBuild(repo git.Repository, in io.Reader, out io.Writer, client 
 			// path to something else, otherwise we will delete whatever path the
 			// user provided.
 			var usedTempDir bool = false
-			var tempDirectory string = ""
+			var tempDirectory string
 
 			if asRepo {
 
-				var contextDir string = ""
+				var contextDir string
 				fmt.Fprintf(out, "Uploading %q at commit %q as binary input for the build ...\n", clean, commit)
 				if gitErr != nil {
 					return nil, fmt.Errorf("the directory %q is not a valid Git repository: %v", clean, gitErr)
@@ -638,7 +699,7 @@ func streamPathToBuild(repo git.Repository, in io.Reader, out io.Writer, client 
 		}
 	}
 
-	return client.InstantiateBinary(options, r)
+	return client.InstantiateBinary(options.Name, options, r)
 }
 
 func isArchive(r *bufio.Reader) bool {
@@ -693,13 +754,10 @@ func (o *StartBuildOptions) RunStartBuildWebHook() error {
 	// when using HTTPS, try to reuse the local config transport if possible to get a client cert
 	// TODO: search all configs
 	if hook.Scheme == "https" {
-		config, err := o.ClientConfig.ClientConfig()
-		if err == nil {
-			if url, _, err := restclient.DefaultServerURL(config.Host, "", schema.GroupVersion{}, true); err == nil {
-				if netutil.CanonicalAddr(url) == netutil.CanonicalAddr(hook) && url.Scheme == hook.Scheme {
-					if rt, err := restclient.TransportFor(config); err == nil {
-						httpClient = &http.Client{Transport: rt}
-					}
+		if url, _, err := restclient.DefaultServerURL(o.ClientConfig.Host, "", schema.GroupVersion{}, true); err == nil {
+			if netutil.CanonicalAddr(url) == netutil.CanonicalAddr(hook) && url.Scheme == hook.Scheme {
+				if rt, err := restclient.TransportFor(o.ClientConfig); err == nil {
+					httpClient = &http.Client{Transport: rt}
 				}
 			}
 		}
@@ -723,11 +781,11 @@ func (o *StartBuildOptions) RunStartBuildWebHook() error {
 		// In later server versions we return the created Build in the body.
 		var newBuild buildapi.Build
 		if err = json.Unmarshal(body, &buildapiv1.Build{}); err == nil {
-			if err = runtime.DecodeInto(kapi.Codecs.UniversalDecoder(), body, &newBuild); err != nil {
+			if err = runtime.DecodeInto(legacyscheme.Codecs.UniversalDecoder(), body, &newBuild); err != nil {
 				return err
 			}
 
-			kcmdutil.PrintSuccess(o.Mapper, o.ShortOutput, o.Out, "build", newBuild.Name, false, "started")
+			kcmdutil.PrintSuccess(o.ShortOutput, o.Out, &newBuild, false, "started")
 		}
 	}
 
@@ -808,7 +866,7 @@ func gitRefInfo(repo git.Repository, dir, ref string) (buildapi.GitRefInfo, erro
 }
 
 // WaitForBuildComplete waits for a build identified by the name to complete
-func WaitForBuildComplete(c osclient.BuildInterface, name string) error {
+func WaitForBuildComplete(c buildclient.BuildResourceInterface, name string) error {
 	isOK := func(b *buildapi.Build) bool {
 		return b.Status.Phase == buildapi.BuildPhaseComplete
 	}
@@ -818,7 +876,7 @@ func WaitForBuildComplete(c osclient.BuildInterface, name string) error {
 			b.Status.Phase == buildapi.BuildPhaseError
 	}
 	for {
-		list, err := c.List(metav1.ListOptions{FieldSelector: fields.Set{"name": name}.AsSelector().String()})
+		list, err := c.List(metav1.ListOptions{FieldSelector: fields.Set{"metadata.name": name}.AsSelector().String()})
 		if err != nil {
 			return err
 		}
@@ -832,7 +890,7 @@ func WaitForBuildComplete(c osclient.BuildInterface, name string) error {
 		}
 
 		rv := list.ResourceVersion
-		w, err := c.Watch(metav1.ListOptions{FieldSelector: fields.Set{"name": name}.AsSelector().String(), ResourceVersion: rv})
+		w, err := c.Watch(metav1.ListOptions{FieldSelector: fields.Set{"metadata.name": name}.AsSelector().String(), ResourceVersion: rv})
 		if err != nil {
 			return err
 		}
@@ -872,7 +930,7 @@ func isInvalidSourceInputsError(err error) bool {
 }
 
 func transformIsAlreadyExistsError(err error, buildConfigName string) error {
-	return fmt.Errorf("%s. Retry building BuildConfig \"%s\" or delete the conflicting builds.", err.Error(), buildConfigName)
+	return fmt.Errorf("%s. Retry building BuildConfig \"%s\" or delete the conflicting builds", err.Error(), buildConfigName)
 }
 
 func httpFileName(resp *http.Response) (filename string) {

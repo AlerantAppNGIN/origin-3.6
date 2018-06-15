@@ -6,10 +6,14 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	apirequest "k8s.io/apiserver/pkg/endpoints/request"
 	"k8s.io/apiserver/pkg/registry/rest"
+	"k8s.io/kubernetes/pkg/printers"
+	printerstorage "k8s.io/kubernetes/pkg/printers/storage"
 
 	imageapi "github.com/openshift/origin/pkg/image/apis/image"
 	"github.com/openshift/origin/pkg/image/registry/image"
 	"github.com/openshift/origin/pkg/image/registry/imagestream"
+	"github.com/openshift/origin/pkg/image/util"
+	printersinternal "github.com/openshift/origin/pkg/printers/internalversion"
 )
 
 // REST implements the RESTStorage interface in terms of an image registry and
@@ -19,13 +23,24 @@ import (
 type REST struct {
 	imageRegistry       image.Registry
 	imageStreamRegistry imagestream.Registry
+	rest.TableConvertor
 }
 
 var _ rest.Getter = &REST{}
+var _ rest.ShortNamesProvider = &REST{}
+
+// ShortNames implements the ShortNamesProvider interface. Returns a list of short names for a resource.
+func (r *REST) ShortNames() []string {
+	return []string{"isimage"}
+}
 
 // NewREST returns a new REST.
 func NewREST(imageRegistry image.Registry, imageStreamRegistry imagestream.Registry) *REST {
-	return &REST{imageRegistry, imageStreamRegistry}
+	return &REST{
+		imageRegistry,
+		imageStreamRegistry,
+		printerstorage.TableConvertor{TablePrinter: printers.NewTablePrinter().With(printersinternal.AddHandlers)},
+	}
 }
 
 // New is only implemented to make REST implement RESTStorage
@@ -70,7 +85,7 @@ func (r *REST) Get(ctx apirequest.Context, id string, options *metav1.GetOptions
 	if err != nil {
 		return nil, err
 	}
-	if err := imageapi.ImageWithMetadata(image); err != nil {
+	if err := util.ImageWithMetadata(image); err != nil {
 		return nil, err
 	}
 	image.DockerImageManifest = ""
@@ -79,7 +94,7 @@ func (r *REST) Get(ctx apirequest.Context, id string, options *metav1.GetOptions
 	isi := imageapi.ImageStreamImage{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace:         apirequest.NamespaceValue(ctx),
-			Name:              imageapi.MakeImageStreamImageName(name, imageID),
+			Name:              imageapi.JoinImageStreamImage(name, imageID),
 			CreationTimestamp: image.ObjectMeta.CreationTimestamp,
 			Annotations:       repo.Annotations,
 		},

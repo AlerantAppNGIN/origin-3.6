@@ -7,7 +7,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
-	kapi "k8s.io/kubernetes/pkg/api"
+	kapi "k8s.io/kubernetes/pkg/apis/core"
 
 	buildapi "github.com/openshift/origin/pkg/build/apis/build"
 	buildclient "github.com/openshift/origin/pkg/build/generated/internalclientset"
@@ -26,22 +26,17 @@ func TestGCDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	originClient, err := testutil.GetClusterAdminClient(clusterAdminKubeConfig)
-	if err != nil {
-		t.Fatal(err)
-	}
 	kubeClient, err := testutil.GetClusterAdminKubeClient(clusterAdminKubeConfig)
 	if err != nil {
 		t.Fatal(err)
 	}
-
 	newBuildClient, err := buildclient.NewForConfig(clusterAdminConfig)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	ns := "some-ns-old"
-	if _, err := testserver.CreateNewProject(originClient, *clusterAdminConfig, ns, "adminUser"); err != nil {
+	if _, _, err := testserver.CreateNewProject(clusterAdminConfig, ns, "adminUser"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -83,17 +78,17 @@ func TestGCDefaults(t *testing.T) {
 
 	// the /oapi endpoints should orphan by default
 	// wait for a bit and make sure that the build is still there
-	time.Sleep(2 * time.Second)
+	time.Sleep(6 * time.Second)
 	childConfigMap, err = kubeClient.Core().ConfigMaps(ns).Get(childConfigMap.Name, metav1.GetOptions{})
 	if err != nil {
 		t.Error(err)
 	}
 
-	if bc, err := newBuildClient.BuildConfigs(ns).Get(buildConfig.Name, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+	if bc, err := newBuildClient.Build().BuildConfigs(ns).Get(buildConfig.Name, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
 		t.Fatalf("%v and %#v", err, bc)
 	}
 
-	secondBuildConfig, err := newBuildClient.BuildConfigs(ns).Create(buildConfig)
+	secondBuildConfig, err := newBuildClient.Build().BuildConfigs(ns).Create(buildConfig)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -8,17 +8,17 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	kapi "k8s.io/kubernetes/pkg/api"
+	kapi "k8s.io/kubernetes/pkg/apis/core"
 	"k8s.io/kubernetes/pkg/kubectl/cmd/templates"
 	cmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
 
-	"github.com/openshift/origin/pkg/client"
-	"github.com/openshift/origin/pkg/cmd/util/clientcmd"
+	"github.com/openshift/origin/pkg/oc/cli/util/clientcmd"
 	quotaapi "github.com/openshift/origin/pkg/quota/apis/quota"
+	quotaclientinternal "github.com/openshift/origin/pkg/quota/generated/internalclientset"
+	quotaclient "github.com/openshift/origin/pkg/quota/generated/internalclientset/typed/quota/internalversion"
 )
 
 const ClusterQuotaRecommendedName = "clusterresourcequota"
@@ -36,15 +36,16 @@ var (
 
 type CreateClusterQuotaOptions struct {
 	ClusterQuota *quotaapi.ClusterResourceQuota
-	Client       client.ClusterResourceQuotasInterface
+	Client       quotaclient.ClusterResourceQuotasGetter
 
 	DryRun bool
 
-	Mapper       meta.RESTMapper
 	OutputFormat string
 	Out          io.Writer
 	Printer      ObjectPrinter
 }
+
+type ObjectPrinter func(runtime.Object, io.Writer) error
 
 // NewCmdCreateClusterQuota is a macro command to create a new cluster quota.
 func NewCmdCreateClusterQuota(name, fullName string, f *clientcmd.Factory, out io.Writer) *cobra.Command {
@@ -117,17 +118,20 @@ func (o *CreateClusterQuotaOptions) Complete(cmd *cobra.Command, f *clientcmd.Fa
 		}
 		o.ClusterQuota.Spec.Quota.Hard[kapi.ResourceName(tokens[0])] = quantity
 	}
-
-	o.Client, _, err = f.Clients()
+	clientConfig, err := f.ClientConfig()
 	if err != nil {
 		return err
 	}
+	quotaClient, err := quotaclientinternal.NewForConfig(clientConfig)
+	if err != nil {
+		return err
+	}
+	o.Client = quotaClient.Quota()
 
-	o.Mapper, _ = f.Object()
 	o.OutputFormat = cmdutil.GetFlagString(cmd, "output")
 
 	o.Printer = func(obj runtime.Object, out io.Writer) error {
-		return f.PrintObject(cmd, false, o.Mapper, obj, out)
+		return cmdutil.PrintObject(cmd, obj, out)
 	}
 
 	return nil
@@ -139,9 +143,6 @@ func (o *CreateClusterQuotaOptions) Validate() error {
 	}
 	if o.Client == nil {
 		return fmt.Errorf("Client is required")
-	}
-	if o.Mapper == nil {
-		return fmt.Errorf("Mapper is required")
 	}
 	if o.Out == nil {
 		return fmt.Errorf("Out is required")
@@ -165,7 +166,7 @@ func (o *CreateClusterQuotaOptions) Run() error {
 	}
 
 	if useShortOutput := o.OutputFormat == "name"; useShortOutput || len(o.OutputFormat) == 0 {
-		cmdutil.PrintSuccess(o.Mapper, useShortOutput, o.Out, "clusterquota", actualObj.Name, o.DryRun, "created")
+		cmdutil.PrintSuccess(useShortOutput, o.Out, actualObj, o.DryRun, "created")
 		return nil
 	}
 

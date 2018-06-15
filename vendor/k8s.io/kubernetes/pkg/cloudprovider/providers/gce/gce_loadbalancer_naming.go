@@ -22,8 +22,9 @@ import (
 	"fmt"
 	"strings"
 
+	"k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/kubernetes/pkg/api/v1"
+	"k8s.io/kubernetes/pkg/cloudprovider/providers/gce/cloud"
 )
 
 // Internal Load Balancer
@@ -33,7 +34,7 @@ func makeInstanceGroupName(clusterID string) string {
 	return fmt.Sprintf("k8s-ig--%s", clusterID)
 }
 
-func makeBackendServiceName(loadBalancerName, clusterID string, shared bool, scheme lbScheme, protocol v1.Protocol, svcAffinity v1.ServiceAffinity) string {
+func makeBackendServiceName(loadBalancerName, clusterID string, shared bool, scheme cloud.LbScheme, protocol v1.Protocol, svcAffinity v1.ServiceAffinity) string {
 	if shared {
 		hash := sha1.New()
 
@@ -84,9 +85,14 @@ func makeBackendServiceDescription(nm types.NamespacedName, shared bool) string 
 
 // External Load Balancer
 
-// makeNodesHealthCheckName returns name of the health check resource used by
+// makeServiceDescription is used to generate descriptions for forwarding rules and addresses.
+func makeServiceDescription(serviceName string) string {
+	return fmt.Sprintf(`{"kubernetes.io/service-name":"%s"}`, serviceName)
+}
+
+// MakeNodesHealthCheckName returns name of the health check resource used by
 // the GCE load balancers (l4) for performing health checks on nodes.
-func makeNodesHealthCheckName(clusterID string) string {
+func MakeNodesHealthCheckName(clusterID string) string {
 	return fmt.Sprintf("k8s-%v-node", clusterID)
 }
 
@@ -98,12 +104,14 @@ func makeHealthCheckDescription(serviceName string) string {
 // balancers (l4) for performing health checks.
 func MakeHealthCheckFirewallName(clusterID, hcName string, isNodesHealthCheck bool) string {
 	if isNodesHealthCheck {
-		return makeNodesHealthCheckName(clusterID) + "-http-hc"
+		return MakeNodesHealthCheckName(clusterID) + "-http-hc"
 	}
 	return "k8s-" + hcName + "-http-hc"
 }
 
-func makeFirewallName(name string) string {
+// MakeFirewallName returns the firewall name used by the GCE load
+// balancers (l4) for serving traffic.
+func MakeFirewallName(name string) string {
 	return fmt.Sprintf("k8s-fw-%s", name)
 }
 

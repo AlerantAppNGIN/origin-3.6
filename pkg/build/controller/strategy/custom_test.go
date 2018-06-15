@@ -6,13 +6,14 @@ import (
 	"strings"
 	"testing"
 
+	"k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/validation"
-	kapi "k8s.io/kubernetes/pkg/api"
-	kapihelper "k8s.io/kubernetes/pkg/api/helper"
-	"k8s.io/kubernetes/pkg/api/v1"
+	"k8s.io/kubernetes/pkg/api/legacyscheme"
+	kapi "k8s.io/kubernetes/pkg/apis/core"
+	kapihelper "k8s.io/kubernetes/pkg/apis/core/helper"
 
 	buildapi "github.com/openshift/origin/pkg/build/apis/build"
 	_ "github.com/openshift/origin/pkg/build/apis/build/install"
@@ -21,7 +22,7 @@ import (
 
 func TestCustomCreateBuildPod(t *testing.T) {
 	strategy := CustomBuildStrategy{
-		Codec: kapi.Codecs.LegacyCodec(buildapi.LegacySchemeGroupVersion),
+		Codec: legacyscheme.Codecs.LegacyCodec(buildapi.LegacySchemeGroupVersion),
 	}
 
 	expectedBad := mockCustomBuild(false, false)
@@ -50,8 +51,8 @@ func TestCustomCreateBuildPod(t *testing.T) {
 	}
 
 	container := actual.Spec.Containers[0]
-	if container.Name != "custom-build" {
-		t.Errorf("Expected custom-build, but got %s!", container.Name)
+	if container.Name != CustomBuild {
+		t.Errorf("Expected %s, but got %s!", CustomBuild, container.Name)
 	}
 	if container.ImagePullPolicy != v1.PullIfNotPresent {
 		t.Errorf("Expected %v, got %v", v1.PullIfNotPresent, container.ImagePullPolicy)
@@ -76,11 +77,11 @@ func TestCustomCreateBuildPod(t *testing.T) {
 	if len(actual.Spec.Volumes) != 3 {
 		t.Fatalf("Expected 3 volumes in Build pod, got %d", len(actual.Spec.Volumes))
 	}
-	buildJSON, _ := runtime.Encode(kapi.Codecs.LegacyCodec(buildapi.LegacySchemeGroupVersion), build)
+	buildJSON, _ := runtime.Encode(legacyscheme.Codecs.LegacyCodec(buildapi.LegacySchemeGroupVersion), build)
 	errorCases := map[int][]string{
 		0: {"BUILD", string(buildJSON)},
 	}
-	standardEnv := []string{"SOURCE_REPOSITORY", "SOURCE_URI", "SOURCE_CONTEXT_DIR", "SOURCE_REF", "OUTPUT_IMAGE", "OUTPUT_REGISTRY", buildapi.OriginVersion}
+	standardEnv := []string{"SOURCE_REPOSITORY", "SOURCE_URI", "SOURCE_CONTEXT_DIR", "SOURCE_REF", "OUTPUT_IMAGE", "OUTPUT_REGISTRY"}
 	for index, exp := range errorCases {
 		if e := container.Env[index]; e.Name != exp[0] || e.Value != exp[1] {
 			t.Errorf("Expected %s:%s, got %s:%s!\n", exp[0], exp[1], e.Name, e.Value)
@@ -97,11 +98,13 @@ func TestCustomCreateBuildPod(t *testing.T) {
 			t.Errorf("Expected %s variable to be set", name)
 		}
 	}
+
+	checkAliasing(t, actual)
 }
 
 func TestCustomCreateBuildPodExpectedForcePull(t *testing.T) {
 	strategy := CustomBuildStrategy{
-		Codec: kapi.Codecs.LegacyCodec(buildapi.LegacySchemeGroupVersion),
+		Codec: legacyscheme.Codecs.LegacyCodec(buildapi.LegacySchemeGroupVersion),
 	}
 
 	expected := mockCustomBuild(true, false)
@@ -117,7 +120,7 @@ func TestCustomCreateBuildPodExpectedForcePull(t *testing.T) {
 
 func TestEmptySource(t *testing.T) {
 	strategy := CustomBuildStrategy{
-		Codec: kapi.Codecs.LegacyCodec(buildapi.LegacySchemeGroupVersion),
+		Codec: legacyscheme.Codecs.LegacyCodec(buildapi.LegacySchemeGroupVersion),
 	}
 
 	expected := mockCustomBuild(false, true)
@@ -129,10 +132,10 @@ func TestEmptySource(t *testing.T) {
 
 func TestCustomCreateBuildPodWithCustomCodec(t *testing.T) {
 	strategy := CustomBuildStrategy{
-		Codec: kapi.Codecs.LegacyCodec(buildapi.LegacySchemeGroupVersion),
+		Codec: legacyscheme.Codecs.LegacyCodec(buildapi.LegacySchemeGroupVersion),
 	}
 
-	for _, version := range kapi.Registry.GroupOrDie(buildapi.LegacyGroupName).GroupVersions {
+	for _, version := range legacyscheme.Registry.GroupOrDie(buildapi.LegacyGroupName).GroupVersions {
 		// Create new Build specification and modify Spec API version
 		build := mockCustomBuild(false, false)
 		build.Spec.Strategy.CustomStrategy.BuildAPIVersion = fmt.Sprintf("%s/%s", version.Group, version.Version)
@@ -159,7 +162,7 @@ func TestCustomCreateBuildPodWithCustomCodec(t *testing.T) {
 
 func TestCustomBuildLongName(t *testing.T) {
 	strategy := CustomBuildStrategy{
-		Codec: kapi.Codecs.LegacyCodec(buildapi.LegacySchemeGroupVersion),
+		Codec: legacyscheme.Codecs.LegacyCodec(buildapi.LegacySchemeGroupVersion),
 	}
 	build := mockCustomBuild(false, false)
 	build.Name = strings.Repeat("a", validation.DNS1123LabelMaxLength*2)
@@ -187,9 +190,9 @@ func mockCustomBuild(forcePull, emptySource bool) *buildapi.Build {
 	}
 	return &buildapi.Build{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: "customBuild",
+			Name: "CustomBuild",
 			Labels: map[string]string{
-				"name": "customBuild",
+				"name": "CustomBuild",
 			},
 		},
 		Spec: buildapi.BuildSpec{

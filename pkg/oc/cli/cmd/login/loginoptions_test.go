@@ -1,21 +1,28 @@
 package login
 
 import (
+	"bytes"
 	"crypto/tls"
+	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
-	"strings"
 	"testing"
 
 	"github.com/MakeNowJust/heredoc"
 
-	"github.com/openshift/origin/pkg/cmd/util/clientcmd"
-	"github.com/openshift/origin/pkg/oc/cli/config"
+	"github.com/openshift/origin/pkg/client/config"
+	"github.com/openshift/origin/pkg/oauth/util"
 
+	kapierrs "k8s.io/apimachinery/pkg/api/errors"
 	restclient "k8s.io/client-go/rest"
 	kclientcmdapi "k8s.io/client-go/tools/clientcmd/api"
+)
+
+const (
+	oauthMetadataEndpoint = "/.well-known/oauth-authorization-server"
 )
 
 func TestNormalizeServerURL(t *testing.T) {
@@ -233,10 +240,6 @@ func TestDialToHTTPServer(t *testing.T) {
 		"succeed dialing": {
 			serverURL: server.URL,
 		},
-		"try using HTTPS against HTTP server": {
-			serverURL:       "https:" + strings.TrimPrefix(server.URL, "http:"),
-			evalExpectedErr: clientcmd.IsTLSOversizedRecord,
-		},
 	}
 
 	for name, test := range testCases {
@@ -256,6 +259,77 @@ func TestDialToHTTPServer(t *testing.T) {
 	}
 }
 
+type oauthMetadataResponse struct {
+	metadata *util.OauthAuthorizationServerMetadata
+}
+
+func (r *oauthMetadataResponse) Serialize() ([]byte, error) {
+	b, err := json.Marshal(r.metadata)
+	if err != nil {
+		return []byte{}, err
+	}
+
+	return b, nil
+}
+
+func TestPreserveErrTypeAuthInfo(t *testing.T) {
+	invoked := make(chan struct{}, 2)
+	oauthResponse := []byte{}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case invoked <- struct{}{}:
+		default:
+			t.Fatalf("unexpected request handled by test server: %v: %v", r.Method, r.URL)
+		}
+
+		if r.URL.Path == oauthMetadataEndpoint {
+			w.WriteHeader(http.StatusOK)
+			w.Write(oauthResponse)
+			return
+		}
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer server.Close()
+
+	metadataResponse := &oauthMetadataResponse{}
+	metadataResponse.metadata = &util.OauthAuthorizationServerMetadata{
+		Issuer:                        server.URL,
+		AuthorizationEndpoint:         server.URL + "/oauth/authorize",
+		TokenEndpoint:                 server.URL + "/oauth/token",
+		CodeChallengeMethodsSupported: []string{"plain", "S256"},
+	}
+
+	oauthResponse, err := metadataResponse.Serialize()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	options := &LoginOptions{
+		Server:             server.URL,
+		StartingKubeConfig: &kclientcmdapi.Config{},
+		Username:           "test",
+		Password:           "test",
+		Reader:             bytes.NewReader([]byte{}),
+
+		Config: &restclient.Config{
+			Host: server.URL,
+		},
+
+		Out:    ioutil.Discard,
+		ErrOut: ioutil.Discard,
+	}
+
+	err = options.gatherAuthInfo()
+	if err == nil {
+		t.Fatalf("expecting unauthorized error when gathering authinfo")
+	}
+
+	if !kapierrs.IsUnauthorized(err) {
+		t.Fatalf("expecting error of type metav1.StatusReasonUnauthorized, but got %T", err)
+	}
+}
+
 func TestDialToHTTPSServer(t *testing.T) {
 	invoked := make(chan struct{}, 1)
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -272,10 +346,6 @@ func TestDialToHTTPSServer(t *testing.T) {
 		"succeed dialing": {
 			serverURL:     server.URL,
 			skipTLSVerify: true,
-		},
-		"certificate unknown": {
-			serverURL:       server.URL,
-			evalExpectedErr: clientcmd.IsCertificateAuthorityUnknown,
 		},
 	}
 

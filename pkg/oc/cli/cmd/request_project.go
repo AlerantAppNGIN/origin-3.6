@@ -11,10 +11,11 @@ import (
 	"k8s.io/kubernetes/pkg/kubectl/cmd/templates"
 	kcmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
 
-	"github.com/openshift/origin/pkg/client"
-	"github.com/openshift/origin/pkg/cmd/util/clientcmd"
 	cliconfig "github.com/openshift/origin/pkg/oc/cli/config"
+	"github.com/openshift/origin/pkg/oc/cli/util/clientcmd"
 	projectapi "github.com/openshift/origin/pkg/project/apis/project"
+	projectclientinternal "github.com/openshift/origin/pkg/project/generated/internalclientset"
+	projectclient "github.com/openshift/origin/pkg/project/generated/internalclientset/typed/project/internalversion"
 )
 
 // RequestProjectRecommendedCommandName is the recommended command name.
@@ -31,7 +32,7 @@ type NewProjectOptions struct {
 
 	SkipConfigWrite bool
 
-	Client client.Interface
+	Client projectclient.ProjectInterface
 
 	ProjectOptions *ProjectOptions
 	Out            io.Writer
@@ -85,11 +86,11 @@ func NewCmdRequestProject(name, baseName string, f *clientcmd.Factory, out, erro
 		Example: fmt.Sprintf(requestProjectExample, baseName, name),
 		Run: func(cmd *cobra.Command, args []string) {
 			kcmdutil.CheckErr(o.Complete(f, cmd, args))
-
-			var err error
-			o.Client, _, err = f.Clients()
+			clientConfig, err := f.ClientConfig()
 			kcmdutil.CheckErr(err)
-
+			projectClient, err := projectclientinternal.NewForConfig(clientConfig)
+			kcmdutil.CheckErr(err)
+			o.Client = projectClient.Project()
 			kcmdutil.CheckErr(o.Run())
 		},
 	}
@@ -117,7 +118,7 @@ func (o *NewProjectOptions) Complete(f *clientcmd.Factory, cmd *cobra.Command, a
 			return err
 		}
 	} else {
-		clientConfig, err := f.OpenShiftClientConfig().ClientConfig()
+		clientConfig, err := f.ClientConfig()
 		if err != nil {
 			return err
 		}
@@ -129,9 +130,7 @@ func (o *NewProjectOptions) Complete(f *clientcmd.Factory, cmd *cobra.Command, a
 
 // Run implements all the necessary functionality for RequestProject.
 func (o *NewProjectOptions) Run() error {
-	// TODO eliminate this when we get better forbidden messages
-	_, err := o.Client.ProjectRequests().List(metav1.ListOptions{})
-	if err != nil {
+	if err := o.Client.RESTClient().Get().Resource("projectrequests").Do().Into(&metav1.Status{}); err != nil {
 		return err
 	}
 

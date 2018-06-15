@@ -16,11 +16,12 @@ import (
 	restclient "k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
-	"k8s.io/kubernetes/pkg/api"
+	"k8s.io/client-go/util/retry"
+	api "k8s.io/kubernetes/pkg/apis/core"
 	kclientset "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset"
-	"k8s.io/kubernetes/pkg/client/retry"
 	serviceaccountadmission "k8s.io/kubernetes/plugin/pkg/admission/serviceaccount"
 
+	authorizationclient "github.com/openshift/origin/pkg/authorization/generated/internalclientset"
 	"github.com/openshift/origin/pkg/cmd/server/bootstrappolicy"
 	"github.com/openshift/origin/pkg/oc/admin/policy"
 	"github.com/openshift/origin/pkg/serviceaccounts/controllers"
@@ -44,10 +45,6 @@ func TestServiceAccountAuthorization(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	cluster1AdminKubeClientset, err := testutil.GetClusterAdminKubeClient(cluster1AdminConfigFile)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	cluster1AdminOSClient, err := testutil.GetClusterAdminClient(cluster1AdminConfigFile)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -75,18 +72,18 @@ func TestServiceAccountAuthorization(t *testing.T) {
 
 	// Make sure the service account doesn't have access
 	failNS := &api.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "test-fail"}}
-	if _, err := cluster1SAKubeClient.Namespaces().Create(failNS); !errors.IsForbidden(err) {
+	if _, err := cluster1SAKubeClient.Core().Namespaces().Create(failNS); !errors.IsForbidden(err) {
 		t.Fatalf("expected forbidden error, got %v", err)
 	}
 
 	// Make the service account a cluster admin on cluster1
 	addRoleOptions := &policy.RoleModificationOptions{
 		RoleName:            bootstrappolicy.ClusterAdminRoleName,
-		RoleBindingAccessor: policy.NewClusterRoleBindingAccessor(cluster1AdminOSClient),
+		RoleBindingAccessor: policy.NewClusterRoleBindingAccessor(authorizationclient.NewForConfigOrDie(cluster1AdminConfig).Authorization()),
 		Users:               []string{saUsername},
 	}
 	if err := addRoleOptions.AddRole(); err != nil {
-		t.Fatalf("could not add role to service account")
+		t.Fatal(err)
 	}
 
 	// Give the policy cache a second to catch its breath
@@ -95,7 +92,7 @@ func TestServiceAccountAuthorization(t *testing.T) {
 	// Make sure the service account now has access
 	// This tests authentication using the etcd-based token getter
 	passNS := &api.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "test-pass"}}
-	if _, err := cluster1SAKubeClient.Namespaces().Create(passNS); err != nil {
+	if _, err := cluster1SAKubeClient.Core().Namespaces().Create(passNS); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -168,9 +165,15 @@ func TestAutomaticCreationOfPullSecrets(t *testing.T) {
 	saNamespace := api.NamespaceDefault
 	saName := serviceaccountadmission.DefaultServiceAccountName
 
-	masterConfig, clusterAdminConfig, err := testserver.StartTestMaster()
+	masterConfig, err := testserver.DefaultMasterOptions()
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatalf("error creating config: %v", err)
+	}
+	masterConfig.ImagePolicyConfig.InternalRegistryHostname = "internal.registry.com:8080"
+	masterConfig.ImagePolicyConfig.ExternalRegistryHostname = "external.registry.com"
+	clusterAdminConfig, err := testserver.StartConfiguredMaster(masterConfig)
+	if err != nil {
+		t.Fatalf("error starting server: %v", err)
 	}
 	defer testserver.CleanupMasterEtcd(t, masterConfig)
 	clusterAdminKubeClient, err := testutil.GetClusterAdminKubeClient(clusterAdminConfig)
@@ -195,17 +198,23 @@ func TestAutomaticCreationOfPullSecrets(t *testing.T) {
 	if len(saPullSecret) == 0 {
 		t.Errorf("pull secret was not created")
 	}
+	if !strings.Contains(saPullSecret, masterConfig.ImagePolicyConfig.InternalRegistryHostname) {
+		t.Errorf("missing %q in %v", masterConfig.ImagePolicyConfig.InternalRegistryHostname, saPullSecret)
+	}
+	if !strings.Contains(saPullSecret, masterConfig.ImagePolicyConfig.ExternalRegistryHostname) {
+		t.Errorf("missing %q in %v", masterConfig.ImagePolicyConfig.ExternalRegistryHostname, saPullSecret)
+	}
 }
 
 func waitForServiceAccountPullSecret(client kclientset.Interface, ns, name string, attempts int, interval time.Duration) (string, string, error) {
 	for i := 0; i <= attempts; i++ {
 		time.Sleep(interval)
-		secretName, token, err := getServiceAccountPullSecret(client, ns, name)
+		secretName, dockerCfg, err := getServiceAccountPullSecret(client, ns, name)
 		if err != nil {
 			return "", "", err
 		}
-		if len(token) > 0 {
-			return secretName, token, nil
+		if len(dockerCfg) > 2 {
+			return secretName, dockerCfg, nil
 		}
 	}
 	return "", "", nil
@@ -320,15 +329,17 @@ func TestEnforcingServiceAccount(t *testing.T) {
 }
 
 func TestDockercfgTokenDeletedController(t *testing.T) {
-	masterConfig, clusterAdminConfig, err := testserver.StartTestMaster()
+	masterConfig, err := testserver.DefaultMasterOptions()
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatalf("error creating config: %v", err)
+	}
+	masterConfig.ImagePolicyConfig.InternalRegistryHostname = "internal.registry.com:8080"
+	masterConfig.ImagePolicyConfig.ExternalRegistryHostname = "external.registry.com"
+	clusterAdminConfig, err := testserver.StartConfiguredMaster(masterConfig)
+	if err != nil {
+		t.Fatalf("error starting server: %v", err)
 	}
 	defer testserver.CleanupMasterEtcd(t, masterConfig)
-	clusterAdminClient, err := testutil.GetClusterAdminClient(clusterAdminConfig)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
 	clusterAdminClientConfig, err := testutil.GetClusterAdminClientConfig(clusterAdminConfig)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -342,7 +353,7 @@ func TestDockercfgTokenDeletedController(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "sa1", Namespace: "ns1"},
 	}
 
-	if _, err := testserver.CreateNewProject(clusterAdminClient, *clusterAdminClientConfig, sa.Namespace, "ignored"); err != nil {
+	if _, _, err := testserver.CreateNewProject(clusterAdminClientConfig, sa.Namespace, "ignored"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 

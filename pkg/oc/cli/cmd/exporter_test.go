@@ -6,10 +6,11 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	kapi "k8s.io/kubernetes/pkg/api"
+	"k8s.io/apimachinery/pkg/util/diff"
+	kapi "k8s.io/kubernetes/pkg/apis/core"
 
-	deployapi "github.com/openshift/origin/pkg/deploy/apis/apps"
-	deploytest "github.com/openshift/origin/pkg/deploy/apis/apps/test"
+	appsapi "github.com/openshift/origin/pkg/apps/apis/apps"
+	appstest "github.com/openshift/origin/pkg/apps/apis/apps/test"
 	imageapi "github.com/openshift/origin/pkg/image/apis/image"
 	osautil "github.com/openshift/origin/pkg/serviceaccounts/util"
 )
@@ -29,14 +30,14 @@ func TestExport(t *testing.T) {
 	}{
 		{
 			name:   "export deploymentConfig",
-			object: deploytest.OkDeploymentConfig(1),
-			expectedObj: &deployapi.DeploymentConfig{
+			object: appstest.OkDeploymentConfig(1),
+			expectedObj: &appsapi.DeploymentConfig{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:       "config",
-					Generation: 1,
+					Generation: 0,
 				},
-				Spec:   deploytest.OkDeploymentConfigSpec(),
-				Status: deployapi.DeploymentConfigStatus{},
+				Spec:   appstest.OkDeploymentConfigSpec(),
+				Status: appsapi.DeploymentConfigStatus{},
 			},
 			expectedErr: nil,
 		},
@@ -157,7 +158,7 @@ func TestExport(t *testing.T) {
 		}
 
 		if !reflect.DeepEqual(test.object, test.expectedObj) {
-			t.Errorf("%s: object mismatch: expected \n%#v\ngot \n%#v\n", test.name, test.expectedObj, test.object)
+			t.Errorf("%s: object mismatch: %s", test.name, diff.ObjectReflectDiff(test.expectedObj, test.object))
 		}
 	}
 }

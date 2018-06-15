@@ -6,12 +6,10 @@ import (
 	"net"
 	"reflect"
 
-	"github.com/openshift/origin/pkg/client"
-	oadmission "github.com/openshift/origin/pkg/cmd/server/admission"
-
-	admission "k8s.io/apiserver/pkg/admission"
+	"k8s.io/apiserver/pkg/admission"
+	"k8s.io/apiserver/pkg/admission/initializer"
 	"k8s.io/apiserver/pkg/authorization/authorizer"
-	kapi "k8s.io/kubernetes/pkg/api"
+	kapi "k8s.io/kubernetes/pkg/apis/core"
 )
 
 const RestrictedEndpointsPluginName = "openshift.io/RestrictedEndpointsAdmission"
@@ -26,12 +24,11 @@ func RegisterRestrictedEndpoints(plugins *admission.Plugins) {
 type restrictedEndpointsAdmission struct {
 	*admission.Handler
 
-	client             client.Interface
 	authorizer         authorizer.Authorizer
 	restrictedNetworks []*net.IPNet
 }
 
-var _ = oadmission.WantsAuthorizer(&restrictedEndpointsAdmission{})
+var _ = initializer.WantsAuthorizer(&restrictedEndpointsAdmission{})
 
 // ParseSimpleCIDRRules parses a list of CIDR strings
 func ParseSimpleCIDRRules(rules []string) (networks []*net.IPNet, err error) {
@@ -57,7 +54,7 @@ func (r *restrictedEndpointsAdmission) SetAuthorizer(a authorizer.Authorizer) {
 	r.authorizer = a
 }
 
-func (r *restrictedEndpointsAdmission) Validate() error {
+func (r *restrictedEndpointsAdmission) ValidateInitialization() error {
 	if r.authorizer == nil {
 		return fmt.Errorf("missing authorizer")
 	}
@@ -92,8 +89,8 @@ func (r *restrictedEndpointsAdmission) checkAccess(attr admission.Attributes) (b
 		Name:            attr.GetName(),
 		ResourceRequest: true,
 	}
-	allow, _, err := r.authorizer.Authorize(authzAttr)
-	return allow, err
+	authorized, _, err := r.authorizer.Authorize(authzAttr)
+	return authorized == authorizer.DecisionAllow, err
 }
 
 // Admit determines if the endpoints object should be admitted

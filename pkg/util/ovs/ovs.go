@@ -1,26 +1,29 @@
 package ovs
 
 import (
+	"bytes"
 	"fmt"
 	"strconv"
 	"strings"
 
 	"github.com/golang/glog"
 
-	"k8s.io/kubernetes/pkg/util/exec"
 	utilversion "k8s.io/kubernetes/pkg/util/version"
+	"k8s.io/utils/exec"
 )
 
 // Interface represents an interface to OVS
 type Interface interface {
 	// AddBridge creates the bridge associated with the interface, optionally setting
 	// properties on it (as with "ovs-vsctl set Bridge ..."). If the bridge already
-	// existed, it will be destroyed and recreated.
+	// exists this errors.
 	AddBridge(properties ...string) error
 
-	// DeleteBridge deletes the bridge associated with the interface. (It is an
-	// error if the bridge does not exist.)
-	DeleteBridge() error
+	// DeleteBridge deletes the bridge associated with the interface. The boolean
+	// that can be passed determines if a bridge not existing is an error. Passing
+	// true will delete bridge --if-exists, passing false will error if the bridge
+	// does not exist.
+	DeleteBridge(ifExists bool) error
 
 	// AddPort adds an interface to the bridge, requesting the indicated port
 	// number, and optionally setting properties on it (as with "ovs-vsctl set
@@ -62,30 +65,33 @@ type Interface interface {
 	// the value is already unset
 	Clear(table, record string, columns ...string) error
 
-	// DumpFlows dumps the flow table for the bridge and returns it as an array of
-	// strings, one per flow.
-	DumpFlows() ([]string, error)
+	// Find finds records in the OVS database that match the given condition.
+	// It returns the value of the given column of matching records.
+	Find(table, column, condition string) ([]string, error)
 
-	// NewTransaction begins a new OVS transaction. If an error occurs at
-	// any step in the transaction, it will be recorded until
-	// EndTransaction(), and any further calls on the transaction will be
-	// ignored.
+	// DumpFlows dumps the flow table for the bridge and returns it as an array of
+	// strings, one per flow. If flow is not "" then it describes the flows to dump.
+	DumpFlows(flow string, args ...interface{}) ([]string, error)
+
+	// NewTransaction begins a new OVS transaction.
 	NewTransaction() Transaction
 }
 
 // Transaction manages a single set of OVS flow modifications
 type Transaction interface {
-	// AddFlow adds a flow to the bridge. The arguments are passed to fmt.Sprintf().
+	// AddFlow prepares adding a flow to the bridge.
+	// Given flow is cached but not executed at this time.
+	// The arguments are passed to fmt.Sprintf().
 	AddFlow(flow string, args ...interface{})
 
-	// DeleteFlows deletes all matching flows from the bridge. The arguments are
-	// passed to fmt.Sprintf().
+	// DeleteFlows prepares deleting all matching flows from the bridge.
+	// Given flow is cached but not executed at this time.
+	// The arguments are passed to fmt.Sprintf().
 	DeleteFlows(flow string, args ...interface{})
 
-	// EndTransaction ends an OVS transaction and returns any error that occurred
-	// during the transaction. You should not use the transaction again after
-	// calling this function.
-	EndTransaction() error
+	// Commit executes all cached flows as a single atomic transaction and
+	// returns any error that occurred during the transaction.
+	Commit() error
 }
 
 const (
@@ -132,15 +138,28 @@ func New(execer exec.Interface, bridge string, minVersion string) (Interface, er
 	return ovsif, nil
 }
 
-func (ovsif *ovsExec) exec(cmd string, args ...string) (string, error) {
-	if cmd == OVS_OFCTL {
+func (ovsif *ovsExec) execWithStdin(cmd string, stdinArgs []string, args ...string) (string, error) {
+	switch cmd {
+	case OVS_OFCTL:
 		args = append([]string{"-O", "OpenFlow13"}, args...)
+	case OVS_VSCTL:
+		args = append([]string{"--timeout=30"}, args...)
 	}
-	glog.V(5).Infof("Executing: %s %s", cmd, strings.Join(args, " "))
 
-	output, err := ovsif.execer.Command(cmd, args...).CombinedOutput()
+	kcmd := ovsif.execer.Command(cmd, args...)
+	if stdinArgs != nil {
+		stdinString := strings.Join(stdinArgs, "\n")
+		stdin := bytes.NewBufferString(stdinString)
+		kcmd.SetStdin(stdin)
+
+		glog.V(4).Infof("Executing: %s %s <<\n%s", cmd, strings.Join(args, " "), stdinString)
+	} else {
+		glog.V(4).Infof("Executing: %s %s", cmd, strings.Join(args, " "))
+	}
+
+	output, err := kcmd.CombinedOutput()
 	if err != nil {
-		glog.V(5).Infof("Error executing %s: %s", cmd, string(output))
+		glog.V(2).Infof("Error executing %s: %s", cmd, string(output))
 		return "", err
 	}
 
@@ -155,8 +174,12 @@ func (ovsif *ovsExec) exec(cmd string, args ...string) (string, error) {
 	return outStr, nil
 }
 
+func (ovsif *ovsExec) exec(cmd string, args ...string) (string, error) {
+	return ovsif.execWithStdin(cmd, nil, args...)
+}
+
 func (ovsif *ovsExec) AddBridge(properties ...string) error {
-	args := []string{"--if-exists", "del-br", ovsif.bridge, "--", "add-br", ovsif.bridge}
+	args := []string{"add-br", ovsif.bridge}
 	if len(properties) > 0 {
 		args = append(args, "--", "set", "Bridge", ovsif.bridge)
 		args = append(args, properties...)
@@ -165,8 +188,13 @@ func (ovsif *ovsExec) AddBridge(properties ...string) error {
 	return err
 }
 
-func (ovsif *ovsExec) DeleteBridge() error {
-	_, err := ovsif.exec(OVS_VSCTL, "del-br", ovsif.bridge)
+func (ovsif *ovsExec) DeleteBridge(ifExists bool) error {
+	args := []string{"del-br", ovsif.bridge}
+
+	if ifExists {
+		args = append([]string{"--if-exists"}, args...)
+	}
+	_, err := ovsif.exec(OVS_VSCTL, args...)
 	return err
 }
 
@@ -244,51 +272,35 @@ func (ovsif *ovsExec) Set(table, record string, values ...string) error {
 	return err
 }
 
+// Returns the given column of records that match the condition
+func (ovsif *ovsExec) Find(table, column, condition string) ([]string, error) {
+	output, err := ovsif.exec(OVS_VSCTL, "--no-heading", "--columns="+column, "find", table, condition)
+	if err != nil {
+		return nil, err
+	}
+	values := strings.Split(output, "\n\n")
+	// We want "bare" values for strings, but we can't pass --bare to ovs-vsctl because
+	// it breaks more complicated types. So try passing each value through Unquote();
+	// if it fails, that means the value wasn't a quoted string, so use it as-is.
+	for i, val := range values {
+		if unquoted, err := strconv.Unquote(val); err == nil {
+			values[i] = unquoted
+		}
+	}
+	return values, nil
+}
+
 func (ovsif *ovsExec) Clear(table, record string, columns ...string) error {
 	args := append([]string{"--if-exists", "clear", table, record}, columns...)
 	_, err := ovsif.exec(OVS_VSCTL, args...)
 	return err
 }
 
-type ovsExecTx struct {
-	ovsif *ovsExec
-	err   error
-}
-
-func (tx *ovsExecTx) exec(cmd string, args ...string) (string, error) {
-	out := ""
-	if tx.err == nil {
-		out, tx.err = tx.ovsif.exec(cmd, args...)
-	}
-	return out, tx.err
-}
-
-func (ovsif *ovsExec) NewTransaction() Transaction {
-	return &ovsExecTx{ovsif: ovsif}
-}
-
-func (tx *ovsExecTx) AddFlow(flow string, args ...interface{}) {
+func (ovsif *ovsExec) DumpFlows(flow string, args ...interface{}) ([]string, error) {
 	if len(args) > 0 {
 		flow = fmt.Sprintf(flow, args...)
 	}
-	tx.exec(OVS_OFCTL, "add-flow", tx.ovsif.bridge, flow)
-}
-
-func (tx *ovsExecTx) DeleteFlows(flow string, args ...interface{}) {
-	if len(args) > 0 {
-		flow = fmt.Sprintf(flow, args...)
-	}
-	tx.exec(OVS_OFCTL, "del-flows", tx.ovsif.bridge, flow)
-}
-
-func (tx *ovsExecTx) EndTransaction() error {
-	err := tx.err
-	tx.err = nil
-	return err
-}
-
-func (ovsif *ovsExec) DumpFlows() ([]string, error) {
-	out, err := ovsif.exec(OVS_OFCTL, "dump-flows", ovsif.bridge)
+	out, err := ovsif.exec(OVS_OFCTL, "dump-flows", ovsif.bridge, flow)
 	if err != nil {
 		return nil, err
 	}
@@ -301,4 +313,46 @@ func (ovsif *ovsExec) DumpFlows() ([]string, error) {
 		}
 	}
 	return flows, nil
+}
+
+func (ovsif *ovsExec) NewTransaction() Transaction {
+	return &ovsExecTx{ovsif: ovsif, flows: []string{}}
+}
+
+// bundle executes all given flows as a single atomic transaction
+func (ovsif *ovsExec) bundle(flows []string) error {
+	if len(flows) == 0 {
+		return nil
+	}
+
+	_, err := ovsif.execWithStdin(OVS_OFCTL, flows, "bundle", ovsif.bridge, "-")
+	return err
+}
+
+// ovsExecTx implements ovs.Transaction and maintains current flow context
+type ovsExecTx struct {
+	ovsif *ovsExec
+	flows []string
+}
+
+func (tx *ovsExecTx) AddFlow(flow string, args ...interface{}) {
+	if len(args) > 0 {
+		flow = fmt.Sprintf(flow, args...)
+	}
+	tx.flows = append(tx.flows, fmt.Sprintf("flow add %s", flow))
+}
+
+func (tx *ovsExecTx) DeleteFlows(flow string, args ...interface{}) {
+	if len(args) > 0 {
+		flow = fmt.Sprintf(flow, args...)
+	}
+	tx.flows = append(tx.flows, fmt.Sprintf("flow delete %s", flow))
+}
+
+func (tx *ovsExecTx) Commit() error {
+	err := tx.ovsif.bundle(tx.flows)
+
+	// Reset flow context
+	tx.flows = []string{}
+	return err
 }

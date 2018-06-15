@@ -5,8 +5,10 @@ import (
 	"k8s.io/apiserver/pkg/registry/generic"
 	"k8s.io/apiserver/pkg/registry/generic/registry"
 	"k8s.io/apiserver/pkg/registry/rest"
-	kapi "k8s.io/kubernetes/pkg/api"
+	"k8s.io/kubernetes/pkg/printers"
+	printerstorage "k8s.io/kubernetes/pkg/printers/storage"
 
+	printersinternal "github.com/openshift/origin/pkg/printers/internalversion"
 	templateapi "github.com/openshift/origin/pkg/template/apis/template"
 	"github.com/openshift/origin/pkg/template/registry/brokertemplateinstance"
 	"github.com/openshift/origin/pkg/util/restoptions"
@@ -22,18 +24,18 @@ var _ rest.StandardStorage = &REST{}
 // NewREST returns a RESTStorage object that will work against brokertemplateinstances.
 func NewREST(optsGetter restoptions.Getter) (*REST, error) {
 	store := &registry.Store{
-		Copier:                   kapi.Scheme,
 		NewFunc:                  func() runtime.Object { return &templateapi.BrokerTemplateInstance{} },
 		NewListFunc:              func() runtime.Object { return &templateapi.BrokerTemplateInstanceList{} },
-		PredicateFunc:            brokertemplateinstance.Matcher,
 		DefaultQualifiedResource: templateapi.Resource("brokertemplateinstances"),
+
+		TableConvertor: printerstorage.TableConvertor{TablePrinter: printers.NewTablePrinter().With(printersinternal.AddHandlers)},
 
 		CreateStrategy: brokertemplateinstance.Strategy,
 		UpdateStrategy: brokertemplateinstance.Strategy,
 		DeleteStrategy: brokertemplateinstance.Strategy,
 	}
 
-	options := &generic.StoreOptions{RESTOptions: optsGetter, AttrFunc: brokertemplateinstance.GetAttrs}
+	options := &generic.StoreOptions{RESTOptions: optsGetter}
 	if err := store.CompleteWithOptions(options); err != nil {
 		return nil, err
 	}

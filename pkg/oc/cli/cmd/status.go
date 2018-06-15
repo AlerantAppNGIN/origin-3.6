@@ -12,14 +12,22 @@ import (
 	"k8s.io/kubernetes/pkg/kubectl/cmd/templates"
 	kcmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
 
-	"github.com/openshift/origin/pkg/cmd/util/clientcmd"
+	appsclientinternal "github.com/openshift/origin/pkg/apps/generated/internalclientset"
+	buildclientinternal "github.com/openshift/origin/pkg/build/generated/internalclientset"
+	imageclientinternal "github.com/openshift/origin/pkg/image/generated/internalclientset"
 	loginutil "github.com/openshift/origin/pkg/oc/cli/cmd/login/util"
 	"github.com/openshift/origin/pkg/oc/cli/describe"
+	"github.com/openshift/origin/pkg/oc/cli/util/clientcmd"
+	projectclientinternal "github.com/openshift/origin/pkg/project/generated/internalclientset"
+	routeclientinternal "github.com/openshift/origin/pkg/route/generated/internalclientset"
 	dotutil "github.com/openshift/origin/pkg/util/dot"
 )
 
 // StatusRecommendedName is the recommended command name.
 const StatusRecommendedName = "status"
+
+// ExposeRecommendedName is the recommended command name to expose app.
+const ExposeRecommendedName = "expose"
 
 var (
 	statusLong = templates.LongDesc(`
@@ -51,7 +59,7 @@ type StatusOptions struct {
 	outputFormat  string
 	describer     *describe.ProjectStatusDescriber
 	out           io.Writer
-	verbose       bool
+	suggest       bool
 
 	logsCommandName             string
 	securityPolicyCommandFormat string
@@ -65,7 +73,7 @@ func NewCmdStatus(name, baseCLIName, fullName string, f *clientcmd.Factory, out 
 	opts := &StatusOptions{}
 
 	cmd := &cobra.Command{
-		Use:     fmt.Sprintf("%s [-o dot | -v ]", StatusRecommendedName),
+		Use:     fmt.Sprintf("%s [-o dot | -s ]", StatusRecommendedName),
 		Short:   "Show an overview of the current project",
 		Long:    fmt.Sprintf(statusLong, baseCLIName),
 		Example: fmt.Sprintf(statusExample, fullName),
@@ -74,7 +82,7 @@ func NewCmdStatus(name, baseCLIName, fullName string, f *clientcmd.Factory, out 
 			kcmdutil.CheckErr(err)
 
 			if err := opts.Validate(); err != nil {
-				kcmdutil.CheckErr(kcmdutil.UsageError(cmd, err.Error()))
+				kcmdutil.CheckErr(kcmdutil.UsageErrorf(cmd, err.Error()))
 			}
 
 			err = opts.RunStatus()
@@ -83,7 +91,10 @@ func NewCmdStatus(name, baseCLIName, fullName string, f *clientcmd.Factory, out 
 	}
 
 	cmd.Flags().StringVarP(&opts.outputFormat, "output", "o", opts.outputFormat, "Output format. One of: dot.")
-	cmd.Flags().BoolVarP(&opts.verbose, "verbose", "v", opts.verbose, "See details for resolving issues.")
+	cmd.Flags().BoolVarP(&opts.suggest, "verbose", "v", opts.suggest, "See details for resolving issues.")
+	cmd.Flags().MarkDeprecated("verbose", "Use --suggest instead.")
+	cmd.Flags().MarkHidden("verbose")
+	cmd.Flags().BoolVar(&opts.suggest, "suggest", opts.suggest, "See details for resolving issues.")
 	cmd.Flags().BoolVar(&opts.allNamespaces, "all-namespaces", false, "If true, display status for all namespaces (must have cluster admin)")
 
 	return cmd
@@ -92,24 +103,43 @@ func NewCmdStatus(name, baseCLIName, fullName string, f *clientcmd.Factory, out 
 // Complete completes the options for the Openshift cli status command.
 func (o *StatusOptions) Complete(f *clientcmd.Factory, cmd *cobra.Command, baseCLIName string, args []string, out io.Writer) error {
 	if len(args) > 0 {
-		return kcmdutil.UsageError(cmd, "no arguments should be provided")
+		return kcmdutil.UsageErrorf(cmd, "no arguments should be provided")
 	}
 
 	o.logsCommandName = fmt.Sprintf("%s logs", cmd.Parent().CommandPath())
 	o.securityPolicyCommandFormat = "oc adm policy add-scc-to-user anyuid -n %s -z %s"
 	o.setProbeCommandName = fmt.Sprintf("%s set probe", cmd.Parent().CommandPath())
 
-	client, kclientset, err := f.Clients()
+	clientConfig, err := f.ClientConfig()
+	if err != nil {
+		return err
+	}
+	kclientset, err := f.ClientSet()
+	if err != nil {
+		return err
+	}
+	projectClient, err := projectclientinternal.NewForConfig(clientConfig)
+	if err != nil {
+		return err
+	}
+	buildClient, err := buildclientinternal.NewForConfig(clientConfig)
+	if err != nil {
+		return err
+	}
+	imageClient, err := imageclientinternal.NewForConfig(clientConfig)
+	if err != nil {
+		return err
+	}
+	appsClient, err := appsclientinternal.NewForConfig(clientConfig)
+	if err != nil {
+		return err
+	}
+	routeClient, err := routeclientinternal.NewForConfig(clientConfig)
 	if err != nil {
 		return err
 	}
 
-	config, err := f.OpenShiftClientConfig().ClientConfig()
-	if err != nil {
-		return err
-	}
-
-	rawConfig, err := f.OpenShiftClientConfig().RawConfig()
+	rawConfig, err := f.RawConfig()
 	if err != nil {
 		return err
 	}
@@ -134,13 +164,17 @@ func (o *StatusOptions) Complete(f *clientcmd.Factory, cmd *cobra.Command, baseC
 	}
 
 	nsFlag := kcmdutil.GetFlagString(cmd, "namespace")
-	canRequestProjects, _ := loginutil.CanRequestProjects(config, o.namespace)
+	canRequestProjects, _ := loginutil.CanRequestProjects(clientConfig, o.namespace)
 
 	o.describer = &describe.ProjectStatusDescriber{
-		K:       kclientset,
-		C:       client,
-		Server:  config.Host,
-		Suggest: o.verbose,
+		KubeClient:    kclientset,
+		ProjectClient: projectClient.Project(),
+		BuildClient:   buildClient.Build(),
+		ImageClient:   imageClient.Image(),
+		AppsClient:    appsClient.Apps(),
+		RouteClient:   routeClient.Route(),
+		Suggest:       o.suggest,
+		Server:        clientConfig.Host,
 
 		CommandBaseName:    baseCLIName,
 		RequestedNamespace: nsFlag,
@@ -164,7 +198,7 @@ func (o StatusOptions) Validate() error {
 	if len(o.outputFormat) != 0 && o.outputFormat != "dot" {
 		return fmt.Errorf("invalid output format provided: %s", o.outputFormat)
 	}
-	if len(o.outputFormat) > 0 && o.verbose {
+	if len(o.outputFormat) > 0 && o.suggest {
 		return errors.New("cannot provide suggestions when output format is dot")
 	}
 	return nil

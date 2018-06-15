@@ -6,15 +6,15 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/kubernetes/pkg/kubectl/cmd/templates"
 	cmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
 
-	"github.com/openshift/origin/pkg/client"
-	"github.com/openshift/origin/pkg/cmd/util/clientcmd"
 	imageapi "github.com/openshift/origin/pkg/image/apis/image"
+	imageclientinternal "github.com/openshift/origin/pkg/image/generated/internalclientset"
+	imageclient "github.com/openshift/origin/pkg/image/generated/internalclientset/typed/image/internalversion"
+	"github.com/openshift/origin/pkg/oc/cli/util/clientcmd"
 )
 
 const ImageStreamRecommendedName = "imagestream"
@@ -28,7 +28,7 @@ var (
 		from many different registries and control how those images are referenced by pods, deployments,
 		and builds.
 
-		If --resolve-local is passed, the image stream will be used as the source when pods reference
+		If --lookup-local is passed, the image stream will be used as the source when pods reference
 		it by name. For example, if stream 'mysql' resolves local names, a pod that points to
 		'mysql:latest' will use the image the image stream points to under the "latest" tag.`)
 
@@ -39,11 +39,10 @@ var (
 
 type CreateImageStreamOptions struct {
 	IS     *imageapi.ImageStream
-	Client client.ImageStreamsNamespacer
+	Client imageclient.ImageStreamsGetter
 
 	DryRun bool
 
-	Mapper       meta.RESTMapper
 	OutputFormat string
 	Out          io.Writer
 	Printer      ObjectPrinter
@@ -96,16 +95,20 @@ func (o *CreateImageStreamOptions) Complete(cmd *cobra.Command, f *clientcmd.Fac
 		return err
 	}
 
-	o.Client, _, err = f.Clients()
+	clientConfig, err := f.ClientConfig()
 	if err != nil {
 		return err
 	}
+	client, err := imageclientinternal.NewForConfig(clientConfig)
+	if err != nil {
+		return err
+	}
+	o.Client = client.Image()
 
-	o.Mapper, _ = f.Object()
 	o.OutputFormat = cmdutil.GetFlagString(cmd, "output")
 
 	o.Printer = func(obj runtime.Object, out io.Writer) error {
-		return f.PrintObject(cmd, false, o.Mapper, obj, out)
+		return cmdutil.PrintObject(cmd, obj, out)
 	}
 
 	return nil
@@ -117,9 +120,6 @@ func (o *CreateImageStreamOptions) Validate() error {
 	}
 	if o.Client == nil {
 		return fmt.Errorf("Client is required")
-	}
-	if o.Mapper == nil {
-		return fmt.Errorf("Mapper is required")
 	}
 	if o.Out == nil {
 		return fmt.Errorf("Out is required")
@@ -143,7 +143,7 @@ func (o *CreateImageStreamOptions) Run() error {
 	}
 
 	if useShortOutput := o.OutputFormat == "name"; useShortOutput || len(o.OutputFormat) == 0 {
-		cmdutil.PrintSuccess(o.Mapper, useShortOutput, o.Out, "imagestream", actualObj.Name, o.DryRun, "created")
+		cmdutil.PrintSuccess(useShortOutput, o.Out, actualObj, o.DryRun, "created")
 		return nil
 	}
 

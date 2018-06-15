@@ -9,23 +9,23 @@ import (
 
 	"github.com/golang/glog"
 
+	"k8s.io/api/core/v1"
 	kapierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/wait"
+	informers "k8s.io/client-go/informers/core/v1"
+	kclientset "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
+	"k8s.io/client-go/util/retry"
 	"k8s.io/client-go/util/workqueue"
-	"k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/api/v1"
-	kclientset "k8s.io/kubernetes/pkg/client/clientset_generated/clientset"
-	informers "k8s.io/kubernetes/pkg/client/informers/informers_generated/externalversions/core/v1"
-	"k8s.io/kubernetes/pkg/client/retry"
 	"k8s.io/kubernetes/pkg/controller"
 	"k8s.io/kubernetes/pkg/credentialprovider"
 	"k8s.io/kubernetes/pkg/registry/core/secret"
 
+	oapi "github.com/openshift/origin/pkg/api"
 	osautil "github.com/openshift/origin/pkg/serviceaccounts/util"
 )
 
@@ -135,7 +135,7 @@ type DockercfgController struct {
 // token data and triggers re-sync of service account when the data are observed.
 func (e *DockercfgController) handleTokenSecretUpdate(oldObj, newObj interface{}) {
 	secret := newObj.(*v1.Secret)
-	if secret.Annotations[v1.CreatedByAnnotation] != CreateDockercfgSecretsController {
+	if secret.Annotations[oapi.DeprecatedKubeCreatedByAnnotation] != CreateDockercfgSecretsController {
 		return
 	}
 	isPopulated := len(secret.Data[v1.ServiceAccountTokenKey]) > 0
@@ -170,7 +170,7 @@ func (e *DockercfgController) handleTokenSecretDelete(obj interface{}) {
 			return
 		}
 	}
-	if secret.Annotations[v1.CreatedByAnnotation] != CreateDockercfgSecretsController {
+	if secret.Annotations[oapi.DeprecatedKubeCreatedByAnnotation] != CreateDockercfgSecretsController {
 		return
 	}
 	if len(secret.Data[v1.ServiceAccountTokenKey]) > 0 {
@@ -200,6 +200,9 @@ func (e *DockercfgController) Run(workers int, stopCh <-chan struct{}) {
 	defer utilruntime.HandleCrash()
 	defer e.queue.ShutDown()
 
+	glog.Infof("Starting DockercfgController controller")
+	defer glog.Infof("Shutting down DockercfgController controller")
+
 	// Wait for the store to sync before starting any work in this controller.
 	ready := make(chan struct{})
 	go e.waitForDockerURLs(ready, stopCh)
@@ -208,18 +211,18 @@ func (e *DockercfgController) Run(workers int, stopCh <-chan struct{}) {
 	case <-stopCh:
 		return
 	}
+	glog.V(1).Infof("urls found")
 
 	// Wait for the stores to fill
 	if !cache.WaitForCacheSync(stopCh, e.serviceAccountController.HasSynced, e.secretController.HasSynced) {
 		return
 	}
+	glog.V(1).Infof("caches synced")
 
-	glog.V(5).Infof("Starting workers")
 	for i := 0; i < workers; i++ {
 		go wait.Until(e.worker, time.Second, stopCh)
 	}
 	<-stopCh
-	glog.V(1).Infof("Shutting down")
 }
 
 func (c *DockercfgController) waitForDockerURLs(ready chan<- struct{}, stopCh <-chan struct{}) {
@@ -318,11 +321,7 @@ func (e *DockercfgController) syncServiceAccount(key string) error {
 		return nil
 	}
 
-	uncastSA, err := api.Scheme.DeepCopy(obj)
-	if err != nil {
-		return err
-	}
-	serviceAccount := uncastSA.(*v1.ServiceAccount)
+	serviceAccount := obj.(*v1.ServiceAccount).DeepCopyObject().(*v1.ServiceAccount)
 
 	mountableDockercfgSecrets, imageDockercfgPullSecrets := getGeneratedDockercfgSecretNames(serviceAccount)
 
@@ -370,11 +369,7 @@ func (e *DockercfgController) syncServiceAccount(key string) error {
 				return nil
 			}
 
-			uncastSA, err := api.Scheme.DeepCopy(obj)
-			if err != nil {
-				return err
-			}
-			serviceAccount = uncastSA.(*v1.ServiceAccount)
+			serviceAccount = obj.(*v1.ServiceAccount).DeepCopyObject().(*v1.ServiceAccount)
 		}
 		first = false
 
@@ -437,9 +432,9 @@ func (e *DockercfgController) createTokenSecret(serviceAccount *v1.ServiceAccoun
 			Name:      pendingTokenName,
 			Namespace: serviceAccount.Namespace,
 			Annotations: map[string]string{
-				v1.ServiceAccountNameKey: serviceAccount.Name,
-				v1.ServiceAccountUIDKey:  string(serviceAccount.UID),
-				v1.CreatedByAnnotation:   CreateDockercfgSecretsController,
+				v1.ServiceAccountNameKey:               serviceAccount.Name,
+				v1.ServiceAccountUIDKey:                string(serviceAccount.UID),
+				oapi.DeprecatedKubeCreatedByAnnotation: CreateDockercfgSecretsController,
 			},
 		},
 		Type: v1.SecretTypeServiceAccountToken,

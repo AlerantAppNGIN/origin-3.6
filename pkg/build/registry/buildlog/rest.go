@@ -16,51 +16,41 @@ import (
 	genericrest "k8s.io/apiserver/pkg/registry/generic/rest"
 	"k8s.io/apiserver/pkg/registry/rest"
 
-	kapi "k8s.io/kubernetes/pkg/api"
+	kapi "k8s.io/kubernetes/pkg/apis/core"
 	kcoreclient "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset/typed/core/internalversion"
-	kubeletclient "k8s.io/kubernetes/pkg/kubelet/client"
-	"k8s.io/kubernetes/pkg/registry/core/pod"
 
+	apiserverrest "github.com/openshift/origin/pkg/apiserver/rest"
 	buildapi "github.com/openshift/origin/pkg/build/apis/build"
 	"github.com/openshift/origin/pkg/build/apis/build/validation"
+	buildstrategy "github.com/openshift/origin/pkg/build/controller/strategy"
+	buildtypedclient "github.com/openshift/origin/pkg/build/generated/internalclientset/typed/build/internalversion"
 	"github.com/openshift/origin/pkg/build/registry"
 	buildutil "github.com/openshift/origin/pkg/build/util"
 )
 
 // REST is an implementation of RESTStorage for the api server.
 type REST struct {
-	Getter         rest.Getter
-	Watcher        rest.Watcher
-	PodGetter      pod.ResourceGetter
-	ConnectionInfo kubeletclient.ConnectionInfoGetter
-	Timeout        time.Duration
+	BuildClient buildtypedclient.BuildsGetter
+	PodClient   kcoreclient.PodsGetter
+	Timeout     time.Duration
+
+	// for unit testing
+	getSimpleLogsFn func(podNamespace, podName string, logOpts *kapi.PodLogOptions) (runtime.Object, error)
 }
 
-type podGetter struct {
-	kcoreclient.PodsGetter
-}
-
-func (g *podGetter) Get(ctx apirequest.Context, name string, options *metav1.GetOptions) (runtime.Object, error) {
-	ns, ok := apirequest.NamespaceFrom(ctx)
-	if !ok {
-		return nil, errors.NewBadRequest("namespace parameter required.")
-	}
-	return g.Pods(ns).Get(name, *options)
-}
-
-const defaultTimeout time.Duration = 10 * time.Second
+const defaultTimeout time.Duration = 30 * time.Second
 
 // NewREST creates a new REST for BuildLog
 // Takes build registry and pod client to get necessary attributes to assemble
 // URL to which the request shall be redirected in order to get build logs.
-func NewREST(getter rest.Getter, watcher rest.Watcher, pn kcoreclient.PodsGetter, connectionInfo kubeletclient.ConnectionInfoGetter) *REST {
-	return &REST{
-		Getter:         getter,
-		Watcher:        watcher,
-		PodGetter:      &podGetter{pn},
-		ConnectionInfo: connectionInfo,
-		Timeout:        defaultTimeout,
+func NewREST(buildClient buildtypedclient.BuildsGetter, podClient kcoreclient.PodsGetter) *REST {
+	r := &REST{
+		BuildClient: buildClient,
+		PodClient:   podClient,
+		Timeout:     defaultTimeout,
 	}
+	r.getSimpleLogsFn = r.getSimpleLogs
+	return r
 }
 
 var _ = rest.GetterWithOptions(&REST{})
@@ -74,21 +64,20 @@ func (r *REST) Get(ctx apirequest.Context, name string, opts runtime.Object) (ru
 	if errs := validation.ValidateBuildLogOptions(buildLogOpts); len(errs) > 0 {
 		return nil, errors.NewInvalid(buildapi.Kind("BuildLogOptions"), "", errs)
 	}
-	obj, err := r.Getter.Get(ctx, name, &metav1.GetOptions{})
+	build, err := r.BuildClient.Builds(apirequest.NamespaceValue(ctx)).Get(name, metav1.GetOptions{})
 	if err != nil {
 		return nil, err
 	}
-	build := obj.(*buildapi.Build)
 	if buildLogOpts.Previous {
 		version := buildutil.VersionForBuild(build)
 		// Use the previous version
 		version--
 		previousBuildName := buildutil.BuildNameForConfigVersion(buildutil.ConfigNameForBuild(build), version)
-		previous, err := r.Getter.Get(ctx, previousBuildName, &metav1.GetOptions{})
+		previous, err := r.BuildClient.Builds(apirequest.NamespaceValue(ctx)).Get(previousBuildName, metav1.GetOptions{})
 		if err != nil {
 			return nil, err
 		}
-		build = previous.(*buildapi.Build)
+		build = previous
 	}
 	switch build.Status.Phase {
 	// Build has not launched, wait until it runs
@@ -99,7 +88,7 @@ func (r *REST) Get(ctx apirequest.Context, name string, opts runtime.Object) (ru
 			return &genericrest.LocationStreamer{}, nil
 		}
 		glog.V(4).Infof("Build %s/%s is in %s state, waiting for Build to start", build.Namespace, build.Name, build.Status.Phase)
-		latest, ok, err := registry.WaitForRunningBuild(r.Watcher, ctx, build, r.Timeout)
+		latest, ok, err := registry.WaitForRunningBuild(r.BuildClient, build, r.Timeout)
 		if err != nil {
 			return nil, errors.NewBadRequest(fmt.Sprintf("unable to wait for build %s to run: %v", build.Name, err))
 		}
@@ -126,30 +115,16 @@ func (r *REST) Get(ctx apirequest.Context, name string, opts runtime.Object) (ru
 
 	// if we can't at least get the build pod, we're not going to get very far, so
 	// error out now.
-	obj, err = r.PodGetter.Get(ctx, buildPodName, &metav1.GetOptions{})
+	buildPod, err := r.PodClient.Pods(build.Namespace).Get(buildPodName, metav1.GetOptions{})
 	if err != nil {
 		return nil, errors.NewBadRequest(err.Error())
 	}
 
 	// check for old style builds with a single container/no initcontainers
 	// and handle them w/ the old logging code.
-	buildPod := obj.(*kapi.Pod)
 	if len(buildPod.Spec.InitContainers) == 0 {
 		logOpts := buildapi.BuildToPodLogOptions(buildLogOpts)
-		location, transport, err := pod.LogLocation(r.PodGetter, r.ConnectionInfo, ctx, buildPodName, logOpts)
-		if err != nil {
-			if errors.IsNotFound(err) {
-				return nil, errors.NewNotFound(kapi.Resource("pod"), buildPodName)
-			}
-			return nil, errors.NewBadRequest(err.Error())
-		}
-		return &genericrest.LocationStreamer{
-			Location:        location,
-			Transport:       transport,
-			ContentType:     "text/plain",
-			Flush:           buildLogOpts.Follow,
-			ResponseChecker: genericrest.NewGenericHttpResponseChecker(kapi.Resource("pod"), buildPodName),
-		}, nil
+		return r.getSimpleLogsFn(build.Namespace, buildPodName, logOpts)
 	}
 
 	// new style builds w/ init containers from here out.
@@ -186,12 +161,18 @@ func (r *REST) Get(ctx apirequest.Context, name string, opts runtime.Object) (ru
 		// until they have all run, unless we see one of them fail.
 		// If we aren't following the logs, we will run through all the init containers exactly once.
 		for waitForInitContainers {
+			select {
+			case <-ctx.Done():
+				glog.V(4).Infof("timed out while iterating on build init containers for build pod %s/%s", build.Namespace, buildPodName)
+				return
+			default:
+			}
 			glog.V(4).Infof("iterating through build init containers for build pod %s/%s", build.Namespace, buildPodName)
 
 			// assume we are not going to need to iterate again until proven otherwise
 			waitForInitContainers = false
 			// Get the latest version of the pod so we can check init container statuses
-			obj, err = r.PodGetter.Get(ctx, buildPodName, &metav1.GetOptions{})
+			buildPod, err = r.PodClient.Pods(build.Namespace).Get(buildPodName, metav1.GetOptions{})
 			if err != nil {
 				s := fmt.Sprintf("error retrieving build pod %s/%s : %v", build.Namespace, buildPodName, err.Error())
 				// we're sending the error message as the log output so the user at least sees some indication of why
@@ -199,7 +180,6 @@ func (r *REST) Get(ctx apirequest.Context, name string, opts runtime.Object) (ru
 				pipeStreamer.In.Write([]byte(s))
 				return
 			}
-			buildPod = obj.(*kapi.Pod)
 
 			// Walk all the initcontainers in order and dump/stream their logs.  The initcontainers
 			// are defined in order of execution, so that's the order we'll dump their logs in.
@@ -282,13 +262,12 @@ func (r *REST) Get(ctx apirequest.Context, name string, opts runtime.Object) (ru
 			// Wait for the main container to be running, this can take a second after the initcontainers
 			// finish so we have to poll.
 			err := wait.PollImmediate(time.Second, 10*time.Minute, func() (bool, error) {
-				obj, err = r.PodGetter.Get(ctx, buildPodName, &metav1.GetOptions{})
+				buildPod, err = r.PodClient.Pods(build.Namespace).Get(buildPodName, metav1.GetOptions{})
 				if err != nil {
 					s := fmt.Sprintf("error while getting build logs, could not retrieve build pod %s/%s : %v", build.Namespace, buildPodName, err.Error())
 					pipeStreamer.In.Write([]byte(s))
 					return false, err
 				}
-				buildPod = obj.(*kapi.Pod)
 				// we can get logs from a pod in any state other than pending.
 				if buildPod.Status.Phase != kapi.PodPending {
 					return true, nil
@@ -301,7 +280,11 @@ func (r *REST) Get(ctx apirequest.Context, name string, opts runtime.Object) (ru
 			}
 
 			containerLogOpts := buildapi.BuildToPodLogOptions(buildLogOpts)
-			containerLogOpts.Container = ""
+			containerLogOpts.Container = selectBuilderContainer(buildPod.Spec.Containers)
+			if containerLogOpts.Container == "" {
+				glog.Errorf("error: failed to select a container in build pod: %s/%s", build.Namespace, buildPodName)
+			}
+
 			// never follow logs for terminated pods, it just causes latency in streaming the result.
 			if buildPod.Status.Phase == kapi.PodFailed || buildPod.Status.Phase == kapi.PodSucceeded {
 				containerLogOpts.Follow = false
@@ -330,37 +313,44 @@ func (r *REST) New() runtime.Object {
 // pipeLogs retrieves the logs for a particular container and streams them into the provided writer.
 func (r *REST) pipeLogs(ctx apirequest.Context, namespace, buildPodName string, containerLogOpts *kapi.PodLogOptions, writer io.Writer) error {
 	glog.V(4).Infof("pulling build pod logs for %s/%s, container %s", namespace, buildPodName, containerLogOpts.Container)
-	location, transport, err := pod.LogLocation(r.PodGetter, r.ConnectionInfo, ctx, buildPodName, containerLogOpts)
+
+	logRequest := r.PodClient.Pods(namespace).GetLogs(buildPodName, containerLogOpts)
+	readerCloser, err := logRequest.Stream()
 	if err != nil {
-		s := fmt.Sprintf("error retrieving logs for build pod: %s/%s container: %s, %v", namespace, buildPodName, containerLogOpts.Container, err.Error())
-		_, err2 := writer.Write([]byte(s))
-		if err2 != nil {
-			glog.Errorf("error: could not write build log error %q to stream due to: %v", s, err2)
-		}
+		glog.Errorf("error: could not write build log for pod %q to stream due to: %v", buildPodName, err)
 		return err
 	}
-	locationStreamer := genericrest.LocationStreamer{
-		Location:        location,
-		Transport:       transport,
-		ContentType:     "text/plain",
-		Flush:           true,
-		ResponseChecker: genericrest.NewGenericHttpResponseChecker(kapi.Resource("pod"), buildPodName),
-	}
-	out, _, _, err := locationStreamer.InputStream("", "")
-	if err != nil {
-		s := fmt.Sprintf("error streaming logs from build pod: %s/%s container: %s, %v", namespace, buildPodName, containerLogOpts.Container, err.Error())
-		_, err2 := writer.Write([]byte(s))
-		if err2 != nil {
-			glog.Errorf("error: could not write build log error %q to stream due to: %v", s, err2)
-		}
-		return err
-	}
-	if out == nil {
-		glog.Warningf("warning: logs for build pod: %s/%s container: %s returned a nil stream", namespace, buildPodName, containerLogOpts.Container)
-		return nil
-	}
+
 	glog.V(4).Infof("retrieved logs for build pod: %s/%s container: %s", namespace, buildPodName, containerLogOpts.Container)
 	// dump all container logs from the log stream into a single output stream that we'll send back to the client.
-	_, err = io.Copy(writer, out)
+	_, err = io.Copy(writer, readerCloser)
 	return err
+}
+
+// 3rd party tools, such as istio auto-inject, may add sidecar containers to
+// the build pod. We are interested in logs from the build container only
+func selectBuilderContainer(containers []kapi.Container) string {
+	for _, c := range containers {
+		for _, bcName := range buildstrategy.BuildContainerNames {
+			if c.Name == bcName {
+				return bcName
+			}
+		}
+	}
+	return ""
+}
+
+func (r *REST) getSimpleLogs(podNamespace, podName string, logOpts *kapi.PodLogOptions) (runtime.Object, error) {
+	logRequest := r.PodClient.Pods(podNamespace).GetLogs(podName, logOpts)
+
+	readerCloser, err := logRequest.Stream()
+	if err != nil {
+		return nil, err
+	}
+
+	return &apiserverrest.PassThroughStreamer{
+		In:          readerCloser,
+		Flush:       logOpts.Follow,
+		ContentType: "text/plain",
+	}, nil
 }

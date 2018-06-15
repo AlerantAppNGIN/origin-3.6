@@ -15,14 +15,16 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/strategicpatch"
 	"k8s.io/apimachinery/pkg/util/yaml"
+	"k8s.io/kubernetes/pkg/kubectl/categories"
 	"k8s.io/kubernetes/pkg/kubectl/cmd/templates"
 	cmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
 	"k8s.io/kubernetes/pkg/kubectl/resource"
+	"k8s.io/kubernetes/pkg/kubectl/scheme"
 	kprinters "k8s.io/kubernetes/pkg/printers"
 
-	configapi "github.com/openshift/origin/pkg/cmd/server/api"
-	configapiinstall "github.com/openshift/origin/pkg/cmd/server/api/install"
-	"github.com/openshift/origin/pkg/cmd/util/clientcmd"
+	configapi "github.com/openshift/origin/pkg/cmd/server/apis/config"
+	configapiinstall "github.com/openshift/origin/pkg/cmd/server/apis/config/install"
+	"github.com/openshift/origin/pkg/oc/cli/util/clientcmd"
 )
 
 const PatchRecommendedName = "patch"
@@ -66,6 +68,7 @@ func NewCmdPatch(name, fullName string, f *clientcmd.Factory, out io.Writer) *co
 	cmd.Flags().StringVarP(&o.Patch, "patch", "p", "", "The patch to be applied to the resource JSON file.")
 	cmd.MarkFlagRequired("patch")
 	cmd.Flags().String("type", "strategic", fmt.Sprintf("The type of patch being provided; one of %v", sets.StringKeySet(patchTypes).List()))
+	cmdutil.AddPrinterFlags(cmd)
 
 	return cmd
 }
@@ -80,20 +83,32 @@ func (o *PatchOptions) Complete(f *clientcmd.Factory, cmd *cobra.Command, args [
 	ok := false
 	o.PatchType, ok = patchTypes[patchTypeString]
 	if !ok {
-		return cmdutil.UsageError(cmd, fmt.Sprintf("--type must be one of %v, not %q", sets.StringKeySet(patchTypes).List(), patchTypeString))
+		return cmdutil.UsageErrorf(cmd, fmt.Sprintf("--type must be one of %v, not %q", sets.StringKeySet(patchTypes).List(), patchTypeString))
 	}
 
-	o.Builder = resource.NewBuilder(configapiinstall.NewRESTMapper(), f.CategoryExpander(), configapi.Scheme, resource.DisabledClientForMapping{}, configapi.Codecs.LegacyCodec())
+	o.Builder = resource.NewBuilder(
+		&resource.Mapper{
+			RESTMapper:   configapiinstall.NewRESTMapper(),
+			ObjectTyper:  configapi.Scheme,
+			ClientMapper: resource.DisabledClientForMapping{},
+			Decoder:      configapi.Codecs.LegacyCodec(),
+		},
+		&resource.Mapper{
+			RESTMapper:   configapiinstall.NewRESTMapper(),
+			ObjectTyper:  configapi.Scheme,
+			ClientMapper: resource.DisabledClientForMapping{},
+			Decoder:      unstructured.UnstructuredJSONScheme,
+		},
+		categories.SimpleCategoryExpander{},
+	)
 
 	var err error
-	mapper, typer := f.Object()
-	decoders := []runtime.Decoder{f.Decoder(true), unstructured.UnstructuredJSONScheme}
-	o.Printer, err = kprinters.GetStandardPrinter(
-		&kprinters.OutputOptions{
-			FmtType:          "yaml",
-			AllowMissingKeys: false,
-		},
-		false, mapper, typer, nil, decoders, kprinters.PrintOptions{})
+	_, typer := f.Object()
+	decoders := []runtime.Decoder{scheme.Codecs.UniversalDeserializer(), configapi.Codecs.UniversalDeserializer(), unstructured.UnstructuredJSONScheme}
+	printOpts := cmdutil.ExtractCmdPrintOptions(cmd, false)
+	printOpts.OutputFormatType = "yaml"
+
+	o.Printer, err = kprinters.GetStandardPrinter(typer, nil, decoders, *printOpts)
 	if err != nil {
 		return err
 	}
@@ -119,6 +134,7 @@ func (o *PatchOptions) RunPatch() error {
 	}
 
 	r := o.Builder.
+		Internal().
 		FilenameParam(false, &resource.FilenameOptions{Recursive: false, Filenames: []string{o.Filename}}).
 		Flatten().
 		Do()
@@ -136,14 +152,11 @@ func (o *PatchOptions) RunPatch() error {
 	}
 	info := infos[0]
 
-	originalObjJS, err := runtime.Encode(configapi.Codecs.LegacyCodec(info.Mapping.GroupVersionKind.GroupVersion()), info.VersionedObject.(runtime.Object))
+	originalObjJS, err := runtime.Encode(configapi.Codecs.LegacyCodec(info.Mapping.GroupVersionKind.GroupVersion()), info.Object.(runtime.Object))
 	if err != nil {
 		return err
 	}
-	patchedObj, err := configapi.Scheme.DeepCopy(info.VersionedObject)
-	if err != nil {
-		return err
-	}
+	patchedObj := info.Object.DeepCopyObject()
 	originalPatchedObjJS, err := getPatchedJS(o.PatchType, originalObjJS, patchBytes, patchedObj.(runtime.Object))
 	if err != nil {
 		return err

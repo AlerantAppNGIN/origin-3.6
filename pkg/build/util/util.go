@@ -13,12 +13,15 @@ import (
 	s2iapi "github.com/openshift/source-to-image/pkg/api"
 	s2iutil "github.com/openshift/source-to-image/pkg/util"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
-	kapi "k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/api/v1"
+	kapi "k8s.io/kubernetes/pkg/apis/core"
+	kapiv1 "k8s.io/kubernetes/pkg/apis/core/v1"
 	"k8s.io/kubernetes/pkg/credentialprovider"
+	credentialprovidersecrets "k8s.io/kubernetes/pkg/credentialprovider/secrets"
 
+	buildapiv1 "github.com/openshift/api/build/v1"
 	buildapi "github.com/openshift/origin/pkg/build/apis/build"
 	buildlister "github.com/openshift/origin/pkg/build/generated/listers/build/internalversion"
 )
@@ -29,12 +32,16 @@ const (
 
 	// WorkDir is the working directory within the build pod, mounted as a volume.
 	BuildWorkDirMount = "/tmp/build"
+
+	// BuilderServiceAccountName is the name of the account used to run build pods by default.
+	BuilderServiceAccountName = "builder"
 )
 
 var (
 	// InputContentPath is the path at which the build inputs will be available
 	// to all the build containers.
 	InputContentPath = filepath.Join(BuildWorkDirMount, "inputs")
+	proxyRegex       = regexp.MustCompile("(?i)proxy")
 )
 
 // GetBuildName returns name of the build pod.
@@ -43,21 +50,6 @@ func GetBuildName(pod metav1.Object) string {
 		return ""
 	}
 	return pod.GetAnnotations()[buildapi.BuildAnnotation]
-}
-
-// GetInputReference returns the From ObjectReference associated with the
-// BuildStrategy.
-func GetInputReference(strategy buildapi.BuildStrategy) *kapi.ObjectReference {
-	switch {
-	case strategy.SourceStrategy != nil:
-		return &strategy.SourceStrategy.From
-	case strategy.DockerStrategy != nil:
-		return strategy.DockerStrategy.From
-	case strategy.CustomStrategy != nil:
-		return &strategy.CustomStrategy.From
-	default:
-		return nil
-	}
 }
 
 // IsBuildComplete returns whether the provided build is complete or not
@@ -179,40 +171,20 @@ func VersionForBuild(build *buildapi.Build) int {
 	return version
 }
 
-func BuildDeepCopy(build *buildapi.Build) (*buildapi.Build, error) {
-	objCopy, err := kapi.Scheme.DeepCopy(build)
-	if err != nil {
-		return nil, err
-	}
-	copied, ok := objCopy.(*buildapi.Build)
-	if !ok {
-		return nil, fmt.Errorf("expected Build, got %#v", objCopy)
-	}
-	return copied, nil
-}
-
-func CopyApiResourcesToV1Resources(in *kapi.ResourceRequirements) v1.ResourceRequirements {
-	copied, err := kapi.Scheme.DeepCopy(in)
-	if err != nil {
-		panic(err)
-	}
-	in = copied.(*kapi.ResourceRequirements)
-	out := v1.ResourceRequirements{}
-	if err := v1.Convert_api_ResourceRequirements_To_v1_ResourceRequirements(in, &out, nil); err != nil {
+func CopyApiResourcesToV1Resources(in *kapi.ResourceRequirements) corev1.ResourceRequirements {
+	in = in.DeepCopy()
+	out := corev1.ResourceRequirements{}
+	if err := kapiv1.Convert_core_ResourceRequirements_To_v1_ResourceRequirements(in, &out, nil); err != nil {
 		panic(err)
 	}
 	return out
 }
 
-func CopyApiEnvVarToV1EnvVar(in []kapi.EnvVar) []v1.EnvVar {
-	copied, err := kapi.Scheme.DeepCopy(in)
-	if err != nil {
-		panic(err)
-	}
-	in = copied.([]kapi.EnvVar)
-	out := make([]v1.EnvVar, len(in))
+func CopyApiEnvVarToV1EnvVar(in []kapi.EnvVar) []corev1.EnvVar {
+	out := make([]corev1.EnvVar, len(in))
 	for i := range in {
-		if err := v1.Convert_api_EnvVar_To_v1_EnvVar(&in[i], &out[i], nil); err != nil {
+		item := in[i].DeepCopy()
+		if err := kapiv1.Convert_core_EnvVar_To_v1_EnvVar(item, &out[i], nil); err != nil {
 			panic(err)
 		}
 	}
@@ -224,7 +196,7 @@ func CopyApiEnvVarToV1EnvVar(in []kapi.EnvVar) []v1.EnvVar {
 // such that only whitelisted environment variables are merged into the
 // output list.  If sourcePrecedence is true, keys in the source list
 // will override keys in the output list.
-func MergeTrustedEnvWithoutDuplicates(source []v1.EnvVar, output *[]v1.EnvVar, sourcePrecedence bool) {
+func MergeTrustedEnvWithoutDuplicates(source []corev1.EnvVar, output *[]corev1.EnvVar, sourcePrecedence bool) {
 	// filter out all environment variables except trusted/well known
 	// values, because we do not want random environment variables being
 	// fed into the privileged STI container via the BuildConfig definition.
@@ -235,7 +207,7 @@ func MergeTrustedEnvWithoutDuplicates(source []v1.EnvVar, output *[]v1.EnvVar, s
 
 	index := 0
 	filteredSourceMap := make(map[string]sourceMapItem)
-	filteredSource := []v1.EnvVar{}
+	filteredSource := []corev1.EnvVar{}
 	for _, env := range source {
 		for _, acceptable := range buildapi.WhitelistEnvVarNames {
 			if env.Name == acceptable {
@@ -267,17 +239,23 @@ func SafeForLoggingURL(u *url.URL) *url.URL {
 	if u == nil {
 		return nil
 	}
-	newUrl := *u
-	newUrl.User = url.User("redacted")
-	return &newUrl
+	newURL, err := url.Parse(u.String())
+	if err != nil {
+		return nil
+	}
+	if newURL.User != nil {
+		if _, passwordSet := newURL.User.Password(); passwordSet {
+			newURL.User = url.User("redacted")
+		}
+	}
+	return newURL
 }
 
 // SafeForLoggingEnvVar returns a copy of an EnvVar array with
 // proxy credential values redacted.
-func SafeForLoggingEnvVar(env []kapi.EnvVar) []kapi.EnvVar {
-	newEnv := make([]kapi.EnvVar, len(env))
+func SafeForLoggingEnvVar(env []corev1.EnvVar) []corev1.EnvVar {
+	newEnv := make([]corev1.EnvVar, len(env))
 	copy(newEnv, env)
-	proxyRegex := regexp.MustCompile("(?i)proxy")
 	for i, env := range newEnv {
 		if proxyRegex.MatchString(env.Name) {
 			newEnv[i].Value, _ = s2iutil.SafeForLoggingURL(env.Value)
@@ -288,8 +266,8 @@ func SafeForLoggingEnvVar(env []kapi.EnvVar) []kapi.EnvVar {
 
 // SafeForLoggingBuildCommonSpec returns a copy of a CommonSpec with
 // proxy credential env variable values redacted.
-func SafeForLoggingBuildCommonSpec(spec *buildapi.CommonSpec) *buildapi.CommonSpec {
-	newSpec := *spec
+func SafeForLoggingBuildCommonSpec(spec *buildapiv1.CommonSpec) *buildapiv1.CommonSpec {
+	newSpec := spec.DeepCopy()
 	if newSpec.Source.Git != nil {
 		if newSpec.Source.Git.HTTPProxy != nil {
 			s, _ := s2iutil.SafeForLoggingURL(*newSpec.Source.Git.HTTPProxy)
@@ -314,12 +292,12 @@ func SafeForLoggingBuildCommonSpec(spec *buildapi.CommonSpec) *buildapi.CommonSp
 	if newSpec.Strategy.JenkinsPipelineStrategy != nil {
 		newSpec.Strategy.JenkinsPipelineStrategy.Env = SafeForLoggingEnvVar(newSpec.Strategy.JenkinsPipelineStrategy.Env)
 	}
-	return &newSpec
+	return newSpec
 }
 
 // SafeForLoggingBuild returns a copy of a Build with
 // proxy credentials redacted.
-func SafeForLoggingBuild(build *buildapi.Build) *buildapi.Build {
+func SafeForLoggingBuild(build *buildapiv1.Build) *buildapiv1.Build {
 	newBuild := *build
 	newSpec := SafeForLoggingBuildCommonSpec(&build.Spec.CommonSpec)
 	newBuild.Spec.CommonSpec = *newSpec
@@ -405,6 +383,8 @@ func SetBuildConfigEnv(buildConfig *buildapi.BuildConfig, env []kapi.EnvVar) {
 		oldEnv = &buildConfig.Spec.Strategy.CustomStrategy.Env
 	case buildConfig.Spec.Strategy.JenkinsPipelineStrategy != nil:
 		oldEnv = &buildConfig.Spec.Strategy.JenkinsPipelineStrategy.Env
+	default:
+		return
 	}
 	*oldEnv = env
 }
@@ -422,6 +402,8 @@ func SetBuildEnv(build *buildapi.Build, env []kapi.EnvVar) {
 		oldEnv = &build.Spec.Strategy.CustomStrategy.Env
 	case build.Spec.Strategy.JenkinsPipelineStrategy != nil:
 		oldEnv = &build.Spec.Strategy.JenkinsPipelineStrategy.Env
+	default:
+		return
 	}
 	*oldEnv = env
 }
@@ -454,13 +436,13 @@ func UpdateBuildEnv(build *buildapi.Build, env []kapi.EnvVar) {
 func FindDockerSecretAsReference(secrets []kapi.Secret, image string) *kapi.LocalObjectReference {
 	emptyKeyring := credentialprovider.BasicDockerKeyring{}
 	for _, secret := range secrets {
-		secretsv1 := make([]v1.Secret, 1)
-		err := v1.Convert_api_Secret_To_v1_Secret(&secret, &secretsv1[0], nil)
+		secretsv1 := make([]corev1.Secret, 1)
+		err := kapiv1.Convert_core_Secret_To_v1_Secret(&secret, &secretsv1[0], nil)
 		if err != nil {
 			glog.V(2).Infof("Unable to make the Docker keyring for %s/%s secret: %v", secret.Name, secret.Namespace, err)
 			continue
 		}
-		keyring, err := credentialprovider.MakeDockerKeyring(secretsv1, &emptyKeyring)
+		keyring, err := credentialprovidersecrets.MakeDockerKeyring(secretsv1, &emptyKeyring)
 		if err != nil {
 			glog.V(2).Infof("Unable to make the Docker keyring for %s/%s secret: %v", secret.Name, secret.Namespace, err)
 			continue

@@ -12,7 +12,8 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/apimachinery/pkg/watch"
-	kapi "k8s.io/kubernetes/pkg/api"
+	"k8s.io/client-go/tools/cache"
+	kapi "k8s.io/kubernetes/pkg/apis/core"
 	kclientset "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset"
 
 	infrarouter "github.com/openshift/origin/pkg/cmd/infra/router"
@@ -20,11 +21,13 @@ import (
 	projectinternalclientset "github.com/openshift/origin/pkg/project/generated/internalclientset"
 	routeapi "github.com/openshift/origin/pkg/route/apis/route"
 	routeinternalclientset "github.com/openshift/origin/pkg/route/generated/internalclientset"
+	routelisters "github.com/openshift/origin/pkg/route/generated/listers/route/internalversion"
 	"github.com/openshift/origin/pkg/router"
 	"github.com/openshift/origin/pkg/router/controller"
 	controllerfactory "github.com/openshift/origin/pkg/router/controller/factory"
 	templateplugin "github.com/openshift/origin/pkg/router/template"
 	"github.com/openshift/origin/pkg/util/ratelimiter"
+	"github.com/openshift/origin/pkg/util/writerlease"
 	testutil "github.com/openshift/origin/test/util"
 	testserver "github.com/openshift/origin/test/util/server"
 )
@@ -35,8 +38,6 @@ const waitInterval = 50 * time.Millisecond
 // will match a router's selector will expose routes in that namespace
 // after the subsequent namespace sync.
 func TestRouterNamespaceSync(t *testing.T) {
-	testutil.RequireEtcd(t)
-
 	routeclient, projectclient, kc, fn, err := launchApi(t)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -90,11 +91,9 @@ func TestRouterNamespaceSync(t *testing.T) {
 	waitForRouterToHaveRoute(t, templatePlugin, route, false)
 }
 
-// TestRouterReloadSuppressionOnSync validates that the router will
-// not be reloaded until all events from the initial sync have been
-// processed.  Reload should similarly suppressed on subsequent
-// resyncs.
-func TestRouterReloadSuppressionOnSync(t *testing.T) {
+// TestRouterFirstReloadSuppressionOnSync validates that the router will not be reloaded
+// until all events from the initial sync have been processed.
+func TestRouterFirstReloadSuppressionOnSync(t *testing.T) {
 	stressRouter(
 		t,
 		// Allow the test to be configured to enable experimentation
@@ -144,7 +143,7 @@ func stressRouter(t *testing.T, namespaceCount, routesPerNamespace, routerCount,
 	plugins := []*templateplugin.TemplatePlugin{}
 
 	// Don't coalesce reloads to validate reload suppression during sync.
-	reloadInterval := 0
+	reloadInterval := 0 * time.Second
 
 	// Track reload counts indexed by router name.
 	reloadedMap := make(map[string]int)
@@ -366,28 +365,30 @@ func (p *DelayPlugin) Commit() error {
 
 // launchRateLimitedRouter launches a rate-limited template router
 // that communicates with the api via the provided clients.
-func launchRateLimitedRouter(t *testing.T, routeclient routeinternalclientset.Interface, projectclient projectinternalclientset.Interface, kc kclientset.Interface, name string, maxDelay int32, reloadInterval int, reloadedMap map[string]int) *templateplugin.TemplatePlugin {
+func launchRateLimitedRouter(t *testing.T, routeclient routeinternalclientset.Interface, projectclient projectinternalclientset.Interface, kc kclientset.Interface, name string, maxDelay int32, reloadInterval time.Duration, reloadedMap map[string]int) *templateplugin.TemplatePlugin {
 	reloadedMap[name] = 0
 	rateLimitingFunc := func() error {
 		reloadedMap[name] += 1
 		t.Logf("Router %s reloaded (%d times)\n", name, reloadedMap[name])
 		return nil
 	}
+
+	factory := controllerfactory.NewDefaultRouterControllerFactory(routeclient, projectclient.Project().Projects(), kc)
+
 	var plugin router.Plugin
-	templatePlugin, plugin := initializeRouterPlugins(routeclient, projectclient, name, reloadInterval, rateLimitingFunc)
+	templatePlugin, plugin := initializeRouterPlugins(routeclient, projectclient, factory.CreateRoutesSharedInformer(), name, reloadInterval, rateLimitingFunc)
 
 	if maxDelay > 0 {
 		plugin = NewDelayPlugin(plugin, maxDelay)
 	}
 
-	factory := controllerfactory.NewDefaultRouterControllerFactory(routeclient.Route(), kc)
-	ctrl := factory.Create(plugin, false, false)
+	ctrl := factory.Create(plugin, false)
 	ctrl.Run()
 
 	return templatePlugin
 }
 
-func initializeRouterPlugins(routeclient routeinternalclientset.Interface, projectclient projectinternalclientset.Interface, name string, reloadInterval int, rateLimitingFunc ratelimiter.HandlerFunc) (*templateplugin.TemplatePlugin, router.Plugin) {
+func initializeRouterPlugins(routeclient routeinternalclientset.Interface, projectclient projectinternalclientset.Interface, informer cache.SharedIndexInformer, name string, reloadInterval time.Duration, rateLimitingFunc ratelimiter.HandlerFunc) (*templateplugin.TemplatePlugin, router.Plugin) {
 	r := templateplugin.NewFakeTemplateRouter()
 
 	r.EnableRateLimiter(reloadInterval, func() error {
@@ -395,10 +396,16 @@ func initializeRouterPlugins(routeclient routeinternalclientset.Interface, proje
 		return rateLimitingFunc()
 	})
 
+	routeLister := routelisters.NewRouteLister(informer.GetIndexer())
+
+	tracker := controller.NewSimpleContentionTracker(informer, name, time.Minute)
+	go tracker.Run(wait.NeverStop)
+	lease := writerlease.New(time.Minute, 3*time.Second)
+	go lease.Run(wait.NeverStop)
 	templatePlugin := &templateplugin.TemplatePlugin{Router: r}
-	statusPlugin := controller.NewStatusAdmitter(templatePlugin, routeclient.Route(), name, "")
+	statusPlugin := controller.NewStatusAdmitter(templatePlugin, routeclient.Route(), routeLister, name, "", lease, tracker)
 	validationPlugin := controller.NewExtendedValidator(statusPlugin, controller.RejectionRecorder(statusPlugin))
-	uniquePlugin := controller.NewUniqueHost(validationPlugin, controller.HostForRoute, false, controller.RejectionRecorder(statusPlugin))
+	uniquePlugin := controller.NewUniqueHost(validationPlugin, false, controller.RejectionRecorder(statusPlugin))
 
 	return templatePlugin, uniquePlugin
 }
@@ -406,16 +413,11 @@ func initializeRouterPlugins(routeclient routeinternalclientset.Interface, proje
 // launchRouter launches a template router that communicates with the
 // api via the provided clients.
 func launchRouter(routeclient routeinternalclientset.Interface, projectclient projectinternalclientset.Interface, kc kclientset.Interface, routerSelection infrarouter.RouterSelection) *templateplugin.TemplatePlugin {
-	templatePlugin, plugin := initializeRouterPlugins(routeclient, projectclient, "test-router", 0, func() error {
+	factory := routerSelection.NewFactory(routeclient, projectclient.Project().Projects(), kc)
+	templatePlugin, plugin := initializeRouterPlugins(routeclient, projectclient, factory.CreateRoutesSharedInformer(), "test-router", 0, func() error {
 		return nil
 	})
-	factory := routerSelection.NewFactory(routeclient.Route(), projectclient.Project().Projects(), kc)
-	ctrl := factory.Create(plugin, false, false)
-
-	// Minimize resync latency
-	ctrl.NamespaceSyncInterval = factory.ResyncInterval - 1*time.Second
-	ctrl.NamespaceWaitInterval = 1 * time.Second
-
+	ctrl := factory.Create(plugin, false)
 	ctrl.Run()
 
 	return templatePlugin

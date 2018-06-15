@@ -18,6 +18,7 @@ package apiserver
 
 import (
 	"crypto/tls"
+	"fmt"
 	"io/ioutil"
 	"net/http"
 	"net/http/httptest"
@@ -84,13 +85,11 @@ func (*fakeRequestContextMapper) Update(req *http.Request, context genericapireq
 
 type mockedRouter struct {
 	destinationHost string
+	err             error
 }
 
 func (r *mockedRouter) ResolveEndpoint(namespace, name string) (*url.URL, error) {
-	return &url.URL{
-		Scheme: "https",
-		Host:   r.destinationHost,
-	}, nil
+	return &url.URL{Scheme: "https", Host: r.destinationHost}, r.err
 }
 
 func TestProxyHandler(t *testing.T) {
@@ -109,6 +108,8 @@ func TestProxyHandler(t *testing.T) {
 		path       string
 		apiService *apiregistration.APIService
 
+		serviceResolver ServiceResolver
+
 		expectedStatusCode int
 		expectedBody       string
 		expectedCalled     bool
@@ -125,11 +126,16 @@ func TestProxyHandler(t *testing.T) {
 					Group:   "foo",
 					Version: "v1",
 				},
+				Status: apiregistration.APIServiceStatus{
+					Conditions: []apiregistration.APIServiceCondition{
+						{Type: apiregistration.Available, Status: apiregistration.ConditionTrue},
+					},
+				},
 			},
 			expectedStatusCode: http.StatusInternalServerError,
 			expectedBody:       "missing user",
 		},
-		"proxy with user": {
+		"proxy with user, insecure": {
 			user: &user.DefaultInfo{
 				Name:   "username",
 				Groups: []string{"one", "two"},
@@ -138,10 +144,15 @@ func TestProxyHandler(t *testing.T) {
 			apiService: &apiregistration.APIService{
 				ObjectMeta: metav1.ObjectMeta{Name: "v1.foo"},
 				Spec: apiregistration.APIServiceSpec{
-					Service:  &apiregistration.ServiceReference{Name: "test-service", Namespace: "test-ns"},
-					Group:    "foo",
-					Version:  "v1",
-					CABundle: testCACrt,
+					Service:               &apiregistration.ServiceReference{},
+					Group:                 "foo",
+					Version:               "v1",
+					InsecureSkipTLSVerify: true,
+				},
+				Status: apiregistration.APIServiceStatus{
+					Conditions: []apiregistration.APIServiceCondition{
+						{Type: apiregistration.Available, Status: apiregistration.ConditionTrue},
+					},
 				},
 			},
 			expectedStatusCode: http.StatusOK,
@@ -156,6 +167,83 @@ func TestProxyHandler(t *testing.T) {
 				"X-Remote-Group":    {"one", "two"},
 			},
 		},
+		"proxy with user, cabundle": {
+			user: &user.DefaultInfo{
+				Name:   "username",
+				Groups: []string{"one", "two"},
+			},
+			path: "/request/path",
+			apiService: &apiregistration.APIService{
+				ObjectMeta: metav1.ObjectMeta{Name: "v1.foo"},
+				Spec: apiregistration.APIServiceSpec{
+					Service:  &apiregistration.ServiceReference{Name: "test-service", Namespace: "test-ns"},
+					Group:    "foo",
+					Version:  "v1",
+					CABundle: testCACrt,
+				},
+				Status: apiregistration.APIServiceStatus{
+					Conditions: []apiregistration.APIServiceCondition{
+						{Type: apiregistration.Available, Status: apiregistration.ConditionTrue},
+					},
+				},
+			},
+			expectedStatusCode: http.StatusOK,
+			expectedCalled:     true,
+			expectedHeaders: map[string][]string{
+				"X-Forwarded-Proto": {"https"},
+				"X-Forwarded-Uri":   {"/request/path"},
+				"X-Forwarded-For":   {"127.0.0.1"},
+				"X-Remote-User":     {"username"},
+				"User-Agent":        {"Go-http-client/1.1"},
+				"Accept-Encoding":   {"gzip"},
+				"X-Remote-Group":    {"one", "two"},
+			},
+		},
+		"service unavailable": {
+			user: &user.DefaultInfo{
+				Name:   "username",
+				Groups: []string{"one", "two"},
+			},
+			path: "/request/path",
+			apiService: &apiregistration.APIService{
+				ObjectMeta: metav1.ObjectMeta{Name: "v1.foo"},
+				Spec: apiregistration.APIServiceSpec{
+					Service:  &apiregistration.ServiceReference{Name: "test-service", Namespace: "test-ns"},
+					Group:    "foo",
+					Version:  "v1",
+					CABundle: testCACrt,
+				},
+				Status: apiregistration.APIServiceStatus{
+					Conditions: []apiregistration.APIServiceCondition{
+						{Type: apiregistration.Available, Status: apiregistration.ConditionFalse},
+					},
+				},
+			},
+			expectedStatusCode: http.StatusServiceUnavailable,
+		},
+		"service unresolveable": {
+			user: &user.DefaultInfo{
+				Name:   "username",
+				Groups: []string{"one", "two"},
+			},
+			path:            "/request/path",
+			serviceResolver: &mockedRouter{err: fmt.Errorf("unresolveable")},
+			apiService: &apiregistration.APIService{
+				ObjectMeta: metav1.ObjectMeta{Name: "v1.foo"},
+				Spec: apiregistration.APIServiceSpec{
+					Service:  &apiregistration.ServiceReference{Name: "bad-service", Namespace: "test-ns"},
+					Group:    "foo",
+					Version:  "v1",
+					CABundle: testCACrt,
+				},
+				Status: apiregistration.APIServiceStatus{
+					Conditions: []apiregistration.APIServiceCondition{
+						{Type: apiregistration.Available, Status: apiregistration.ConditionTrue},
+					},
+				},
+			},
+			expectedStatusCode: http.StatusServiceUnavailable,
+		},
 		"fail on bad serving cert": {
 			user: &user.DefaultInfo{
 				Name:   "username",
@@ -169,6 +257,11 @@ func TestProxyHandler(t *testing.T) {
 					Group:   "foo",
 					Version: "v1",
 				},
+				Status: apiregistration.APIServiceStatus{
+					Conditions: []apiregistration.APIServiceCondition{
+						{Type: apiregistration.Available, Status: apiregistration.ConditionTrue},
+					},
+				},
 			},
 			expectedStatusCode: http.StatusServiceUnavailable,
 		},
@@ -178,9 +271,13 @@ func TestProxyHandler(t *testing.T) {
 		target.Reset()
 
 		func() {
+			serviceResolver := tc.serviceResolver
+			if serviceResolver == nil {
+				serviceResolver = &mockedRouter{destinationHost: targetServer.Listener.Addr().String()}
+			}
 			handler := &proxyHandler{
 				localDelegate:   http.NewServeMux(),
-				serviceResolver: &mockedRouter{destinationHost: targetServer.Listener.Addr().String()},
+				serviceResolver: serviceResolver,
 				proxyTransport:  &http.Transport{},
 			}
 			handler.contextMapper = &fakeRequestContextMapper{user: tc.user}
@@ -229,7 +326,6 @@ func TestProxyHandler(t *testing.T) {
 }
 
 func TestProxyUpgrade(t *testing.T) {
-
 	testcases := map[string]struct {
 		APIService   *apiregistration.APIService
 		ExpectError  bool
@@ -243,6 +339,11 @@ func TestProxyUpgrade(t *testing.T) {
 					Version:  "v1",
 					Service:  &apiregistration.ServiceReference{Name: "test-service", Namespace: "test-ns"},
 				},
+				Status: apiregistration.APIServiceStatus{
+					Conditions: []apiregistration.APIServiceCondition{
+						{Type: apiregistration.Available, Status: apiregistration.ConditionTrue},
+					},
+				},
 			},
 			ExpectError:  false,
 			ExpectCalled: true,
@@ -255,6 +356,11 @@ func TestProxyUpgrade(t *testing.T) {
 					Version: "v1",
 					Service: &apiregistration.ServiceReference{Name: "invalid-service", Namespace: "invalid-ns"},
 				},
+				Status: apiregistration.APIServiceStatus{
+					Conditions: []apiregistration.APIServiceCondition{
+						{Type: apiregistration.Available, Status: apiregistration.ConditionTrue},
+					},
+				},
 			},
 			ExpectError:  false,
 			ExpectCalled: true,
@@ -266,6 +372,11 @@ func TestProxyUpgrade(t *testing.T) {
 					Group:    "mygroup",
 					Version:  "v1",
 					Service:  &apiregistration.ServiceReference{Name: "invalid-service", Namespace: "invalid-ns"},
+				},
+				Status: apiregistration.APIServiceStatus{
+					Conditions: []apiregistration.APIServiceCondition{
+						{Type: apiregistration.Available, Status: apiregistration.ConditionTrue},
+					},
 				},
 			},
 			ExpectError:  true,

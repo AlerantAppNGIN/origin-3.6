@@ -17,21 +17,22 @@ import (
 
 	dockerClient "github.com/fsouza/go-dockerclient"
 	"golang.org/x/net/websocket"
+	"k8s.io/kubernetes/pkg/api/legacyscheme"
 
+	kv1 "k8s.io/api/core/v1"
+	"k8s.io/api/extensions/v1beta1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	knet "k8s.io/apimachinery/pkg/util/net"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/apimachinery/pkg/watch"
-	kapi "k8s.io/kubernetes/pkg/api"
-	kv1 "k8s.io/kubernetes/pkg/api/v1"
+	kapi "k8s.io/kubernetes/pkg/apis/core"
 	"k8s.io/kubernetes/pkg/apis/extensions"
-	"k8s.io/kubernetes/pkg/apis/extensions/v1beta1"
 	watchjson "k8s.io/kubernetes/pkg/watch/json"
 
+	routeapiv1 "github.com/openshift/api/route/v1"
 	routeapi "github.com/openshift/origin/pkg/route/apis/route"
-	routeapiv1 "github.com/openshift/origin/pkg/route/apis/route/v1"
 	tr "github.com/openshift/origin/test/integration/router"
 	testutil "github.com/openshift/origin/test/util"
 )
@@ -1228,7 +1229,7 @@ func sendTimeout(t *testing.T, ch chan string, s string, timeout time.Duration) 
 
 // eventString marshals the event into a string
 func eventString(e *watch.Event) string {
-	obj, _ := watchjson.Object(kapi.Codecs.LegacyCodec(routeapiv1.LegacySchemeGroupVersion), e)
+	obj, _ := watchjson.Object(legacyscheme.Codecs.LegacyCodec(routeapiv1.LegacySchemeGroupVersion), e)
 	s, _ := json.Marshal(obj)
 	return string(s)
 }
@@ -1251,7 +1252,8 @@ Jik7E2r1/yY0MrkawljOAxisXs821kJ+Z/51Ud2t5uhGxS6hJypbGspMS7OtBbw7
 8oThK7cWtCXOldNF6ruqY1agWnhRdAq5qSMnuBXuicOP0Kbtx51a1ugE3SnvQenJ
 nZxdtYUXvEsHZC/6bAtTfNh+/SwgxQJuL2ZM+VG3X2JIKY8xTDui+il7uTh422lq
 wED8uwKl+bOj6xFDyw4gWoBxRobsbFaME8pkykP1+GnKDberyAM=
------END CERTIFICATE-----`
+-----END CERTIFICATE-----
+`
 
 var defaultKey = `-----BEGIN RSA PRIVATE KEY-----
 MIICWwIBAAKBgQDNAbvvqB1dcHKYVkWzC1H7fHw+5zxvecbO1Hiz6YRWbkoSIYXQ
@@ -1267,22 +1269,22 @@ Vt9Q7uMQQ3s72CGu3ANZDFS2nbRZFU5koxrggk6lRRk1fOq9NvrmHg10AQJABOea
 pgfj+yGLmkUw8JwgGH6xCUbHO+WBUFSlPf+Y50fJeO+OrjqPXAVKeSV3ZCwWjKT4
 9viXJNJJ4WfF0bO/XwJAOMB1wQnEOSZ4v+laMwNtMq6hre5K8woqteXICoGcIWe8
 u3YLAbyW/lHhOCiZu2iAI8AbmXem9lW6Tr7p/97s0w==
------END RSA PRIVATE KEY-----`
+-----END RSA PRIVATE KEY-----
+`
 
 // Constants used to default createAndStartRouterContainerExtended
 const (
 	defaultBindPortsAfterSync = false
-	defaultEnableIngress      = false
 	defaultNamespaceLabels    = ""
 )
 
 // createAndStartRouterContainer is responsible for deploying the router image in docker.  It assumes that all router images
 // will use a command line flag that can take --master which points to the master url
 func createAndStartRouterContainer(dockerCli *dockerClient.Client, masterIp string, routerStatsPort int, reloadInterval int) (containerId string, err error) {
-	return createAndStartRouterContainerExtended(dockerCli, masterIp, routerStatsPort, reloadInterval, defaultBindPortsAfterSync, defaultEnableIngress, defaultNamespaceLabels)
+	return createAndStartRouterContainerExtended(dockerCli, masterIp, routerStatsPort, reloadInterval, defaultBindPortsAfterSync, defaultNamespaceLabels)
 }
 
-func createAndStartRouterContainerExtended(dockerCli *dockerClient.Client, masterIp string, routerStatsPort int, reloadInterval int, bindPortsAfterSync, enableIngress bool, namespaceLabels string) (containerId string, err error) {
+func createAndStartRouterContainerExtended(dockerCli *dockerClient.Client, masterIp string, routerStatsPort int, reloadInterval int, bindPortsAfterSync bool, namespaceLabels string) (containerId string, err error) {
 	ports := []string{"80", "443"}
 	if routerStatsPort > 0 {
 		ports = append(ports, fmt.Sprintf("%d", routerStatsPort))
@@ -1319,7 +1321,6 @@ func createAndStartRouterContainerExtended(dockerCli *dockerClient.Client, maste
 		fmt.Sprintf("STATS_PASSWORD=%s", statsPassword),
 		fmt.Sprintf("DEFAULT_CERTIFICATE=%s\n%s", defaultCert, defaultKey),
 		fmt.Sprintf("ROUTER_BIND_PORTS_AFTER_SYNC=%s", strconv.FormatBool(bindPortsAfterSync)),
-		fmt.Sprintf("ROUTER_ENABLE_INGRESS=%s", strconv.FormatBool(enableIngress)),
 		fmt.Sprintf("NAMESPACE_LABELS=%s", namespaceLabels),
 	}
 
@@ -1348,10 +1349,15 @@ func createAndStartRouterContainerExtended(dockerCli *dockerClient.Client, maste
 		hostVols = append(hostVols, fmt.Sprintf("%[1]s:/usr/bin/openshift", binary))
 	}
 
+	logLevel := os.Getenv("OPENSHIFT_LOG_LEVEL")
+	if len(logLevel) == 0 {
+		logLevel = "4"
+	}
+
 	containerOpts := dockerClient.CreateContainerOptions{
 		Config: &dockerClient.Config{
 			Image:        getRouterImage(),
-			Cmd:          []string{"--master=" + masterIp, "--loglevel=4"},
+			Cmd:          []string{"--master=" + masterIp, "--loglevel=" + logLevel},
 			Env:          env,
 			ExposedPorts: exposedPorts,
 			VolumesFrom:  vols,
@@ -1414,8 +1420,10 @@ func validateServer(server *tr.TestHttpService, t *testing.T) {
 
 // cleanUp stops and removes the deployed router
 func cleanUp(t *testing.T, dockerCli *dockerClient.Client, routerId string) {
+	getAllLogs, _ := strconv.ParseBool(os.Getenv("OPENSHIFT_GET_ALL_DOCKER_LOGS"))
+
 	dockerCli.StopContainer(routerId, 5)
-	if t.Failed() {
+	if t.Failed() || getAllLogs {
 		dockerCli.Logs(dockerClient.LogsOptions{
 			Container:    routerId,
 			OutputStream: os.Stdout,
@@ -1634,7 +1642,7 @@ func TestRouterBindsPortsAfterSync(t *testing.T) {
 
 	bindPortsAfterSync := true
 	reloadInterval := 1
-	routerId, err := createAndStartRouterContainerExtended(dockerCli, fakeMasterAndPod.MasterHttpAddr, statsPort, reloadInterval, bindPortsAfterSync, defaultEnableIngress, defaultNamespaceLabels)
+	routerId, err := createAndStartRouterContainerExtended(dockerCli, fakeMasterAndPod.MasterHttpAddr, statsPort, reloadInterval, bindPortsAfterSync, defaultNamespaceLabels)
 	if err != nil {
 		t.Fatalf("Error starting container %s : %v", getRouterImage(), err)
 	}
@@ -1699,7 +1707,7 @@ func TestRouterBindsPortsAfterSync(t *testing.T) {
 
 type routerIntegrationTest func(*testing.T, *tr.TestHttpService)
 
-func runRouterTest(t *testing.T, rit routerIntegrationTest, enableIngress bool, namespaceNames *[]string) {
+func runRouterTest(t *testing.T, rit routerIntegrationTest, namespaceNames *[]string) {
 	namespaceLabels, namespaceListResponse := getNamespaceConfig(t, namespaceNames)
 
 	//create a server which will act as a user deployed application that
@@ -1723,7 +1731,7 @@ func runRouterTest(t *testing.T, rit routerIntegrationTest, enableIngress bool, 
 
 	reloadInterval := 1
 	routerId, err := createAndStartRouterContainerExtended(
-		dockerCli, fakeMasterAndPod.MasterHttpAddr, statsPort, reloadInterval, defaultBindPortsAfterSync, enableIngress, namespaceLabels)
+		dockerCli, fakeMasterAndPod.MasterHttpAddr, statsPort, reloadInterval, defaultBindPortsAfterSync, namespaceLabels)
 
 	if err != nil {
 		t.Fatalf("Error starting container %s : %v", getRouterImage(), err)
@@ -1762,7 +1770,7 @@ func getNamespaceConfig(t *testing.T, namespaceNames *[]string) (namespaceLabels
 		})
 	}
 
-	obj, err := runtime.Encode(kapi.Codecs.LegacyCodec(kv1.SchemeGroupVersion), namespaceList)
+	obj, err := runtime.Encode(legacyscheme.Codecs.LegacyCodec(kv1.SchemeGroupVersion), namespaceList)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -1775,7 +1783,7 @@ func getNamespaceConfig(t *testing.T, namespaceNames *[]string) (namespaceLabels
 // method is required because ingress uses a different schema version
 // (v1beta1) than routes (v1).
 func ingressEventString(e *watch.Event) string {
-	obj, _ := watchjson.Object(kapi.Codecs.LegacyCodec(v1beta1.SchemeGroupVersion), e)
+	obj, _ := watchjson.Object(legacyscheme.Codecs.LegacyCodec(v1beta1.SchemeGroupVersion), e)
 	s, _ := json.Marshal(obj)
 	return string(s)
 }
@@ -1884,8 +1892,7 @@ func ingressConfiguredRouter(t *testing.T, fakeMasterAndPod *tr.TestHttpService)
 
 // TestRouterIngress validates that an ingress resource can configure a router to expose a tls route.
 func TestIngressConfiguredRouter(t *testing.T) {
-	enableIngress := true
 	// Enable namespace filtering to allow validation of compatibility with ingress.
 	namespaceNames := []string{defaultNamespace}
-	runRouterTest(t, ingressConfiguredRouter, enableIngress, &namespaceNames)
+	runRouterTest(t, ingressConfiguredRouter, &namespaceNames)
 }

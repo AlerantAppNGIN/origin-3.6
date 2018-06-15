@@ -7,15 +7,18 @@ import (
 	kerrs "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	apirequest "k8s.io/apiserver/pkg/endpoints/request"
 	"k8s.io/apiserver/pkg/registry/generic"
 	"k8s.io/apiserver/pkg/registry/generic/registry"
 	"k8s.io/apiserver/pkg/registry/rest"
-	kapi "k8s.io/kubernetes/pkg/api"
+	"k8s.io/kubernetes/pkg/printers"
+	printerstorage "k8s.io/kubernetes/pkg/printers/storage"
 
 	"github.com/openshift/origin/pkg/cmd/server/bootstrappolicy"
+	printersinternal "github.com/openshift/origin/pkg/printers/internalversion"
 	userapi "github.com/openshift/origin/pkg/user/apis/user"
 	"github.com/openshift/origin/pkg/user/apis/user/validation"
 	"github.com/openshift/origin/pkg/user/registry/user"
@@ -32,18 +35,18 @@ var _ rest.StandardStorage = &REST{}
 // NewREST returns a RESTStorage object that will work against users
 func NewREST(optsGetter restoptions.Getter) (*REST, error) {
 	store := &registry.Store{
-		Copier:                   kapi.Scheme,
 		NewFunc:                  func() runtime.Object { return &userapi.User{} },
 		NewListFunc:              func() runtime.Object { return &userapi.UserList{} },
-		PredicateFunc:            user.Matcher,
 		DefaultQualifiedResource: userapi.Resource("users"),
+
+		TableConvertor: printerstorage.TableConvertor{TablePrinter: printers.NewTablePrinter().With(printersinternal.AddHandlers)},
 
 		CreateStrategy: user.Strategy,
 		UpdateStrategy: user.Strategy,
 		DeleteStrategy: user.Strategy,
 	}
 
-	options := &generic.StoreOptions{RESTOptions: optsGetter, AttrFunc: user.GetAttrs}
+	options := &generic.StoreOptions{RESTOptions: optsGetter}
 	if err := store.CompleteWithOptions(options); err != nil {
 		return nil, err
 	}
@@ -65,24 +68,33 @@ func (r *REST) Get(ctx apirequest.Context, name string, options *metav1.GetOptio
 		contextGroups := sets.NewString(user.GetGroups()...)
 		contextGroups.Delete(bootstrappolicy.UnauthenticatedGroup, bootstrappolicy.AuthenticatedGroup)
 
+		// build a virtual user object using the context data
+		virtualUser := &userapi.User{ObjectMeta: metav1.ObjectMeta{Name: name, UID: types.UID(user.GetUID())}, Groups: contextGroups.List()}
+
 		if reasons := validation.ValidateUserName(name, false); len(reasons) != 0 {
 			// The user the authentication layer has identified cannot be a valid persisted user
 			// Return an API representation of the virtual user
-			return &userapi.User{ObjectMeta: metav1.ObjectMeta{Name: name}, Groups: contextGroups.List()}, nil
+			return virtualUser, nil
 		}
 
+		// see if the context user exists in storage
 		obj, err := r.Store.Get(ctx, name, options)
+
+		// valid persisted user
 		if err == nil {
 			return obj, nil
 		}
 
+		// server is broken
 		if !kerrs.IsNotFound(err) {
-			return nil, err
+			return nil, kerrs.NewInternalError(err)
 		}
 
-		return &userapi.User{ObjectMeta: metav1.ObjectMeta{Name: name}, Groups: contextGroups.List()}, nil
+		// impersonation, remote token authn, etc
+		return virtualUser, nil
 	}
 
+	// do not bother looking up users that cannot be persisted
 	if reasons := validation.ValidateUserName(name, false); len(reasons) != 0 {
 		return nil, field.Invalid(field.NewPath("metadata", "name"), name, strings.Join(reasons, ", "))
 	}

@@ -19,23 +19,26 @@ os::cmd::try_until_not_text 'oc get ns --template "{{ range .items }}{{ if not (
 project="$( oc project -q )"
 
 os::test::junit::declare_suite_start "cmd/migrate/storage"
-os::cmd::expect_success_and_text     'oc adm migrate storage' 'summary \(dry run\)'
-os::cmd::expect_success_and_text     'oc adm migrate storage --loglevel=2' "migrated \(dry run\): -n ${project} serviceaccounts/deployer"
-os::cmd::expect_success_and_not_text 'oc adm migrate storage --loglevel=2 --include=pods' "migrated \(dry run\): -n ${project} serviceaccounts/deployer"
-os::cmd::expect_success_and_text     'oc adm migrate storage --loglevel=2 --include=sa --from-key=default/ --to-key=default/\xFF' "migrated \(dry run\): -n default serviceaccounts/deployer"
-os::cmd::expect_success_and_not_text 'oc adm migrate storage --loglevel=2 --include=sa --from-key=default/ --to-key=default/deployer' "migrated \(dry run\): -n default serviceaccounts/deployer"
-os::cmd::expect_success_and_text     'oc adm migrate storage --loglevel=2 --confirm' 'unchanged:'
+os::cmd::expect_success_and_text     'oc adm migrate storage' 'summary'
+os::cmd::expect_success_and_text     'oc adm migrate storage --loglevel=2' ": -n ${project} serviceaccounts/deployer"
+os::cmd::expect_success_and_not_text 'oc adm migrate storage --loglevel=2 --include=pods' ": -n ${project} serviceaccounts/deployer"
+os::cmd::expect_success_and_text     'oc adm migrate storage --loglevel=2 --include=sa --from-key=default/ --to-key=default/\xFF' ": -n default serviceaccounts/deployer"
+os::cmd::expect_success_and_not_text 'oc adm migrate storage --loglevel=2 --include=sa --from-key=default/ --to-key=default/deployer' ": -n default serviceaccounts/deployer"
+os::cmd::expect_success_and_text     'oc adm migrate storage --loglevel=2' 'unchanged:'
+os::cmd::expect_success_and_text     'oc adm migrate storage --bandwidth=20' 'summary:'
+os::cmd::expect_success_and_text     'oc adm migrate storage --confirm' 'storage migration does not support dry run, this flag is ignored'
+os::cmd::expect_success_and_text     'oc adm migrate storage -o=yaml' 'storage migration does not support dry run, this flag is ignored'
 os::test::junit::declare_suite_end
 
 os::test::junit::declare_suite_start "cmd/migrate/storage_oauthclientauthorizations"
 # Create valid OAuth client
-os::cmd::expect_success_and_text     'oc create -f test/testdata/oauth/client.yaml' 'oauthclient "test-oauth-client" created'
+os::cmd::expect_success_and_text     'oc create -f test/testdata/oauth/client.yaml' 'oauthclient.oauth.openshift.io "test-oauth-client" created'
 # Create OAuth client authorization for client
-os::cmd::expect_success_and_text     'oc create -f test/testdata/oauth/clientauthorization.yaml' 'oauthclientauthorization "user1:test-oauth-client" created'
+os::cmd::expect_success_and_text     'oc create -f test/testdata/oauth/clientauthorization.yaml' 'oauthclientauthorization.oauth.openshift.io "user1:test-oauth-client" created'
 # Delete client
-os::cmd::expect_success_and_text     'oc delete oauthclient test-oauth-client' 'oauthclient "test-oauth-client" deleted'
+os::cmd::expect_success_and_text     'oc delete oauthclient test-oauth-client' 'oauthclient.oauth.openshift.io "test-oauth-client" deleted'
 # Assert that migration/update still works even though the client authorization is no longer valid
-os::cmd::expect_success_and_text 'oc adm migrate storage --loglevel=6 --include=oauthclientauthorizations --confirm' 'PUT.*oauthclientauthorizations/user1:test-oauth-client'
+os::cmd::expect_success_and_text 'oc adm migrate storage --loglevel=6 --include=oauthclientauthorizations' 'PUT.*oauthclientauthorizations/user1:test-oauth-client'
 os::test::junit::declare_suite_end
 
 os::test::junit::declare_suite_start "cmd/migrate/imagereferences"
@@ -72,6 +75,18 @@ os::cmd::expect_success_and_text     'oc get istag test:2 --template "{{ .image.
 os::cmd::expect_success_and_text     'oc adm migrate image-references --include=imagestreams docker.io/*=my.docker.io/* --all-namespaces=false --loglevel=1 --confirm' 'migrated=1'
 os::cmd::expect_success_and_not_text 'oc get is test --template "{{ range .status.tags }}{{ range .items }}{{ .dockerImageReference }}{{ \"\n\" }}{{ end }}{{ end }}"' '^php'
 os::cmd::expect_success_and_not_text 'oc get is test --template "{{ range .status.tags }}{{ range .items }}{{ .dockerImageReference }}{{ \"\n\" }}{{ end }}{{ end }}"' '^mysql'
+os::test::junit::declare_suite_end
+
+os::test::junit::declare_suite_start "cmd/migrate/legacyhpa"
+# create a legacy and a normal HPA
+os::cmd::expect_success 'oc create -f test/testdata/hpa/legacy-and-normal-hpa.yaml'
+# verify dry run
+os::cmd::expect_success_and_text 'oc adm migrate legacy-hpa' 'migrated=1'
+# confirm...
+os::cmd::expect_success_and_text 'oc adm migrate legacy-hpa --confirm' 'migrated=1'
+# verify that all HPAs are as they should be
+os::cmd::expect_success_and_text 'oc get hpa legacy-hpa -o jsonpath="{.spec.scaleTargetRef.apiVersion}.{.spec.scaleTargetRef.kind} {.spec.scaleTargetRef.name}"' 'apps.openshift.io/v1.DeploymentConfig legacy-target'
+os::cmd::expect_success_and_text 'oc get hpa other-hpa -o jsonpath="{.spec.scaleTargetRef.apiVersion}.{.spec.scaleTargetRef.kind} {.spec.scaleTargetRef.name}"' 'apps/v1.Deployment other-target'
 os::test::junit::declare_suite_end
 
 os::test::junit::declare_suite_end

@@ -5,10 +5,12 @@ import (
 	"k8s.io/apiserver/pkg/registry/generic"
 	"k8s.io/apiserver/pkg/registry/generic/registry"
 	"k8s.io/apiserver/pkg/registry/rest"
-	kapi "k8s.io/kubernetes/pkg/api"
+	"k8s.io/kubernetes/pkg/printers"
+	printerstorage "k8s.io/kubernetes/pkg/printers/storage"
 
 	oauthapi "github.com/openshift/origin/pkg/oauth/apis/oauth"
 	"github.com/openshift/origin/pkg/oauth/registry/oauthclient"
+	printersinternal "github.com/openshift/origin/pkg/printers/internalversion"
 	"github.com/openshift/origin/pkg/util/restoptions"
 )
 
@@ -22,18 +24,18 @@ var _ rest.StandardStorage = &REST{}
 // NewREST returns a RESTStorage object that will work against oauth clients
 func NewREST(optsGetter restoptions.Getter) (*REST, error) {
 	store := &registry.Store{
-		Copier:                   kapi.Scheme,
 		NewFunc:                  func() runtime.Object { return &oauthapi.OAuthClient{} },
 		NewListFunc:              func() runtime.Object { return &oauthapi.OAuthClientList{} },
-		PredicateFunc:            oauthclient.Matcher,
 		DefaultQualifiedResource: oauthapi.Resource("oauthclients"),
+
+		TableConvertor: printerstorage.TableConvertor{TablePrinter: printers.NewTablePrinter().With(printersinternal.AddHandlers)},
 
 		CreateStrategy: oauthclient.Strategy,
 		UpdateStrategy: oauthclient.Strategy,
 		DeleteStrategy: oauthclient.Strategy,
 	}
 
-	options := &generic.StoreOptions{RESTOptions: optsGetter, AttrFunc: oauthclient.GetAttrs}
+	options := &generic.StoreOptions{RESTOptions: optsGetter}
 	if err := store.CompleteWithOptions(options); err != nil {
 		return nil, err
 	}

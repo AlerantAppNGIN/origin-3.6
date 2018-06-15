@@ -4,8 +4,10 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apiserver/pkg/registry/generic"
 	"k8s.io/apiserver/pkg/registry/generic/registry"
-	kapi "k8s.io/kubernetes/pkg/api"
+	"k8s.io/kubernetes/pkg/printers"
+	printerstorage "k8s.io/kubernetes/pkg/printers/storage"
 
+	printersinternal "github.com/openshift/origin/pkg/printers/internalversion"
 	userapi "github.com/openshift/origin/pkg/user/apis/user"
 	"github.com/openshift/origin/pkg/user/registry/group"
 	"github.com/openshift/origin/pkg/util/restoptions"
@@ -19,18 +21,18 @@ type REST struct {
 // NewREST returns a RESTStorage object that will work against groups
 func NewREST(optsGetter restoptions.Getter) (*REST, error) {
 	store := &registry.Store{
-		Copier:                   kapi.Scheme,
 		NewFunc:                  func() runtime.Object { return &userapi.Group{} },
 		NewListFunc:              func() runtime.Object { return &userapi.GroupList{} },
-		PredicateFunc:            group.Matcher,
 		DefaultQualifiedResource: userapi.Resource("groups"),
+
+		TableConvertor: printerstorage.TableConvertor{TablePrinter: printers.NewTablePrinter().With(printersinternal.AddHandlers)},
 
 		CreateStrategy: group.Strategy,
 		UpdateStrategy: group.Strategy,
 		DeleteStrategy: group.Strategy,
 	}
 
-	options := &generic.StoreOptions{RESTOptions: optsGetter, AttrFunc: group.GetAttrs}
+	options := &generic.StoreOptions{RESTOptions: optsGetter}
 	if err := store.CompleteWithOptions(options); err != nil {
 		return nil, err
 	}

@@ -9,10 +9,10 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/flowcontrol"
-	kapi "k8s.io/kubernetes/pkg/api"
 
-	"github.com/openshift/origin/pkg/client"
 	imageapi "github.com/openshift/origin/pkg/image/apis/image"
+	imageclient "github.com/openshift/origin/pkg/image/generated/internalclientset/typed/image/internalversion"
+	imageinformer "github.com/openshift/origin/pkg/image/generated/listers/image/internalversion"
 )
 
 type uniqueItem struct {
@@ -25,10 +25,10 @@ type ScheduledImageStreamController struct {
 	enabled bool
 
 	// image stream client
-	isNamespacer client.ImageStreamsNamespacer
+	client imageclient.ImageInterface
 
 	// lister can list/get image streams from a shared informer's cache
-	lister imageStreamLister
+	lister imageinformer.ImageStreamLister
 	// listerSynced makes sure the is store is synced before reconciling streams
 	listerSynced cache.InformerSynced
 
@@ -36,7 +36,7 @@ type ScheduledImageStreamController struct {
 	rateLimiter flowcontrol.RateLimiter
 
 	// scheduler for timely image re-imports
-	scheduler *Scheduler
+	scheduler *scheduler
 }
 
 // Importing is invoked when the controller decides to import a stream in order to push back
@@ -47,7 +47,11 @@ func (s *ScheduledImageStreamController) Importing(stream *imageapi.ImageStream)
 	}
 	glog.V(5).Infof("DEBUG: stream %s was just imported", stream.Name)
 	// Push the current key back to the end of the queue because it's just been imported
-	key, _ := cache.MetaNamespaceKeyFunc(stream)
+	key, err := cache.DeletionHandlingMetaNamespaceKeyFunc(stream)
+	if err != nil {
+		utilruntime.HandleError(fmt.Errorf("failed to get the key for stream %s: %v", stream.Name, err))
+		return
+	}
 	s.scheduler.Delay(key)
 }
 
@@ -92,17 +96,9 @@ func (s *ScheduledImageStreamController) updateImageStream(old, cur interface{})
 }
 
 func (s *ScheduledImageStreamController) deleteImageStream(obj interface{}) {
-	stream, isStream := obj.(*imageapi.ImageStream)
-	if !isStream {
-		tombstone, objIsTombstone := obj.(cache.DeletedFinalStateUnknown)
-		if !objIsTombstone {
-			return
-		}
-		stream, isStream = tombstone.Obj.(*imageapi.ImageStream)
-	}
-	key, err := cache.MetaNamespaceKeyFunc(stream)
+	key, err := cache.DeletionHandlingMetaNamespaceKeyFunc(obj)
 	if err != nil {
-		glog.V(2).Infof("unable to get namespace key function for stream %q: %v", stream, err)
+		utilruntime.HandleError(fmt.Errorf("unable to get namespace key for %#v", obj))
 		return
 	}
 	s.scheduler.Remove(key, nil)
@@ -114,9 +110,9 @@ func (s *ScheduledImageStreamController) enqueueImageStream(stream *imageapi.Ima
 		return
 	}
 	if needsScheduling(stream) {
-		key, err := cache.MetaNamespaceKeyFunc(stream)
+		key, err := cache.DeletionHandlingMetaNamespaceKeyFunc(stream)
 		if err != nil {
-			glog.V(2).Infof("unable to get namespace key function for stream %q: %v", stream, err)
+			glog.V(2).Infof("unable to get namespace key function for stream %s/%s: %v", stream.Namespace, stream.Name, err)
 			return
 		}
 		s.scheduler.Add(key, uniqueItem{uid: string(stream.UID), resourceVersion: stream.ResourceVersion})
@@ -163,15 +159,11 @@ func (s *ScheduledImageStreamController) syncTimedByName(namespace, name string)
 		return ErrNotImportable
 	}
 
-	copy, err := kapi.Scheme.DeepCopy(sharedStream)
-	if err != nil {
-		return err
-	}
-	stream := copy.(*imageapi.ImageStream)
+	stream := sharedStream.DeepCopy()
 	resetScheduledTags(stream)
 
 	glog.V(3).Infof("Scheduled import of stream %s/%s...", stream.Namespace, stream.Name)
-	return handleImageStream(stream, s.isNamespacer, nil)
+	return handleImageStream(stream, s.client, nil)
 }
 
 // resetScheduledTags artificially increments the generation on the tags that should be imported.

@@ -7,8 +7,13 @@ reviewers:
   - soltysh
   - jim-minter
   - knobunc
+  - ironcladlou
+  - squeed
   - dcbw
   - danwinship
+  - ericavonb
+  - mrogers950
+  - simo5
 approvers:
   - deads2k
   - smarterclayton
@@ -16,5 +21,7 @@ approvers:
   - enj
   - liggitt
   - knobunc
+  - ironcladlou
+  - squeed
   - dcbw
   - danwinship

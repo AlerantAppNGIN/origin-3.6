@@ -26,13 +26,12 @@ import (
 	. "github.com/onsi/gomega"
 	_ "github.com/stretchr/testify/assert"
 
+	"k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/uuid"
-	"k8s.io/kubernetes/pkg/api/v1"
-	"k8s.io/kubernetes/pkg/client/clientset_generated/clientset"
-	priorityutil "k8s.io/kubernetes/plugin/pkg/scheduler/algorithm/priorities/util"
+	clientset "k8s.io/client-go/kubernetes"
+	priorityutil "k8s.io/kubernetes/pkg/scheduler/algorithm/priorities/util"
 	"k8s.io/kubernetes/test/e2e/common"
 	"k8s.io/kubernetes/test/e2e/framework"
 	testutils "k8s.io/kubernetes/test/utils"
@@ -57,12 +56,11 @@ var podRequestedResource *v1.ResourceRequirements = &v1.ResourceRequirements{
 }
 
 // This test suite is used to verifies scheduler priority functions based on the default provider
-var _ = framework.KubeDescribe("SchedulerPriorities [Serial]", func() {
+var _ = SIGDescribe("SchedulerPriorities [Serial]", func() {
 	var cs clientset.Interface
 	var nodeList *v1.NodeList
 	var systemPodsNo int
 	var ns string
-	var masterNodes sets.String
 	f := framework.NewDefaultFramework("sched-priority")
 	ignoreLabels := framework.ImagePullerLabels
 
@@ -75,118 +73,12 @@ var _ = framework.KubeDescribe("SchedulerPriorities [Serial]", func() {
 		nodeList = &v1.NodeList{}
 
 		framework.WaitForAllNodesHealthy(cs, time.Minute)
-		masterNodes, nodeList = framework.GetMasterAndWorkerNodesOrDie(cs)
+		_, nodeList = framework.GetMasterAndWorkerNodesOrDie(cs)
 
 		err := framework.CheckTestingNSDeletedExcept(cs, ns)
 		framework.ExpectNoError(err)
-
 		err = framework.WaitForPodsRunningReady(cs, metav1.NamespaceSystem, int32(systemPodsNo), 0, framework.PodReadyBeforeTimeout, ignoreLabels)
 		Expect(err).NotTo(HaveOccurred())
-	})
-
-	It("Pod should be prefer scheduled to node that satisify the NodeAffinity", func() {
-		nodeName := GetNodeThatCanRunPod(f)
-		By("Trying to apply a label on the found node.")
-		k := fmt.Sprintf("kubernetes.io/e2e-%s", "node-topologyKey")
-		v := "topologyvalue"
-		framework.AddOrUpdateLabelOnNode(cs, nodeName, k, v)
-		framework.ExpectNodeHasLabel(cs, nodeName, k, v)
-		defer framework.RemoveLabelOffNode(cs, nodeName, k)
-
-		// make the nodes have balanced cpu,mem usage ratio
-		createBalancedPodForNodes(f, cs, ns, nodeList.Items, podRequestedResource, 0.6)
-		By("Trying to relaunch the pod, now with labels.")
-		labelPodName := "pod-with-node-affinity"
-		pod := createPausePod(f, pausePodConfig{
-			Name: labelPodName,
-			Affinity: &v1.Affinity{
-				NodeAffinity: &v1.NodeAffinity{
-					PreferredDuringSchedulingIgnoredDuringExecution: []v1.PreferredSchedulingTerm{
-						{
-							Preference: v1.NodeSelectorTerm{
-								MatchExpressions: []v1.NodeSelectorRequirement{
-									{
-										Key:      k,
-										Operator: v1.NodeSelectorOpIn,
-										Values:   []string{v},
-									},
-								},
-							},
-							Weight: 20,
-						},
-					},
-				},
-			},
-		})
-		By("Wait the pod becomes running.")
-		framework.ExpectNoError(f.WaitForPodRunning(pod.Name))
-		labelPod, err := cs.CoreV1().Pods(ns).Get(labelPodName, metav1.GetOptions{})
-		framework.ExpectNoError(err)
-		By("Verify the pod was scheduled to the expected node.")
-		Expect(labelPod.Spec.NodeName).To(Equal(nodeName))
-	})
-
-	It("Pod should be schedule to node that satisify the PodAffinity", func() {
-		By("Trying to launch a pod with a label to get a node which can launch it.")
-		pod := runPausePod(f, pausePodConfig{
-			Name:      "with-label-security-s1",
-			Labels:    map[string]string{"service": "S1"},
-			Resources: podRequestedResource,
-		})
-		nodeName := pod.Spec.NodeName
-
-		By("Trying to apply label on the found node.")
-		k := fmt.Sprintf("kubernetes.io/e2e-%s", "node-topologyKey")
-		v := "topologyvalue"
-		framework.AddOrUpdateLabelOnNode(cs, nodeName, k, v)
-		framework.ExpectNodeHasLabel(cs, nodeName, k, v)
-		defer framework.RemoveLabelOffNode(cs, nodeName, k)
-
-		// make the nodes have balanced cpu,mem usage
-		createBalancedPodForNodes(f, cs, ns, nodeList.Items, podRequestedResource, 0.6)
-
-		By("Trying to launch the pod, now with podAffinity.")
-		labelPodName := "pod-with-podaffinity"
-		pod = createPausePod(f, pausePodConfig{
-			Resources: podRequestedResource,
-			Name:      labelPodName,
-			Affinity: &v1.Affinity{
-				PodAffinity: &v1.PodAffinity{
-					PreferredDuringSchedulingIgnoredDuringExecution: []v1.WeightedPodAffinityTerm{
-						{
-							PodAffinityTerm: v1.PodAffinityTerm{
-								LabelSelector: &metav1.LabelSelector{
-									MatchExpressions: []metav1.LabelSelectorRequirement{
-										{
-											Key:      "service",
-											Operator: metav1.LabelSelectorOpIn,
-											Values:   []string{"S1", "value2"},
-										},
-										{
-											Key:      "service",
-											Operator: metav1.LabelSelectorOpNotIn,
-											Values:   []string{"S2"},
-										}, {
-											Key:      "service",
-											Operator: metav1.LabelSelectorOpExists,
-										},
-									},
-								},
-								TopologyKey: k,
-								Namespaces:  []string{ns},
-							},
-							Weight: 20,
-						},
-					},
-				},
-			},
-		})
-		By("Wait the pod becomes running.")
-		framework.ExpectNoError(f.WaitForPodRunning(pod.Name))
-		labelPod, err := cs.CoreV1().Pods(ns).Get(labelPodName, metav1.GetOptions{})
-		framework.ExpectNoError(err)
-		By("Verify the pod was scheduled to the expected node.")
-		Expect(labelPod.Spec.NodeName).To(Equal(nodeName))
 	})
 
 	It("Pod should be schedule to node that don't match the PodAntiAffinity terms", func() {
@@ -203,9 +95,9 @@ var _ = framework.KubeDescribe("SchedulerPriorities [Serial]", func() {
 		framework.AddOrUpdateLabelOnNode(cs, nodeName, k, v)
 		framework.ExpectNodeHasLabel(cs, nodeName, k, v)
 		defer framework.RemoveLabelOffNode(cs, nodeName, k)
-
 		// make the nodes have balanced cpu,mem usage
-		createBalancedPodForNodes(f, cs, ns, nodeList.Items, podRequestedResource, 0.6)
+		err := createBalancedPodForNodes(f, cs, ns, nodeList.Items, podRequestedResource, 0.6)
+		framework.ExpectNoError(err)
 		By("Trying to launch the pod with podAntiAffinity.")
 		labelPodName := "pod-with-pod-antiaffinity"
 		pod = createPausePod(f, pausePodConfig{
@@ -253,13 +145,14 @@ var _ = framework.KubeDescribe("SchedulerPriorities [Serial]", func() {
 	It("Pod should avoid to schedule to node that have avoidPod annotation", func() {
 		nodeName := nodeList.Items[0].Name
 		// make the nodes have balanced cpu,mem usage
-		createBalancedPodForNodes(f, cs, ns, nodeList.Items, podRequestedResource, 0.5)
+		err := createBalancedPodForNodes(f, cs, ns, nodeList.Items, podRequestedResource, 0.5)
+		framework.ExpectNoError(err)
 		By("Create a RC, with 0 replicas")
 		rc := createRC(ns, "scheduler-priority-avoid-pod", int32(0), map[string]string{"name": "scheduler-priority-avoid-pod"}, f, podRequestedResource)
 		// Cleanup the replication controller when we are done.
 		defer func() {
 			// Resize the replication controller to zero to get rid of pods.
-			if err := framework.DeleteRCAndPods(f.ClientSet, f.InternalClientset, f.Namespace.Name, rc.Name); err != nil {
+			if err := framework.DeleteRCAndPods(f.ClientSet, f.InternalClientset, f.ScalesGetter, f.Namespace.Name, rc.Name); err != nil {
 				framework.Logf("Failed to cleanup replication controller %v: %v.", rc.Name, err)
 			}
 		}()
@@ -301,7 +194,7 @@ var _ = framework.KubeDescribe("SchedulerPriorities [Serial]", func() {
 
 		By(fmt.Sprintf("Scale the RC: %s to len(nodeList.Item)-1 : %v.", rc.Name, len(nodeList.Items)-1))
 
-		framework.ScaleRC(f.ClientSet, f.InternalClientset, ns, rc.Name, uint(len(nodeList.Items)-1), true)
+		framework.ScaleRC(f.ClientSet, f.ScalesGetter, ns, rc.Name, uint(len(nodeList.Items)-1), true)
 		testPods, err := cs.CoreV1().Pods(ns).List(metav1.ListOptions{
 			LabelSelector: "name=scheduler-priority-avoid-pod",
 		})
@@ -314,7 +207,8 @@ var _ = framework.KubeDescribe("SchedulerPriorities [Serial]", func() {
 
 	It("Pod should perfer to scheduled to nodes pod can tolerate", func() {
 		// make the nodes have balanced cpu,mem usage ratio
-		createBalancedPodForNodes(f, cs, ns, nodeList.Items, podRequestedResource, 0.5)
+		err := createBalancedPodForNodes(f, cs, ns, nodeList.Items, podRequestedResource, 0.5)
+		framework.ExpectNoError(err)
 		//we need apply more taints on a node, because one match toleration only count 1
 		By("Trying to apply 10 taint on the nodes except first one.")
 		nodeName := nodeList.Items[0].Name
@@ -363,41 +257,41 @@ var _ = framework.KubeDescribe("SchedulerPriorities [Serial]", func() {
 })
 
 // createBalancedPodForNodes creates a pod per node that asks for enough resources to make all nodes have the same mem/cpu usage ratio.
-func createBalancedPodForNodes(f *framework.Framework, cs clientset.Interface, ns string, nodes []v1.Node, requestedResource *v1.ResourceRequirements, ratio float64) {
+func createBalancedPodForNodes(f *framework.Framework, cs clientset.Interface, ns string, nodes []v1.Node, requestedResource *v1.ResourceRequirements, ratio float64) error {
 	// find the max, if the node has the max,use the one, if not,use the ratio parameter
-	var maxCpuFraction, maxMemFraction float64 = ratio, ratio
+	var maxCPUFraction, maxMemFraction float64 = ratio, ratio
 	var cpuFractionMap = make(map[string]float64)
 	var memFractionMap = make(map[string]float64)
 	for _, node := range nodes {
 		cpuFraction, memFraction := computeCpuMemFraction(cs, node, requestedResource)
 		cpuFractionMap[node.Name] = cpuFraction
 		memFractionMap[node.Name] = memFraction
-		if cpuFraction > maxCpuFraction {
-			maxCpuFraction = cpuFraction
+		if cpuFraction > maxCPUFraction {
+			maxCPUFraction = cpuFraction
 		}
 		if memFraction > maxMemFraction {
 			maxMemFraction = memFraction
 		}
 	}
 	// we need the max one to keep the same cpu/mem use rate
-	ratio = math.Max(maxCpuFraction, maxMemFraction)
+	ratio = math.Max(maxCPUFraction, maxMemFraction)
 	for _, node := range nodes {
-		memAllocatable, found := node.Status.Allocatable["memory"]
+		memAllocatable, found := node.Status.Allocatable[v1.ResourceMemory]
 		Expect(found).To(Equal(true))
 		memAllocatableVal := memAllocatable.Value()
 
-		cpuAllocatable, found := node.Status.Allocatable["cpu"]
+		cpuAllocatable, found := node.Status.Allocatable[v1.ResourceCPU]
 		Expect(found).To(Equal(true))
 		cpuAllocatableMil := cpuAllocatable.MilliValue()
 
 		needCreateResource := v1.ResourceList{}
 		cpuFraction := cpuFractionMap[node.Name]
 		memFraction := memFractionMap[node.Name]
-		needCreateResource["cpu"] = *resource.NewMilliQuantity(int64((ratio-cpuFraction)*float64(cpuAllocatableMil)), resource.DecimalSI)
+		needCreateResource[v1.ResourceCPU] = *resource.NewMilliQuantity(int64((ratio-cpuFraction)*float64(cpuAllocatableMil)), resource.DecimalSI)
 
-		needCreateResource["memory"] = *resource.NewQuantity(int64((ratio-memFraction)*float64(memAllocatableVal)), resource.BinarySI)
+		needCreateResource[v1.ResourceMemory] = *resource.NewQuantity(int64((ratio-memFraction)*float64(memAllocatableVal)), resource.BinarySI)
 
-		testutils.StartPods(cs, 1, ns, "priority-balanced-mem-"+node.Name,
+		err := testutils.StartPods(cs, 1, ns, string(uuid.NewUUID()),
 			*initPausePod(f, pausePodConfig{
 				Name:   "",
 				Labels: balancePodLabel,
@@ -407,12 +301,18 @@ func createBalancedPodForNodes(f *framework.Framework, cs clientset.Interface, n
 				},
 				NodeName: node.Name,
 			}), true, framework.Logf)
+
+		if err != nil {
+			return err
+		}
 	}
+
 	for _, node := range nodes {
 		By("Compute Cpu, Mem Fraction after create balanced pods.")
 		computeCpuMemFraction(cs, node, requestedResource)
-
 	}
+
+	return nil
 }
 
 func computeCpuMemFraction(cs clientset.Interface, node v1.Node, resource *v1.ResourceRequirements) (float64, float64) {
@@ -430,12 +330,12 @@ func computeCpuMemFraction(cs clientset.Interface, node v1.Node, resource *v1.Re
 			totalRequestedMemResource += getNonZeroRequests(&pod).Memory
 		}
 	}
-	cpuAllocatable, found := node.Status.Allocatable["cpu"]
+	cpuAllocatable, found := node.Status.Allocatable[v1.ResourceCPU]
 	Expect(found).To(Equal(true))
 	cpuAllocatableMil := cpuAllocatable.MilliValue()
 
 	cpuFraction := float64(totalRequestedCpuResource) / float64(cpuAllocatableMil)
-	memAllocatable, found := node.Status.Allocatable["memory"]
+	memAllocatable, found := node.Status.Allocatable[v1.ResourceMemory]
 	Expect(found).To(Equal(true))
 	memAllocatableVal := memAllocatable.Value()
 	memFraction := float64(totalRequestedMemResource) / float64(memAllocatableVal)

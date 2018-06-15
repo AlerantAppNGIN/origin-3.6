@@ -16,14 +16,19 @@ function os::build::version::get_vars() {
 		fi
 		os::log::warning "No version file at ${OS_VERSION_FILE}, falling back to git versions"
 	fi
-	os::build::version::openshift_vars
-	os::build::version::kubernetes_vars
-	os::build::version::etcd_vars
+	os::build::version::git_vars
 }
 readonly -f os::build::version::get_vars
 
-# os::build::version::openshift_vars looks up the current Git vars
-function os::build::version::openshift_vars() {
+# os::build::version::git_vars looks up the current Git vars if they have not been calculated.
+function os::build::version::git_vars() {
+	if [[ -n "${OS_GIT_VERSION-}" ]]; then
+		return 0
+ 	fi
+
+	os::build::version::kubernetes_vars
+	os::build::version::etcd_vars
+
 	local git=(git --work-tree "${OS_ROOT}")
 
 	if [[ -n ${OS_GIT_COMMIT-} ]] || OS_GIT_COMMIT=$("${git[@]}" rev-parse --short "HEAD^{commit}" 2>/dev/null); then
@@ -64,7 +69,7 @@ function os::build::version::openshift_vars() {
 		fi
 	fi
 }
-readonly -f os::build::version::openshift_vars
+readonly -f os::build::version::git_vars
 
 function os::build::version::etcd_vars() {
 	ETCD_GIT_VERSION=$(go run "${OS_ROOT}/tools/godepversion/godepversion.go" "${OS_ROOT}/Godeps/Godeps.json" "github.com/coreos/etcd/etcdserver" "comment")
@@ -89,30 +94,24 @@ function os::build::version::kubernetes_vars() {
 	# Try to match the "git describe" output to a regex to try to extract
 	# the "major" and "minor" versions and whether this is the exact tagged
 	# version or whether the tree is between two tagged versions.
-	if [[ "${KUBE_GIT_VERSION}" =~ ^v([0-9]+)\.([0-9]+)(\.[0-9]+)*([-].*)?$ ]]; then
+	if [[ "${KUBE_GIT_VERSION}" =~ ^v([0-9]+)\.([0-9]+)\. ]]; then
 		KUBE_GIT_MAJOR=${BASH_REMATCH[1]}
-		KUBE_GIT_MINOR=${BASH_REMATCH[2]}
-		if [[ -n "${BASH_REMATCH[4]}" ]]; then
-			KUBE_GIT_MINOR+="+"
-		fi
+		KUBE_GIT_MINOR="${BASH_REMATCH[2]}+"
 	fi
 }
 readonly -f os::build::version::kubernetes_vars
 
 # Saves the environment flags to $1
 function os::build::version::save_vars() {
-	local version_file=${1-}
-	if [[ -z ${version_file} ]]; then
-		os::log::fatal "No file specified as an argument to os::build::version::save_vars"
-	fi
-
-	cat <<EOF >"${version_file}"
+	cat <<EOF
 OS_GIT_COMMIT='${OS_GIT_COMMIT-}'
 OS_GIT_TREE_STATE='${OS_GIT_TREE_STATE-}'
 OS_GIT_VERSION='${OS_GIT_VERSION-}'
 OS_GIT_MAJOR='${OS_GIT_MAJOR-}'
 OS_GIT_MINOR='${OS_GIT_MINOR-}'
 OS_GIT_PATCH='${OS_GIT_PATCH-}'
+KUBE_GIT_MAJOR='${KUBE_GIT_MAJOR-}'
+KUBE_GIT_MINOR='${KUBE_GIT_MINOR-}'
 KUBE_GIT_COMMIT='${KUBE_GIT_COMMIT-}'
 KUBE_GIT_VERSION='${KUBE_GIT_VERSION-}'
 ETCD_GIT_VERSION='${ETCD_GIT_VERSION-}'

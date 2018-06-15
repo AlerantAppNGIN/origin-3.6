@@ -5,9 +5,10 @@ import (
 	"k8s.io/apiserver/pkg/registry/generic"
 	"k8s.io/apiserver/pkg/registry/generic/registry"
 	"k8s.io/apiserver/pkg/registry/rest"
-	"k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/registry/cachesize"
+	"k8s.io/kubernetes/pkg/printers"
+	printerstorage "k8s.io/kubernetes/pkg/printers/storage"
 
+	printersinternal "github.com/openshift/origin/pkg/printers/internalversion"
 	securityapi "github.com/openshift/origin/pkg/security/apis/security"
 	"github.com/openshift/origin/pkg/security/registry/securitycontextconstraints"
 )
@@ -18,11 +19,16 @@ type REST struct {
 }
 
 var _ rest.StandardStorage = &REST{}
+var _ rest.ShortNamesProvider = &REST{}
+
+// ShortNames implements the ShortNamesProvider interface. Returns a list of short names for a resource.
+func (r *REST) ShortNames() []string {
+	return []string{"scc"}
+}
 
 // NewREST returns a RESTStorage object that will work against security context constraints objects.
 func NewREST(optsGetter generic.RESTOptionsGetter) *REST {
 	store := &registry.Store{
-		Copier:      api.Scheme,
 		NewFunc:     func() runtime.Object { return &securityapi.SecurityContextConstraints{} },
 		NewListFunc: func() runtime.Object { return &securityapi.SecurityContextConstraintsList{} },
 		ObjectNameFunc: func(obj runtime.Object) (string, error) {
@@ -30,7 +36,8 @@ func NewREST(optsGetter generic.RESTOptionsGetter) *REST {
 		},
 		PredicateFunc:            securitycontextconstraints.Matcher,
 		DefaultQualifiedResource: securityapi.Resource("securitycontextconstraints"),
-		WatchCacheSize:           cachesize.GetWatchCacheSizeByResource("securitycontextconstraints"),
+
+		TableConvertor: printerstorage.TableConvertor{TablePrinter: printers.NewTablePrinter().With(printersinternal.AddHandlers)},
 
 		CreateStrategy:      securitycontextconstraints.Strategy,
 		UpdateStrategy:      securitycontextconstraints.Strategy,
@@ -44,7 +51,11 @@ func NewREST(optsGetter generic.RESTOptionsGetter) *REST {
 	return &REST{store}
 }
 
-// ShortNames implements the ShortNamesProvider interface. Returns a list of short names for a resource.
-func (r *REST) ShortNames() []string {
-	return []string{"scc"}
+// LegacyREST allows us to wrap and alter some behavior
+type LegacyREST struct {
+	*REST
+}
+
+func (r *LegacyREST) Categories() []string {
+	return []string{}
 }

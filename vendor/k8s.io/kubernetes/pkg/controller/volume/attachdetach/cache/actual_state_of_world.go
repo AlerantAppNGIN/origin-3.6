@@ -28,11 +28,11 @@ import (
 
 	"github.com/golang/glog"
 
+	"k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/kubernetes/pkg/api/v1"
 	"k8s.io/kubernetes/pkg/volume"
+	"k8s.io/kubernetes/pkg/volume/util"
 	"k8s.io/kubernetes/pkg/volume/util/operationexecutor"
-	"k8s.io/kubernetes/pkg/volume/util/volumehelper"
 )
 
 // ActualStateOfWorld defines a set of thread-safe operations supported on
@@ -68,12 +68,12 @@ type ActualStateOfWorld interface {
 	// returned.
 	// If no node with the name nodeName exists in list of attached nodes for
 	// the specified volume, an error is returned.
-	SetVolumeMountedByNode(volumeName v1.UniqueVolumeName, nodeName types.NodeName, mounted bool, forceUnmount bool) error
+	SetVolumeMountedByNode(volumeName v1.UniqueVolumeName, nodeName types.NodeName, mounted bool) error
 
 	// SetNodeStatusUpdateNeeded sets statusUpdateNeeded for the specified
 	// node to true indicating the AttachedVolume field in the Node's Status
 	// object needs to be updated by the node updater again.
-	// If the specifed node does not exist in the nodesToUpdateStatusFor list,
+	// If the specified node does not exist in the nodesToUpdateStatusFor list,
 	// log the error and return
 	SetNodeStatusUpdateNeeded(nodeName types.NodeName)
 
@@ -125,18 +125,14 @@ type ActualStateOfWorld interface {
 
 	// GetNodesToUpdateStatusFor returns the map of nodeNames to nodeToUpdateStatusFor
 	GetNodesToUpdateStatusFor() map[types.NodeName]nodeToUpdateStatusFor
-
-	// Removes the given node from the record of attach updates. The node's entire
-	// volumesToReportAsAttached list is removed.
-	RemoveNodeFromAttachUpdates(nodeName types.NodeName) error
 }
 
 // AttachedVolume represents a volume that is attached to a node.
 type AttachedVolume struct {
 	operationexecutor.AttachedVolume
 
-	// MountedByNode indicates that this volume has been been mounted by the
-	// node and is unsafe to detach.
+	// MountedByNode indicates that this volume has been mounted by the node and
+	// is unsafe to detach.
 	// The value is set and unset by SetVolumeMountedByNode(...).
 	MountedByNode bool
 
@@ -177,7 +173,7 @@ type actualStateOfWorld struct {
 	sync.RWMutex
 }
 
-// The volume object represents a volume the the attach/detach controller
+// The volume object represents a volume the attach/detach controller
 // believes to be successfully attached to a node it is managing.
 type attachedVolume struct {
 	// volumeName contains the unique identifier for this volume.
@@ -264,19 +260,6 @@ func (asw *actualStateOfWorld) AddVolumeToReportAsAttached(
 	asw.addVolumeToReportAsAttached(volumeName, nodeName)
 }
 
-func (asw *actualStateOfWorld) RemoveNodeFromAttachUpdates(nodeName types.NodeName) error {
-	asw.Lock()
-	defer asw.Unlock()
-
-	_, nodeToUpdateExists := asw.nodesToUpdateStatusFor[nodeName]
-	if nodeToUpdateExists {
-		delete(asw.nodesToUpdateStatusFor, nodeName)
-		return nil
-	}
-	return fmt.Errorf("node %q does not exist in volumesToReportAsAttached list",
-		nodeName)
-}
-
 func (asw *actualStateOfWorld) AddVolumeNode(
 	uniqueName v1.UniqueVolumeName, volumeSpec *volume.Spec, nodeName types.NodeName, devicePath string) (v1.UniqueVolumeName, error) {
 	asw.Lock()
@@ -292,7 +275,7 @@ func (asw *actualStateOfWorld) AddVolumeNode(
 				err)
 		}
 
-		volumeName, err = volumehelper.GetUniqueVolumeNameFromSpec(
+		volumeName, err = util.GetUniqueVolumeNameFromSpec(
 			attachableVolumePlugin, volumeSpec)
 		if err != nil {
 			return "", fmt.Errorf(
@@ -348,7 +331,7 @@ func (asw *actualStateOfWorld) AddVolumeNode(
 }
 
 func (asw *actualStateOfWorld) SetVolumeMountedByNode(
-	volumeName v1.UniqueVolumeName, nodeName types.NodeName, mounted bool, forceUnmount bool) error {
+	volumeName v1.UniqueVolumeName, nodeName types.NodeName, mounted bool) error {
 	asw.Lock()
 	defer asw.Unlock()
 
@@ -360,11 +343,6 @@ func (asw *actualStateOfWorld) SetVolumeMountedByNode(
 	if mounted {
 		// Increment set count
 		nodeObj.mountedByNodeSetCount = nodeObj.mountedByNodeSetCount + 1
-	} else {
-		// Do not allow value to be reset unless it has been set at least once
-		if nodeObj.mountedByNodeSetCount == 0 && !forceUnmount {
-			return nil
-		}
 	}
 
 	nodeObj.mountedByNode = mounted
@@ -489,15 +467,14 @@ func (asw *actualStateOfWorld) addVolumeToReportAsAttached(
 
 // Update the flag statusUpdateNeeded to indicate whether node status is already updated or
 // needs to be updated again by the node status updater.
-// If the specifed node does not exist in the nodesToUpdateStatusFor list, log the error and return
+// If the specified node does not exist in the nodesToUpdateStatusFor list, log the error and return
 // This is an internal function and caller should acquire and release the lock
 func (asw *actualStateOfWorld) updateNodeStatusUpdateNeeded(nodeName types.NodeName, needed bool) error {
 	nodeToUpdate, nodeToUpdateExists := asw.nodesToUpdateStatusFor[nodeName]
 	if !nodeToUpdateExists {
 		// should not happen
-		errMsg := fmt.Sprintf("Failed to set statusUpdateNeeded to needed %t because nodeName=%q  does not exist",
+		errMsg := fmt.Sprintf("Failed to set statusUpdateNeeded to needed %t, because nodeName=%q does not exist",
 			needed, nodeName)
-		glog.Errorf(errMsg)
 		return fmt.Errorf(errMsg)
 	}
 
@@ -511,7 +488,7 @@ func (asw *actualStateOfWorld) SetNodeStatusUpdateNeeded(nodeName types.NodeName
 	asw.Lock()
 	defer asw.Unlock()
 	if err := asw.updateNodeStatusUpdateNeeded(nodeName, true); err != nil {
-		glog.Errorf("Failed to update statusUpdateNeeded field in actual state of world: %v", err)
+		glog.Warningf("Failed to update statusUpdateNeeded field in actual state of world: %v", err)
 	}
 }
 

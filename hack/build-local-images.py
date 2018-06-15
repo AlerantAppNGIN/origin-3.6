@@ -7,8 +7,8 @@ from subprocess import call
 from tempfile import mkdtemp
 
 from atexit import register
-from os import getenv, listdir, mkdir, remove
-from os.path import abspath, dirname, exists, isdir, join
+from os import getenv, mkdir, remove
+from os.path import abspath, dirname, isdir, join
 
 if len(sys.argv) > 1 and sys.argv[1] in ['-h', '--h', '-help', '--help']:
     print """Quickly re-build images depending on OpenShift Origin build artifacts.
@@ -31,8 +31,8 @@ Usage:
   of the image (e.g. openshift3/ose-haproxy-router) or the name sans prefix
   (e.g. haproxy-router).
 
-  The following environment veriables are honored by this script:
-   - $OS_IMAGE_PREFIX: one of [openshift/origin, openshift3/ose]
+  The following environment variables are honored by this script:
+   - $OS_IMAGE_PREFIX: one of [openshift/origin, docker.io/openshift/origin, openshift3/ose]
    - $OS_DEBUG: if set, debugging information will be printed
 
 Examples:
@@ -51,17 +51,46 @@ Options:
     exit(2)
 
 os_image_prefix = getenv("OS_IMAGE_PREFIX", "openshift/origin")
-image_namespace, image_prefix = os_image_prefix.split("/", 2)
+image_namespace, _, image_prefix = os_image_prefix.rpartition("/")
 
+# "enable_default: True" can be added to skip the image build
+# with no arguments
 image_config = {
-    image_prefix: {
+    "cli": {
+        "tag": "latest",
+        "directory": "cli",
+        "binaries": {
+            "oc": "/usr/bin/oc",
+        },
+        "files": {}
+    },
+    "control-plane": {
+        "tag": "latest",
         "directory": "origin",
         "binaries": {
-            "openshift": "/usr/bin/openshift"
+            "openshift": "/usr/bin/openshift",
+            "oc": "/usr/bin/oc",
+        },
+        "files": {}
+    },
+    "hyperkube": {
+        "tag": "latest",
+        "directory": "hyperkube",
+        "binaries": {
+            "hyperkube": "/usr/bin/hyperkube",
+        },
+        "files": {}
+    },
+    "hypershift": {
+        "tag": "latest",
+        "directory": "hypershift",
+        "binaries": {
+            "hypershift": "/usr/bin/hypershift",
         },
         "files": {}
     },
     "deployer": {
+        "tag": "latest",
         "directory": "deployer",
         "binaries": {
             "openshift": "/usr/bin/openshift"
@@ -69,6 +98,7 @@ image_config = {
         "files": {}
     },
     "recycler": {
+        "tag": "latest",
         "directory": "recycler",
         "binaries": {
             "openshift": "/usr/bin/openshift"
@@ -76,27 +106,33 @@ image_config = {
         "files": {}
     },
     "docker-builder": {
+        "tag": "latest",
         "directory": "builder/docker/docker-builder",
         "binaries": {
             "openshift": "/usr/bin/openshift"
         },
         "files": {}
     },
-    "sti-builder": {
-        "directory": "builder/docker/sti-builder",
-        "binaries": {
-            "openshift": "/usr/bin/openshift"
-        },
-        "files": {}
-    },
     "f5-router": {
+        "tag": "latest",
         "directory": "router/f5",
         "binaries": {
             "openshift": "/usr/bin/openshift"
         },
         "files": {}
     },
+    "nginx-router": {
+        "tag": "latest",
+        "directory": "router/nginx",
+        "binaries": {
+            "openshift": "/usr/bin/openshift"
+        },
+        "files": {
+            ".": "/var/lib/nginx"
+        }
+    },
     "haproxy-router": {
+        "tag": "latest",
         "directory": "router/haproxy",
         "binaries": {
             "openshift": "/usr/bin/openshift"
@@ -106,6 +142,7 @@ image_config = {
         }
     },
     "keepalived-ipfailover": {
+        "tag": "latest",
         "directory": "ipfailover/keepalived",
         "binaries": {
             "openshift": "/usr/bin/openshift"
@@ -115,19 +152,23 @@ image_config = {
         }
     },
     "node": {
+        "tag": "latest",
         "directory": "node",
         "binaries": {
-            "openshift": "/usr/bin/openshift"
+            "openshift": "/usr/bin/openshift",
+            "openshift-node-config": "/usr/bin/openshift-node-config",
+            "hyperkube": "/usr/bin/hyperkube"
         },
         "files": {}
     },
-    "openvswitch": {
-        "directory": "openvswitch",
+    "template-service-broker": {
+        "tag": "latest",
+        "directory": "template-service-broker",
         "binaries": {
-            "openshift": "/usr/bin/openshift"
+            "template-service-broker": "/usr/bin/template-service-broker"
         },
         "files": {}
-    }
+    },
 }
 
 
@@ -138,12 +179,9 @@ def image_rebuild_requested(image):
     suffix explicitly or does not provide
     any explicit requests.
     """
-    return len(sys.argv) == 1 or (
-        len(sys.argv) > 1 and (
-            image in sys.argv or
-            full_name(image) in sys.argv
-        )
-    )
+    implicitly_triggered = len(sys.argv) == 1 and image_config[image].get("enable_default", True)
+    explicitly_triggered = len(sys.argv) > 1 and (image in sys.argv or full_name(image) in sys.argv)
+    return implicitly_triggered or explicitly_triggered
 
 
 def full_name(image):
@@ -152,9 +190,6 @@ def full_name(image):
     the image namespace as well as the pre-
     fix, if applicable.
     """
-    if image in ["node", "openvswitch", image_prefix]:
-        return "{}/{}".format(image_namespace, image)
-
     return "{}/{}-{}".format(image_namespace, image_prefix, image)
 
 
@@ -166,10 +201,10 @@ def add_to_context(context_dir, source, destination, container_destination):
     sytem at the correct destination.
     """
     debug("Adding file:\n\tfrom {}\n\tto {}\n\tincluding in container at {}".format(
-    	source,
-    	join(context_dir, destination),
-		container_destination)
-   	)
+        source,
+        join(context_dir, destination),
+        container_destination)
+    )
     absolute_destination = abspath(join(context_dir, destination))
     if isdir(source):
         dir_util.copy_tree(source, absolute_destination)
@@ -185,7 +220,6 @@ def debug(message):
 
 
 os_root = abspath(join(dirname(__file__), ".."))
-os_bin_path = join(os_root, "_output", "local", "bin", "linux", "amd64")
 os_image_path = join(os_root, "images")
 
 context_dir = mkdtemp()
@@ -203,10 +237,17 @@ for image in image_config:
     build_occurred = True
     print "[INFO] Building {}...".format(image)
     with open(join(context_dir, "Dockerfile"), "w+") as dockerfile:
-        dockerfile.write("FROM {}\n".format(full_name(image)))
+        dockerfile.write("FROM {}:{}\n".format(full_name(image), image_config[image]["tag"]))
 
+
+    binary_dir_args = ["_output", "local", "bin", "linux", "amd64"]
     config = image_config[image]
     for binary in config.get("binaries", []):
+        if "vendor_dir" in config:
+            os_bin_path = join(os_root, config.get("vendor_dir"), *binary_dir_args)
+        else:
+            os_bin_path = join(os_root, *binary_dir_args)
+
         add_to_context(
             context_dir,
             source=join(os_bin_path, binary),

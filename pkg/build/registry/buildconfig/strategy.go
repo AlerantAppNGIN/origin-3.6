@@ -1,18 +1,13 @@
 package buildconfig
 
 import (
-	"fmt"
-
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/fields"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	apirequest "k8s.io/apiserver/pkg/endpoints/request"
 	"k8s.io/apiserver/pkg/registry/rest"
-	kstorage "k8s.io/apiserver/pkg/storage"
 	"k8s.io/apiserver/pkg/storage/names"
-	kapi "k8s.io/kubernetes/pkg/api"
+	"k8s.io/kubernetes/pkg/api/legacyscheme"
 
 	buildapi "github.com/openshift/origin/pkg/build/apis/build"
 	"github.com/openshift/origin/pkg/build/apis/build/validation"
@@ -24,12 +19,12 @@ var (
 	// This differs from the LegacyStrategy in that on create it will set a default build
 	// pruning limit value for both successful and failed builds.  This is new behavior that
 	// can only be introduced to users consuming the new group based api.
-	GroupStrategy = groupStrategy{strategy{kapi.Scheme, names.SimpleNameGenerator}}
+	GroupStrategy = groupStrategy{strategy{legacyscheme.Scheme, names.SimpleNameGenerator}}
 
 	// LegacyStrategy is the default logic that applies when creating BuildConfig objects.
 	// Specifically it will not set the default build pruning limit values because that was not
 	// part of the legacy api.
-	LegacyStrategy = legacyStrategy{strategy{kapi.Scheme, names.SimpleNameGenerator}}
+	LegacyStrategy = legacyStrategy{strategy{legacyscheme.Scheme, names.SimpleNameGenerator}}
 )
 
 // strategy implements most of the behavior for BuildConfig objects
@@ -120,27 +115,11 @@ func (s legacyStrategy) PrepareForCreate(ctx apirequest.Context, obj runtime.Obj
 
 }
 
+var _ rest.GarbageCollectionDeleteStrategy = legacyStrategy{}
+
 // DefaultGarbageCollectionPolicy for legacy buildconfigs will orphan dependents.
-func (s legacyStrategy) DefaultGarbageCollectionPolicy() rest.GarbageCollectionPolicy {
+func (s legacyStrategy) DefaultGarbageCollectionPolicy(ctx apirequest.Context) rest.GarbageCollectionPolicy {
 	return rest.OrphanDependents
-}
-
-// GetAttrs returns labels and fields of a given object for filtering purposes
-func GetAttrs(obj runtime.Object) (labels.Set, fields.Set, bool, error) {
-	buildConfig, ok := obj.(*buildapi.BuildConfig)
-	if !ok {
-		return nil, nil, false, fmt.Errorf("not a BuildConfig")
-	}
-	return labels.Set(buildConfig.ObjectMeta.Labels), buildapi.BuildConfigToSelectableFields(buildConfig), buildConfig.Initializers != nil, nil
-}
-
-// Matcher returns a generic matcher for a given label and field selector.
-func Matcher(label labels.Selector, field fields.Selector) kstorage.SelectionPredicate {
-	return kstorage.SelectionPredicate{
-		Label:    label,
-		Field:    field,
-		GetAttrs: GetAttrs,
-	}
 }
 
 // CheckGracefulDelete allows a build config to be gracefully deleted.
